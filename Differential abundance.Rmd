@@ -1,0 +1,2061 @@
+---
+title: "Differential abundance"
+author: "BH"
+date: "2025-07-31"
+output: html_document
+---
+
+```{r}
+##We will perform differential abundance with maaslin2
+
+##Will use physeq_no_growout3_css created in "Beta diversity.Rmd"
+
+```
+
+```{r}
+#library(Maaslin2)
+
+# 1) Extract & prepare tables (CSS counts already in phyloseq)
+prep <- function(phy) {
+  df_raw     <- as.data.frame(otu_table(phy))
+  df_round   <- df_raw
+  df_round[] <- lapply(df_round, round)    # integerize for count models
+  meta       <- as(sample_data(phy), "data.frame")
+  list(raw=df_raw, round=df_round, meta=meta)
+}
+
+# subset by growout
+phy_g1 <- subset_samples(physeq_no_growout3_css, Growout=="1")
+phy_g2 <- subset_samples(physeq_no_growout3_css, Growout=="2")
+
+dat1 <- prep(phy_g1)
+dat2 <- prep(phy_g2)
+
+# 2) Define the eight model‐specs
+models <- expand.grid(
+  growout = c("g1","g2"),
+  dtype   = c("raw","round"),
+  method  = c("ZINB","NEGBIN"),
+  stringsAsFactors = FALSE
+)
+
+# 3) Loop over them
+for (i in seq_len(nrow(models))) {
+  mm    <- models[i,]
+  dat   <- if (mm$growout=="g1") dat1 else dat2
+  data  <- dat[[ mm$dtype ]]
+  meta  <- dat$meta
+
+  outdir <- sprintf("mas_%s_%s_%s", 
+                    mm$growout, mm$dtype, tolower(mm$method))
+  
+  message("Running ", mm$method, " on ", mm$growout, "/", mm$dtype, " -> ", outdir)
+  
+  Maaslin2(
+    input_data      = data,
+    input_metadata  = meta,
+    output          = outdir,
+    fixed_effects   = c("Treatment","Position"),
+    reference = c('Treatment', 'Control'),
+    random_effects  = "House",
+    normalization   = "NONE",           # CSS already applied
+    transform       = "NONE",           # GLM link handles scale
+    analysis_method = mm$method,        # "ZINB" or "NEGBIN"
+    min_prevalence  = 0.25
+  )
+}
+
+```
+
+```{r}
+##Now for the collective dataset
+
+## ---- 1) Prep: relabel Growout to G1/G2 (no factors) ----
+prep_all_css <- function(phy) {
+  # MaAsLin2 expects features in rows, samples in cols
+  X <- as.data.frame(otu_table(phy))
+  if (!taxa_are_rows(phy)) X <- as.data.frame(t(X))
+
+  meta <- as(sample_data(phy), "data.frame")
+
+  # Keep only growouts 1 & 2 if present
+  keep <- as.character(meta$Growout) %in% c("1","2")
+  meta <- meta[keep, , drop = FALSE]
+  X    <- X[, rownames(meta), drop = FALSE]
+
+  # Integerized copy for count models
+  X_round <- X
+  X_round[] <- lapply(X_round, function(z) as.numeric(round(z, 0)))
+
+  # Leave Treatment/Position/House as-is (no factor casting)
+  list(raw = X, round = X_round, meta = meta)
+}
+
+dat_all_css <- prep_all_css(physeq_no_growout3_css)
+
+## ---- 2) Joint model specs ----
+models_all <- expand.grid(
+  dtype  = c("raw","round"),
+  method = c("NEGBIN","ZINB"),
+  stringsAsFactors = FALSE
+)
+
+## ---- 3) Run MaAsLin2 jointly
+for (i in seq_len(nrow(models_all))) {
+  mm   <- models_all[i, ]
+  X    <- dat_all_css[[ mm$dtype ]]
+  meta <- dat_all_css$meta
+
+  # Align samples
+  common <- intersect(colnames(X), rownames(meta))
+  X      <- X[, common, drop = FALSE]
+  meta   <- meta[common, , drop = FALSE]
+
+  outdir <- sprintf("mas_all_%s_%s", mm$dtype, tolower(mm$method))
+  message("Running joint MaAsLin2: ", mm$method, " on ", mm$dtype, " -> ", outdir)
+
+  Maaslin2(
+    input_data      = X,
+    input_metadata  = meta,
+    output          = outdir,
+    fixed_effects   = c("Treatment","Position","Growout"),
+    reference       = c("Treatment","Control",
+                        "Position","A",
+                        "Growout","G1"),
+    random_effects  = "House",
+    normalization   = "NONE",
+    transform       = "NONE",
+    analysis_method = mm$method,
+    min_prevalence  = 0.25,
+    plot_heatmap    = FALSE,
+    plot_scatter    = FALSE
+  )
+}
+
+
+```
+
+```{r}
+## ===== 1) Base analysis directory =====
+base_dir <- "/Users/brett/Documents/DeQueen_Litter/DeQueen litter analysis"
+
+## ===== 2) Get list of relevant species-level runs =====
+wanted_species <- c(
+  # per-growout (existing 8)
+  "mas_g1_raw_zinb",
+  "mas_g1_raw_negbin",
+  "mas_g1_round_zinb",
+  "mas_g1_round_negbin",
+  "mas_g2_raw_zinb",
+  "mas_g2_raw_negbin",
+  "mas_g2_round_zinb",
+  "mas_g2_round_negbin",
+  # collective (new 4)
+  "mas_all_raw_zinb",
+  "mas_all_raw_negbin",
+  "mas_all_round_zinb",
+  "mas_all_round_negbin"
+)
+
+## ===== 3) Build full paths and error if any are missing =====
+mas_dirs_species <- file.path(base_dir, wanted_species)
+missing_dirs <- mas_dirs_species[!dir.exists(mas_dirs_species)]
+if (length(missing_dirs)) {
+  stop("Missing these species-level runs:\n", paste(missing_dirs, collapse = "\n"))
+}
+
+## ===== 4) Read each all_results.tsv into a named list (force `value` -> character) =====
+all_results_species <- lapply(mas_dirs_species, function(dir) {
+  tsv <- file.path(dir, "all_results.tsv")
+  if (!file.exists(tsv)) stop("Missing all_results.tsv in ", dir)
+  
+  # **FIX:** Use read_tsv with explicit col_types to handle mixed data types
+  # This is the most robust way to ensure consistency
+  df <- readr::read_tsv(tsv, col_types = cols(.default = col_guess(), value = col_character()))
+
+  # A more targeted conversion for other columns that should be numeric
+  for (nm in c("coef","stderr","pval","qval","N","N.not.0")) {
+    if (nm %in% names(df)) suppressWarnings(df[[nm]] <- as.numeric(df[[nm]]))
+  }
+
+  # Keep track of the run
+  df$Run <- basename(dir)
+  df
+})
+names(all_results_species) <- wanted_species
+
+## ===== 5) Combine into one big data.frame =====
+combined_results <- dplyr::bind_rows(all_results_species)
+
+combined_results_enriched <- combined_results %>%
+  # be safe about numeric types
+  mutate(
+    qval = suppressWarnings(as.numeric(qval)),
+    coef = suppressWarnings(as.numeric(coef))
+  ) %>%
+  # 1) break Run (e.g., "mas_g1_raw_zinb" or "mas_all_raw_negbin") into 4 parts
+  separate(
+    col    = Run,
+    into   = c("mas", "Growout_code", "Data", "Method"),
+    sep    = "_",
+    remove = FALSE
+  ) %>%
+  # 2) derive the real columns
+  mutate(
+    Growout = case_when(
+      Growout_code == "g1"  ~ "1",
+      Growout_code == "g2"  ~ "2",
+      Growout_code == "all" ~ "Collective",
+      TRUE                  ~ Growout_code
+    ),
+    Rounded = if_else(Data == "raw", "Not rounded", "Rounded"),
+    Model   = case_when(
+      tolower(Method) == "zinb"   ~ "ZINB",
+      tolower(Method) == "negbin" ~ "Negative Binomial",
+      tolower(Method) == "lm"     ~ "LM",
+      tolower(Method) == "cplm"   ~ "CPLM",
+      TRUE                        ~ Method
+    ),
+    Network = paste(Growout, Model, Rounded, sep = "-")
+  ) %>%
+  # 3) apply significance filter
+  filter(!is.na(qval), qval <= 0.05) %>%
+  # 4) MaAsLin2-style signed significance score
+  mutate(significance = -log(qval) * sign(coef)) %>%
+  # (optionally drop the helper cols)
+  dplyr::select(-mas, -Growout_code, -Data, -Method)
+
+# take a peek
+head(combined_results_enriched)
+
+## Filter to Treatment results only
+treatment_results <- combined_results_enriched %>%
+  filter(metadata == "Treatment") %>%
+  mutate(Level = "Species")
+
+```
+
+```{r}
+##Since we are having issues setting the reference level for the global model, let's manually change the sign of "coef" and "significance" to properly show the 
+##change between treatments
+##We know this is an admissable route based on this forum: https://forum.biobakery.org/t/setting-reference-levels-with-2-factors/2568
+##we can also manually check that we are making the correct changes based on Enterococcus hirae levels:
+
+# ---- 1) Locate Enterococcus hirae in taxonomy ----
+phy <- physeq_no_growout3_css
+taxdf <- as.data.frame(tax_table(phy))
+
+# try exact, dotted, and a regex fallback
+species_targets <- c("Enterococcus hirae", "Enterococcus.hirae")
+idx <- integer(0)
+if ("Species" %in% names(taxdf)) {
+  idx <- which(taxdf$Species %in% species_targets)
+  if (!length(idx)) {
+    s_clean <- gsub("[._]", " ", as.character(taxdf$Species))
+    idx <- which(tolower(s_clean) == "enterococcus hirae")
+  }
+  if (!length(idx)) {
+    idx <- grep("(?i)^enterococcus[ ._]*hirae$", as.character(taxdf$Species), perl = TRUE)
+  }
+}
+# final fallback: search any tax rank text
+if (!length(idx)) {
+  any_rank <- apply(taxdf, 1, function(x) paste(x, collapse = " "))
+  idx <- grep("(?i)enterococcus[ ._]*hirae", any_rank, perl = TRUE)
+}
+
+if (!length(idx)) stop("No taxa matching 'Enterococcus hirae' found in taxonomy.")
+
+taxa_hit <- rownames(taxdf)[idx]
+message("Matched taxa: ", paste(taxa_hit, collapse = ", "))
+
+# ---- 2) Build abundance vector (CSS) for those taxa ----
+OTU <- as(otu_table(phy), "matrix")
+if (!taxa_are_rows(phy)) OTU <- t(OTU)
+
+# aggregate across all matched taxa (if multiple)
+eh_abund <- colSums(OTU[intersect(taxa_hit, rownames(OTU)), , drop = FALSE])
+
+# ---- 3) Build plotting frame with metadata ----
+meta <- as(sample_data(phy), "data.frame")
+meta$Sample <- rownames(meta)
+df_plot <- data.frame(Sample = names(eh_abund), Abund = as.numeric(eh_abund)) %>%
+  left_join(meta, by = "Sample") %>%
+  mutate(
+    Treatment = factor(Treatment),     # ensure proper labels (Control / IndigoLT)
+    Growout   = factor(Growout)        # should be "1","2"
+  )
+
+# ---- 4) Quick numeric check: which Treatment is higher? ----
+summary_tbl <- df_plot %>%
+  group_by(Growout, Treatment) %>%
+  summarise(n = dplyr::n(), mean = mean(Abund), median = median(Abund), .groups = "drop")
+print(summary_tbl)
+
+# ---- 5) Plot by Treatment, faceted by Growout ----
+p_eh <- ggplot(df_plot, aes(x = Treatment, y = Abund + 1)) +
+  geom_boxplot(outlier.shape = NA, fill = "grey85", color = "black") +
+  geom_jitter(width = 0.15, height = 0, size = 1.2, alpha = 0.8) +
+  scale_y_log10() +
+  facet_wrap(~ Growout, scales = "free_y", nrow = 1) +
+  labs(
+    title = "Enterococcus hirae (CSS abundance)",
+    x = NULL, y = "CSS abundance (+1, log10 scale)"
+  ) +
+  theme_bw() +
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(size = 11, face = "bold"),
+    axis.text  = element_text(color = "black")
+  )
+
+print(p_eh)
+
+#########
+##make the correction
+treatment_results <- treatment_results %>%
+  mutate(
+    value = as.character(value),
+    needs_fix = (Growout == "Collective" &
+                 metadata == "Treatment" &
+                 !(value %in% c("Control","IndigoLT"))),
+    needs_fix = replace_na(needs_fix, FALSE),
+    value        = if_else(needs_fix, "IndigoLT", value),
+    coef         = if_else(needs_fix, -coef, coef),
+    significance = if_else(needs_fix, -significance, significance)
+  ) %>%
+  dplyr::select(-needs_fix)
+
+```
+
+
+```{r}
+##Let's make the first heatmap
+
+# 1) Pivot into matrix form
+maas_matrix <- treatment_results %>%
+  dplyr::select(feature, Network, significance) %>%
+  pivot_wider(
+    names_from  = Network,
+    values_from = significance,
+    values_fill = NA
+  ) %>%
+  column_to_rownames("feature")
+
+# 2) Clean up rownames
+rownames(maas_matrix) <- gsub("\\.", " ", rownames(maas_matrix))
+maas_matrix <- maas_matrix[rownames(maas_matrix) != "Unknown", ]
+
+# 3) Build the per-column metadata from the column names
+col_params <- lapply(colnames(maas_matrix), function(col) {
+  parts <- strsplit(col, "-", fixed = TRUE)[[1]]
+  list(
+    Growout = parts[1],
+    Model   = ifelse(grepl("ZINB", col), "ZINB", "NB"),
+    Rounded = ifelse(grepl("Not rounded", col), "Not Rounded", "Rounded")
+  )
+})
+metadata_df <- do.call(rbind, lapply(col_params, as.data.frame))
+rownames(metadata_df) <- colnames(maas_matrix)
+
+# 4) Define annotation colors
+annotation_colors <- list(
+  Growout = c("1" = "#dbe9ff",  "2" = "#ffe8d5", "Collective" = "#000004"),
+  Model   = c("NB" = "#f8765c", "ZINB" = "#221150"),
+  Rounded = c("Rounded" = "#d3436e", "Not Rounded" = "#fcfdbf")
+)
+
+# 5) Build the column annotation object
+col_anno <- HeatmapAnnotation(
+  df = metadata_df,
+  which = "col",
+  col = annotation_colors,
+  show_annotation_name = FALSE,
+  annotation_legend_param = list(border = TRUE),
+  simple_anno_size = unit(0.2, "cm"), 
+  show_legend = TRUE,
+  gp = gpar(col = "black")
+)
+
+# 6) Define blue–white–red palette centered at zero
+pal <- colorRamp2(c(-10, 0, 10), c("royalblue4", "white", "firebrick"))
+
+# 7) Define custom legend parameters
+lgd_list.mas <- list(
+  title = expression(Log[2]~FC),         # Log₂FC
+  title_gp = gpar(fontsize = 12, fontface = "bold"),
+  labels_gp = gpar(fontsize = 10),
+  border = "black", lwd = 1,
+  direction = "horizontal",
+  title_position = "topcenter",
+  at = c(-10.1, -5, -2.5, 0, 2.5, 5, 10.1),
+  labels = c("<-10", "-5", "-2.5", "0", "2.5", "5", ">10"),
+  legend_width = unit(5, "cm"),
+  legend_height = unit(5, "cm"),
+  x = unit(0.5, "cm"), y = unit(0.5, "cm"),
+  legend_gp = gpar(col = "black", lwd = 2)
+)
+
+# 2) Redraw your heatmap, injecting these legend params
+ht <- Heatmap(
+  maas_matrix,
+  name = "Log₂FC",          # name is ignored when heatmap_legend_param$title is set,
+  na_col = "gray99",
+  col = pal,
+  cluster_rows = FALSE,
+  show_column_names = FALSE,
+  bottom_annotation = col_anno,
+  row_names_gp = gpar(fontface = "italic", fontsize = 10),
+  rect_gp = gpar(col = "gray", lwd = 1),
+  border_gp = gpar(col = "black", lwd = 1.5),
+  heatmap_legend_param = lgd_list.mas
+)
+
+# 3) Draw (or save) it:
+draw(ht, heatmap_legend_side = "bottom")
+
+tiff("species.heat.newanalysis.png", width = 4, height = 7, units = "in", res = 900, bg = "transparent")
+
+ht.2 <- draw(ht, heatmap_legend_side = "bottom")
+
+dev.off()
+
+```
+
+
+```{r}
+##Now for genus-level maaslin analysis
+
+# 0) Agglomerate to Genus
+phy_genus <- tax_glom(physeq_no_growout3_css, taxrank = "Genus")
+
+# 1) Extract & prepare tables (CSS counts already in phyloseq)
+prep <- function(phy) {
+  df_raw     <- as.data.frame(otu_table(phy))
+  df_round   <- df_raw
+  df_round[] <- lapply(df_round, round)    # integerize for count models
+  meta       <- as(sample_data(phy), "data.frame")
+  list(raw = df_raw, round = df_round, meta = meta)
+}
+
+# subset by growout, *on the genus‐level object*
+phy_g1_genus <- subset_samples(phy_genus, Growout == "1")
+phy_g2_genus <- subset_samples(phy_genus, Growout == "2")
+
+dat1_genus <- prep(phy_g1_genus)
+dat2_genus <- prep(phy_g2_genus)
+
+# 2) Define the eight model‐specs
+models <- expand.grid(
+  growout = c("g1", "g2"),
+  dtype   = c("raw", "round"),
+  method  = c("ZINB", "NEGBIN"),
+  stringsAsFactors = FALSE
+)
+
+# 3) Loop over them, suffixing all outputs with “.genus”
+for (i in seq_len(nrow(models))) {
+  mm   <- models[i, ]
+  dat  <- if (mm$growout == "g1") dat1_genus else dat2_genus
+  data <- dat[[ mm$dtype ]]
+  meta <- dat$meta
+
+  outdir <- sprintf("mas_%s_%s_%s.genus",
+                    mm$growout, mm$dtype, tolower(mm$method))
+  
+  message("Running ", mm$method,
+          " on growout=", mm$growout,
+          ", data=", mm$dtype,
+          "  ->  ", outdir)
+
+  Maaslin2(
+    input_data      = data,
+    input_metadata  = meta,
+    output          = outdir,
+    fixed_effects   = c("Treatment", "Position"),
+    reference       = c("Treatment", "Control"),
+    random_effects  = "House",
+    normalization   = "NONE",    # CSS already applied
+    transform       = "NONE",    # GLM link handles scale
+    analysis_method = mm$method, # "ZINB" or "NEGBIN"
+    min_prevalence  = 0.25
+  )
+}
+
+```
+
+```{r}
+##Genus-level maaslin2 for the collective dataset
+
+# --- Prep (features rows, samples columns; raw + rounded; aligned to metadata) ---
+prep_genus_all <- function(phy) {
+  mat <- as(otu_table(phy), "matrix")
+  if (!taxa_are_rows(phy)) mat <- t(mat)  # features (genera) as rows
+  
+  df_raw   <- as.data.frame(mat, check.names = FALSE)
+  df_round <- df_raw
+  df_round[] <- lapply(df_round, round)   # integerize for count models
+  
+  meta <- as(sample_data(phy), "data.frame")
+  
+  # Align columns of data with metadata rows (sample IDs)
+  keep <- intersect(colnames(df_raw), rownames(meta))
+  df_raw   <- df_raw[, keep, drop = FALSE]
+  df_round <- df_round[, keep, drop = FALSE]
+  meta     <- meta[keep, , drop = FALSE]
+  
+  # Ensure factors for fixed/random effects
+  meta$Treatment <- factor(meta$Treatment)
+  meta$Position  <- factor(meta$Position)
+  meta$Growout   <- factor(meta$Growout)   # levels "1","2"
+  meta$House     <- factor(meta$House)
+  
+  list(raw = df_raw, round = df_round, meta = meta)
+}
+
+dat_all_genus <- prep_genus_all(phy_genus)
+
+# --- Model specs (collective only): raw/round × ZINB/NEGBIN ---
+models_genus_all <- expand.grid(
+  dtype  = c("raw", "round"),
+  method = c("ZINB", "NEGBIN"),
+  stringsAsFactors = FALSE
+)
+
+# --- Run MaAsLin2 for each spec; include Growout as fixed effect ---
+for (i in seq_len(nrow(models_genus_all))) {
+  mm   <- models_genus_all[i, ]
+  data <- dat_all_genus[[ mm$dtype ]]
+  meta <- dat_all_genus$meta
+  
+  outdir <- sprintf("mas_all_%s_%s.genus",
+                    mm$dtype, tolower(mm$method))
+  
+  message("Running ", mm$method,
+          " on collective genus data, data=", mm$dtype,
+          "  ->  ", outdir)
+  
+  Maaslin2(
+    input_data      = data,
+    input_metadata  = meta,
+    output          = outdir,
+    fixed_effects   = c("Treatment", "Position", "Growout"),
+    reference       = c("Treatment", "Control", "Growout", "1"),
+    random_effects  = "House",
+    normalization   = "NONE",    # CSS already applied
+    transform       = "NONE",    # GLM link handles scale
+    analysis_method = mm$method, # "ZINB" or "NEGBIN"
+    min_prevalence  = 0.25
+  )
+}
+
+```
+
+```{r}
+##Extract results and craft df
+
+## ===== 1) Base analysis directory =====
+base_dir <- "/Users/brett/Documents/DeQueen_Litter/DeQueen litter analysis"
+
+## ===== 2) Include the 4 collective genus-level runs in addition to the original 8 =====
+wanted_genus <- c(
+  # per-growout (existing 8)
+  "mas_g1_raw_zinb.genus",
+  "mas_g1_raw_negbin.genus",
+  "mas_g1_round_zinb.genus",
+  "mas_g1_round_negbin.genus",
+  "mas_g2_raw_zinb.genus",
+  "mas_g2_raw_negbin.genus",
+  "mas_g2_round_zinb.genus",
+  "mas_g2_round_negbin.genus",
+  # collective (new 4)
+  "mas_all_raw_zinb.genus",
+  "mas_all_raw_negbin.genus",
+  "mas_all_round_zinb.genus",
+  "mas_all_round_negbin.genus"
+)
+
+## ===== 3) Build full paths and error if any are missing =====
+mas_dirs_genus <- file.path(base_dir, wanted_genus)
+missing_dirs <- mas_dirs_genus[!dir.exists(mas_dirs_genus)]
+if (length(missing_dirs)) {
+  stop("Missing these genus-level runs:\n", paste(missing_dirs, collapse = "\n"))
+}
+
+## ===== 4) Read each all_results.tsv into a named list (force `value` -> character) =====
+all_results_genus <- lapply(mas_dirs_genus, function(dir) {
+  tsv <- file.path(dir, "all_results.tsv")
+  if (!file.exists(tsv)) stop("Missing all_results.tsv in ", dir)
+
+  df <- read.delim(tsv, stringsAsFactors = FALSE, sep = "\t", header = TRUE)
+
+  # **FIX:** Ensure `value` column is character.
+  if ("value" %in% names(df)) {
+    df$value <- as.character(df$value)
+  } else {
+    df$value <- NA_character_
+  }
+
+  # Helpful numeric coercions (only if present)
+  for (nm in c("coef", "stderr", "pval", "qval", "N", "N.not.0")) {
+    if (nm %in% names(df)) suppressWarnings(df[[nm]] <- as.numeric(df[[nm]]))
+  }
+
+  # Keep track of the run
+  df$Run <- basename(dir)
+  df
+})
+names(all_results_genus) <- wanted_genus
+
+## ===== 5) Combine into one big data.frame (no type clashes now) =====
+combined_genus <- dplyr::bind_rows(all_results_genus)
+
+## ===== 6) Enrich to mirror species (Scope, DataType, Growout, Model, Network); filter & score =====
+combined_genus_enriched <- combined_genus %>%
+  # split "mas_g1_raw_zinb.genus" / "mas_all_raw_zinb.genus"
+  separate(
+    col    = Run,
+    into   = c("mas", "Growout_code", "Data", "MethodSuffix"),
+    sep    = "_",
+    remove = FALSE
+  ) %>%
+  # strip ".genus" from the method
+  mutate(Method = sub("\\.genus$", "", MethodSuffix)) %>%
+  # match species fields
+  mutate(
+    Scope    = Growout_code,              # g1 / g2 / all
+    DataType = Data,                      # raw / round
+    Growout  = case_when(
+      Growout_code == "g1"  ~ "1",
+      Growout_code == "g2"  ~ "2",
+      Growout_code == "all" ~ "Collective",
+      TRUE                  ~ Growout_code
+    ),
+    Rounded = if_else(Data == "raw", "Not rounded", "Rounded"),
+    Model    = case_when(
+      grepl("zinb",   Method, ignore.case = TRUE) ~ "ZINB",
+      grepl("negbin", Method, ignore.case = TRUE) ~ "Negative Binomial",
+      grepl("lm",     Method, ignore.case = TRUE) ~ "LM",
+      grepl("cplm",   Method, ignore.case = TRUE) ~ "CPLM",
+      TRUE                                        ~ Method
+    ),
+    Network = paste(Growout, Model, Rounded, sep = "-")
+  ) %>%
+  # significance filter (match species)
+  filter(!is.na(qval), qval <= 0.05) %>%
+  # signed significance score
+  mutate(significance = -log(qval) * sign(coef)) %>%
+  # label this table's level
+  mutate(Level = "Genus") %>%
+  # drop helper columns
+  dplyr::select(-mas, -Data, -MethodSuffix, -Method)
+
+## ===== 7) Treatment-only results (genus level) =====
+treatment_genus_results <- combined_genus_enriched %>%
+  filter(metadata == "Treatment")
+
+## ===== 8) Apply the same "Collective" fix used for species =====
+treatment_genus_results <- treatment_genus_results %>%
+  mutate(
+    needs_fix = (Scope == "all" & metadata == "Treatment" &
+                 !value %in% c("Control","IndigoLT")),
+    value         = if_else(needs_fix, "IndigoLT", value),
+    coef          = if_else(needs_fix, -coef, coef),
+    significance  = if_else(needs_fix, -significance, significance)
+  ) %>%
+  dplyr::select(-needs_fix)
+
+```
+
+
+```{r}
+##Combine species and genus level info
+combined_treatment_results <- bind_rows(
+  treatment_results,
+  treatment_genus_results)
+
+# Fix the `feature` names based on the `Level` column
+combined_treatment_results_fixed <- combined_treatment_results %>%
+  mutate(
+    feature = case_when(
+      Level == "Genus" ~ sub("\\..*", "", feature),
+      TRUE ~ gsub("\\.", " ", feature)
+    )
+  )
+
+```
+
+```{r}
+# 1) Pivot to matrix form
+combined_maas_matrix <- combined_treatment_results_fixed %>%
+  dplyr::select(feature, Network, significance) %>%
+  pivot_wider(
+    names_from  = Network,
+    values_from = significance,
+    values_fill = NA
+  ) %>%
+  column_to_rownames("feature")
+
+# Remove "Unknown" rows and replace dots with spaces
+rownames(combined_maas_matrix) <- gsub("\\.", " ", rownames(combined_maas_matrix))
+combined_maas_matrix <- combined_maas_matrix[rownames(combined_maas_matrix) != "Unknown", ]
+
+# 2) Build **column** metadata directly
+combined_maas_colmeta <- do.call(rbind, lapply(colnames(combined_maas_matrix), function(cn) {
+  parts <- strsplit(cn, "-", fixed = TRUE)[[1]]
+  data.frame(
+    Growout = parts[1],
+    Model   = ifelse(grepl("ZINB", parts[2]), "ZINB", "NB"),
+    Rounded = ifelse(grepl("Not rounded", parts[3]), "Not Rounded", "Rounded"),
+    row.names = cn,
+    stringsAsFactors = FALSE
+  )
+}))
+
+# 3) Build **row** metadata for Level
+# Use the fixed data frame to ensure uniqueness
+combined_maas_rowmeta <- combined_treatment_results_fixed %>%
+  distinct(feature, Level) %>%
+  column_to_rownames("feature")
+
+# Reorder matrix
+combined_maas_matrix <- combined_maas_matrix[order(rownames(combined_maas_matrix)), ]
+
+# Ensure rowmeta rows line up with matrix rows
+combined_maas_rowmeta <- combined_maas_rowmeta[rownames(combined_maas_matrix), , drop = FALSE]
+
+```
+
+
+```{r}
+# 1) Build a color vector for column names (red if contains "Enterococcus")
+rn <- colnames(combined_maas_matrix)
+rowname_colors <- ifelse(grepl("Enterococcus", cn, ignore.case = TRUE), "red", "black")
+
+ht.combined <- Heatmap(
+  combined_maas_matrix,
+  name = "Log₂FC",          # name is ignored when heatmap_legend_param$title is set,
+  na_col = "gray99",
+  col = pal,
+  cluster_rows = FALSE,
+  show_column_names = FALSE,
+  row_split = combined_maas_rowmeta$Level,
+  bottom_annotation = col_anno,
+  row_names_gp = gpar(fontface = "italic", fontsize = 8, col = rowname_colors),
+  rect_gp = gpar(col = "gray", lwd = 1),
+  border_gp = gpar(col = "black", lwd = 1.5),
+  heatmap_legend_param = lgd_list.mas
+)
+
+# 3) Draw (or save) it:
+draw(ht.combined, heatmap_legend_side = "bottom")
+
+png("combined.heat.2.png", width = 4.5, height = 10, units = "in", res = 900, bg = "transparent")
+
+ht.combined.2 <- draw(ht.combined, heatmap_legend_side = "bottom")
+
+dev.off()
+
+```
+
+```{r}
+##Let's now integrate the cplm analysis 
+
+pick_ref <- function(x, preferred = "A") {
+  x <- as.character(x)
+  tab <- sort(table(x), decreasing = TRUE)
+  if (preferred %in% names(tab)) preferred else names(tab)[1]
+}
+
+run_cplm <- function(name, dat) {
+  X    <- dat$raw
+  meta <- dat$meta
+
+  # align samples
+  common <- intersect(colnames(X), rownames(meta))
+  X      <- X[, common, drop = FALSE]
+  meta   <- meta[common, , drop = FALSE]
+
+  # ensure factors and choose a valid Position ref
+  meta$Treatment <- factor(meta$Treatment)
+  meta$Position  <- factor(meta$Position)
+  pos_ref <- pick_ref(meta$Position, preferred = "A")
+
+  outdir <- sprintf("mas_%s_raw_cplm", name)
+  message("Running CPLM on ", name, " -> ", outdir, " (Position ref = ", pos_ref, ")")
+
+  Maaslin2(
+    input_data      = X,
+    input_metadata  = meta,
+    output          = outdir,
+    fixed_effects   = c("Treatment","Position"),
+    reference       = c("Treatment","Control",
+                        "Position", pos_ref),
+    random_effects  = "House",
+    normalization   = "NONE",
+    transform       = "NONE",
+    analysis_method = "CPLM",
+    min_prevalence  = 0.25
+  )
+}
+
+# use your existing dat1 / dat2
+run_cplm("g1", dat1)
+run_cplm("g2", dat2)
+
+```
+
+```{r}
+##Now for cplm at genus
+## Helper: choose a safe reference level
+pick_ref <- function(x, preferred = "A") {
+  x <- as.character(x)
+  tab <- sort(table(x), decreasing = TRUE)
+  if (preferred %in% names(tab)) preferred else names(tab)[1]
+}
+
+## ---------- Per-growout CPLM on genus-level (unrounded) ----------
+run_cplm_genus <- function(name, dat) {
+  X    <- dat$raw               # unrounded CSS counts
+  meta <- dat$meta
+
+  # align samples
+  common <- intersect(colnames(X), rownames(meta))
+  X      <- X[, common, drop = FALSE]
+  meta   <- meta[common, , drop = FALSE]
+
+  # factors + references
+  meta$Treatment <- factor(meta$Treatment)
+  meta$Position  <- factor(meta$Position)
+  pos_ref <- pick_ref(meta$Position, preferred = "A")
+
+  outdir <- sprintf("mas_%s_raw_cplm.genus", name)
+  message("Genus CPLM ", name, " -> ", outdir, " (Position ref = ", pos_ref, ")")
+
+  Maaslin2(
+    input_data      = X,
+    input_metadata  = meta,
+    output          = outdir,
+    fixed_effects   = c("Treatment","Position"),
+    reference       = c("Treatment","Control",
+                        "Position", pos_ref),
+    random_effects  = "House",
+    normalization   = "NONE",
+    transform       = "NONE",
+    analysis_method = "CPLM",
+    min_prevalence  = 0.25
+  )
+}
+
+# Run for Growout 1 and 2 genus objects you already prepared
+run_cplm_genus("g1", dat1_genus)
+run_cplm_genus("g2", dat2_genus)
+
+
+## ---------- Joint CPLM on genus-level (Growouts 1 & 2 together) ----------
+Xg_all    <- dat_all_genus$raw
+metag_all <- dat_all_genus$meta
+
+# align
+common_all <- intersect(colnames(Xg_all), rownames(metag_all))
+Xg_all     <- Xg_all[, common_all, drop = FALSE]
+metag_all  <- metag_all[common_all, , drop = FALSE]
+
+# factors + references
+metag_all$Treatment <- factor(metag_all$Treatment)
+metag_all$Position  <- factor(metag_all$Position)
+metag_all$Growout   <- factor(metag_all$Growout)  # expected levels "1","2"
+pos_ref_all <- pick_ref(metag_all$Position, preferred = "A")
+grow_ref    <- if ("1" %in% levels(metag_all$Growout)) "1" else levels(metag_all$Growout)[1]
+
+outdir_all_genus <- "mas_all_raw_cplm.genus"
+message("Genus CPLM (joint) -> ", outdir_all_genus,
+        " (Position ref = ", pos_ref_all, ", Growout ref = ", grow_ref, ")")
+
+Maaslin2(
+  input_data      = Xg_all,
+  input_metadata  = metag_all,
+  output          = outdir_all_genus,
+  fixed_effects   = c("Treatment","Position","Growout"),
+  reference       = c("Treatment","Control",
+                      "Position", pos_ref_all,
+                      "Growout",  grow_ref),
+  random_effects  = "House",
+  normalization   = "NONE",
+  transform       = "NONE",
+  analysis_method = "CPLM",
+  min_prevalence  = 0.25,
+  plot_heatmap    = FALSE,
+  plot_scatter    = FALSE
+)
+
+
+```
+
+```{r}
+##Let's pull out significant results
+
+## 1) Point to your MaAsLin2 results root
+base_dir <- "/Users/brett/Documents/DeQueen_Litter/DeQueen litter analysis"
+
+## 2) Discover CPLM run folders automatically
+all_dirs <- list.dirs(base_dir, full.names = TRUE, recursive = FALSE)
+cplm_dirs <- all_dirs[grepl("_cplm(\\.genus)?$", basename(all_dirs), ignore.case = TRUE)]
+
+if (!length(cplm_dirs)) {
+  stop("No CPLM result folders found under:\n", base_dir)
+}
+
+message("Found CPLM folders:\n- ", paste(basename(cplm_dirs), collapse = "\n- "))
+
+## 3) Reader for MaAsLin2 tables (robust casting)
+read_mas <- function(dir_path) {
+  tsv <- file.path(dir_path, "all_results.tsv")
+  if (!file.exists(tsv)) stop("Missing all_results.tsv in ", dir_path)
+
+  df <- readr::read_tsv(
+    tsv,
+    col_types = cols(.default = col_guess(), value = col_character())
+  )
+
+  # numeric columns when present
+  for (nm in intersect(c("coef","stderr","pval","qval","N","N.not.0"), names(df))) {
+    df[[nm]] <- suppressWarnings(as.numeric(df[[nm]]))
+  }
+
+  df$Run   <- basename(dir_path)
+  df$Level <- ifelse(grepl("\\.genus$", df$Run, ignore.case = TRUE), "Genus", "Species")
+  df
+}
+
+## 4) Load all discovered runs
+all_cplm <- do.call(bind_rows, lapply(cplm_dirs, read_mas))
+
+## 5) Parse run name, filter to CPLM + Treatment, q ≤ 0.05, compute significance
+all_cplm$Run_clean <- sub("\\.genus$", "", all_cplm$Run, ignore.case = TRUE)
+
+combined_cplm_sig <- all_cplm %>%
+  mutate(
+    qval = suppressWarnings(as.numeric(qval)),
+    coef = suppressWarnings(as.numeric(coef))
+  ) %>%
+  separate(
+    col    = Run_clean,
+    into   = c("mas", "Growout_code", "Data", "Method"),
+    sep    = "_",
+    remove = FALSE,
+    fill   = "right"
+  ) %>%
+  mutate(
+    Growout = case_when(
+      Growout_code == "g1"  ~ "1",
+      Growout_code == "g2"  ~ "2",
+      Growout_code == "all" ~ "Collective",
+      TRUE                  ~ Growout_code
+    ),
+    Rounded = if_else(Data == "raw", "Not rounded", "Rounded"),
+    Model   = if_else(tolower(Method) == "cplm", "CPLM", Method),
+    significance = -log(qval) * sign(coef)
+  ) %>%
+  filter(
+    tolower(Model) == "cplm",
+    metadata == "Treatment",
+    !is.na(qval), qval <= 0.05
+  ) %>%
+  select(
+    Level, Run, feature, metadata, value, coef, stderr, pval, qval,
+    significance, Growout, Rounded, Model
+  ) %>%
+  arrange(Level, Growout, desc(significance))
+
+# Peek
+head(combined_cplm_sig)
+
+
+```
+
+```{r}
+##Clean up this df and combine with overall output
+combined_cplm_sig_clean <- combined_cplm_sig %>%
+  # For genus-level rows, keep only the string before the first dot
+  mutate(feature = if_else(
+    Level == "Genus",
+    sub("\\..*$", "", feature),
+    feature,
+    missing = feature
+  )) %>%
+  # Remove env runs
+  filter(Growout != "env")
+
+##Fix species names
+combined_cplm_sig_clean <- combined_cplm_sig_clean %>%
+  mutate(
+    feature = if_else(
+      Level == "Species",
+      str_squish(str_replace_all(feature, "\\.", " ")),
+      feature
+    )
+  )
+)
+
+###Combine###
+
+# 1) Find common columns
+common_cols <- intersect(
+  names(combined_treatment_results_fixed),
+  names(combined_cplm_sig_clean)
+)
+
+# 2) Select those columns from each DF and bind
+combined_sig_all <- bind_rows(
+  combined_treatment_results_fixed %>%
+    select(all_of(common_cols)) %>%
+    mutate(MethodSet = "ZINB/NEGBIN"),
+  combined_cplm_sig_clean %>%
+    select(all_of(common_cols)) %>%
+    mutate(MethodSet = "CPLM")
+)
+
+# (Optional) sanity checks
+str(combined_sig_all)
+dplyr::count(combined_sig_all, Level, Growout, MethodSet)
+
+
+```
+
+```{r}
+## 0) Prep (new object names)
+df_plot_cplmht <- combined_sig_all %>%
+  filter(metadata == "Treatment") %>%
+  mutate(
+    Model = case_when(
+      grepl("^neg", tolower(Model)) ~ "NEGBIN",
+      grepl("^zinb", tolower(Model)) ~ "ZINB",
+      grepl("^cplm", tolower(Model)) ~ "CPLM",
+      TRUE ~ Model
+    ),
+    Rounded = if_else(grepl("not", Rounded, ignore.case = TRUE),
+                      "Not Rounded", "Rounded"),
+    Network = paste(Growout, Model, Rounded, sep = "-")
+  )
+
+## 1) Matrix for heatmap (features x Networks)
+maas_matrix_cplmht <- df_plot_cplmht %>%
+  select(feature, Network, significance) %>%
+  pivot_wider(
+    names_from  = Network,
+    values_from = significance,
+    values_fill = NA
+  ) %>%
+  column_to_rownames("feature")
+
+rownames(maas_matrix_cplmht) <- gsub("\\.", " ", rownames(maas_matrix_cplmht))
+maas_matrix_cplmht <- maas_matrix_cplmht[rownames(maas_matrix_cplmht) != "Unknown", , drop = FALSE]
+
+## 2) Column metadata from Network
+colmeta_cplmht <- do.call(rbind, lapply(colnames(maas_matrix_cplmht), function(cn) {
+  parts <- strsplit(cn, "-", fixed = TRUE)[[1]]
+  data.frame(
+    Growout = parts[1] %||% NA_character_,
+    Model   = parts[2] %||% NA_character_,
+    Rounded = parts[3] %||% NA_character_,
+    row.names = cn, check.names = FALSE
+  )
+}))
+
+## 3) Row metadata (Level)
+rowmeta_cplmht <- df_plot_cplmht %>%
+  distinct(feature, Level) %>%
+  mutate(feature = gsub("\\.", " ", feature)) %>%
+  filter(feature %in% rownames(maas_matrix_cplmht)) %>%
+  column_to_rownames("feature")
+rowmeta_cplmht <- rowmeta_cplmht[rownames(maas_matrix_cplmht), , drop = FALSE]
+
+## 4) Annotation colors (includes CPLM)
+annotation_colors_cplmht <- list(
+  Growout = c("1" = "#dbe9ff", "2" = "#ffe8d5", "Collective" = "#000004"),
+  Model   = c("NEGBIN" = "#f8765c", "ZINB" = "#221150", "CPLM" = "#148F77"),
+  Rounded = c("Rounded" = "#d3436e", "Not Rounded" = "#fcfdbf")
+)
+
+col_anno_cplmht <- HeatmapAnnotation(
+  df = colmeta_cplmht,
+  which = "col",
+  col = annotation_colors_cplmht,
+  show_annotation_name = FALSE,
+  annotation_legend_param = list(border = TRUE),
+  simple_anno_size = unit(0.22, "cm"),
+  gp = gpar(col = "black")
+)
+
+## 5) Palette & legend
+pal_cplmht <- colorRamp2(c(-10, 0, 10), c("royalblue4", "white", "firebrick"))
+legend_params_cplmht <- list(
+  title = expression(Log[2]~FC),
+  title_gp = gpar(fontsize = 12, fontface = "bold"),
+  labels_gp = gpar(fontsize = 10),
+  border = "black", lwd = 1,
+  direction = "horizontal",
+  title_position = "topcenter",
+  at = c(-10.1, -5, -2.5, 0, 2.5, 5, 10.1),
+  labels = c("<-10", "-5", "-2.5", "0", "2.5", "5", ">10"),
+  legend_width = unit(5, "cm"),
+  legend_height = unit(5, "cm")
+)
+
+## Optional row-name coloring (e.g., Enterococcus)
+rn_cplmht <- rownames(maas_matrix_cplmht)
+## Alphabetical reorder of rows (features) in matrix and row metadata
+row_order_cplmht <- sort(rownames(maas_matrix_cplmht), method = "radix")
+
+maas_matrix_cplmht <- maas_matrix_cplmht[row_order_cplmht, , drop = FALSE]
+rowmeta_cplmht     <- rowmeta_cplmht[row_order_cplmht, , drop = FALSE]
+
+## Rebuild the row-split vector in the same (alphabetical) order
+row_split_vec_cplmht <- rowmeta_cplmht$Level
+
+## Recompute row name colors in the same order (optional highlight rule)
+rowname_colors_cplmht <- ifelse(
+  grepl("\\bEnterococcus\\b", rownames(maas_matrix_cplmht), ignore.case = TRUE),
+  "red", "black"
+)
+
+## Draw heatmap with your requested aesthetics
+ht_cplmht <- Heatmap(
+  maas_matrix_cplmht,
+  name = "Log₂FC",
+  na_col = "gray97",
+  col = pal_cplmht,
+  cluster_rows = FALSE,
+  cluster_columns = TRUE,
+  show_column_names = FALSE,
+  bottom_annotation = col_anno_cplmht,
+  row_split = row_split_vec_cplmht,
+  column_split = colmeta_cplmht$Growout,
+  row_names_gp = gpar(fontface = "italic", fontsize = 8, col = rowname_colors_cplmht),
+  rect_gp = gpar(col = "gray", lwd = 1),
+  border_gp = gpar(col = "black", lwd = 1.5),
+  heatmap_legend_param = legend_params_cplmht
+)
+
+png("combined.heat.cplm.2.png", width = 5, height = 10, units = "in", res = 900, bg = "transparent")
+
+draw(ht_cplmht, heatmap_legend_side = "bottom")
+
+dev.off()
+
+```
+
+```{r}
+##Let's craft an upset plot
+
+## ----------------------------
+## 0) Column order (your heatmap order)
+## ----------------------------
+sets_order <- c(
+  "Collective-CPLM-Not Rounded",
+  "Collective-ZINB-Rounded",
+  "Collective-ZINB-Not Rounded",
+  "Collective-NEGBIN-Not Rounded",
+  "Collective-NEGBIN-Rounded",
+  "1-ZINB-Not Rounded",
+  "1-ZINB-Rounded",
+  "1-CPLM-Not Rounded",
+  "1-NEGBIN-Rounded",
+  "1-NEGBIN-Not Rounded",
+  "2-CPLM-Not Rounded",
+  "2-NEGBIN-Rounded",
+  "2-NEGBIN-Not Rounded",
+  "2-ZINB-Rounded",
+  "2-ZINB-Not Rounded"
+)
+
+## keep only available columns, preserve order
+sets_order <- sets_order[sets_order %in% colnames(maas_matrix_cplmht)]
+maas_matrix_cplmht <- maas_matrix_cplmht[, sets_order, drop = FALSE]
+
+## column metadata in the same order
+colmeta_cplmht <- data.frame(
+  set      = sets_order,
+  Growout  = sub("^([^\\-]+).*", "\\1", sets_order),
+  Model    = sub("^[^\\-]+\\-([^\\-]+).*", "\\1", sets_order),
+  Rounded  = sub("^[^\\-]+\\-[^\\-]+\\-(.*)$", "\\1", sets_order),
+  stringsAsFactors = FALSE
+)
+colmeta_cplmht$set_x <- seq_len(nrow(colmeta_cplmht))
+
+## ----------------------------
+## 1) Presence matrix → combos
+## ----------------------------
+present_df <- data.frame(item = rownames(maas_matrix_cplmht), check.names = FALSE)
+for (s in sets_order) present_df[[s]] <- !is.na(maas_matrix_cplmht[, s])
+
+present_df$combo_label <- apply(present_df[sets_order], 1, function(row) {
+  on <- sets_order[as.logical(row)]
+  if (length(on) == 0) "(none)" else paste(on, collapse = " ∩ ")
+})
+
+combo_sizes <- present_df |>
+  dplyr::count(combo_label) |>
+  dplyr::arrange(dplyr::desc(n))
+combo_levels_plot <- rev(combo_sizes$combo_label)
+
+long_mat <- present_df |>
+  tidyr::pivot_longer(
+    cols      = dplyr::all_of(sets_order),
+    names_to  = "set",
+    values_to = "present"
+  ) |>
+  dplyr::left_join(colmeta_cplmht, by = "set") |>
+  dplyr::mutate(
+    set         = factor(set, levels = sets_order),
+    combo_label = factor(combo_label, levels = combo_levels_plot),
+    Growout     = factor(Growout, levels = c("Collective","1","2")),
+    Model       = factor(Model,   levels = c("NEGBIN","ZINB","CPLM")),
+    Rounded     = factor(Rounded, levels = c("Rounded","Not Rounded"))
+  )
+
+## connector segments per combo
+seg_df <- long_mat |>
+  dplyr::filter(present) |>
+  dplyr::group_by(combo_label) |>
+  dplyr::summarise(x_min = min(set_x), x_max = max(set_x), .groups = "drop")
+
+## ----------------------------
+## 2) GRID (left) — Growout bands + theme_bw gridlines
+## ----------------------------
+grow_cols_bg <- c("1" = "#dbe9ff", "2" = "#ffe8d5", "Collective" = "#000004")
+grow_band_df <- colmeta_cplmht |>
+  dplyr::group_by(Growout) |>
+  dplyr::summarise(
+    xmin = min(set_x) - 0.5,
+    xmax = max(set_x) + 0.5,
+    .groups = "drop"
+  )
+
+## vertical padding to keep dots off the borders (use same for both panels)
+y_expansion <- ggplot2::expansion(add = 0.6)
+
+p_matrix <- ggplot2::ggplot() +
+  # Growout bands (underlay)
+  ggplot2::geom_rect(
+    data = grow_band_df,
+    ggplot2::aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf, fill = Growout),
+    inherit.aes = FALSE, alpha = 0.5, color = NA
+  ) +
+  ggplot2::scale_fill_manual(values = grow_cols_bg, guide = "none") +
+  # connectors
+  ggplot2::geom_segment(
+    data = seg_df,
+    ggplot2::aes(y = combo_label, yend = combo_label, x = x_min, xend = x_max),
+    linewidth = 0.7, color = "grey20"
+  ) +
+  # background empty dots
+  ggplot2::geom_point(
+    data = long_mat,
+    ggplot2::aes(x = set_x, y = combo_label),
+    shape = 21, size = 4.5, color = "black", fill = "white", stroke = 0.3,
+    show.legend = FALSE
+  ) +
+  # present dots
+  ggplot2::geom_point(
+    data = long_mat |> dplyr::filter(present),
+    ggplot2::aes(x = set_x, y = combo_label),
+    shape = 21, size = 4.5, color = "black", fill = "black", stroke = 0.3,
+    show.legend = FALSE
+  ) +
+  ggplot2::scale_x_continuous(
+    breaks = colmeta_cplmht$set_x,
+    labels = NULL,
+    limits = c(min(colmeta_cplmht$set_x) - 0.5, max(colmeta_cplmht$set_x) + 0.5),
+    expand = c(0, 0)
+  ) +
+  ggplot2::scale_y_discrete(expand = y_expansion) +
+  ggplot2::coord_cartesian(clip = "off") +
+  ggplot2::labs(x = NULL, y = NULL) +
+  ggplot2::theme_bw() +
+  ggplot2::theme(
+    panel.grid.major = ggplot2::element_line(color = "grey85", linewidth = 0.3),
+    panel.grid.minor = ggplot2::element_line(color = "grey93", linewidth = 0.2),
+    panel.background = ggplot2::element_rect(fill = "white", color = NA),
+    axis.ticks       = ggplot2::element_blank(),
+    axis.text        = ggplot2::element_blank(),
+    panel.border     = ggplot2::element_rect(color = "black", fill = NA, linewidth = 0.6),
+    plot.margin      = grid::unit(c(2, 0, 0, 4), "pt")
+  )
+
+## ----------------------------
+## 3) Footer (Rounded/Model/Growout) — tiles touch (no gaps)
+## ----------------------------
+header_fill_map <- c(
+  "Rounded" = "#d3436e", "Not Rounded" = "#fcfdbf",
+  "NEGBIN" = "#f8765c", "ZINB" = "#221150", "CPLM" = "#148F77",
+  "1" = "#dbe9ff", "2" = "#ffe8d5", "Collective" = "#000004"
+)
+
+footer_long <- colmeta_cplmht |>
+  dplyr::select(set, set_x, Rounded, Model, Growout) |>   # <-- fixed closing parenthesis here
+  tidyr::pivot_longer(
+    cols = c(Rounded, Model, Growout),
+    names_to = "Track", values_to = "Value"
+  ) |>
+  dplyr::mutate(Track = factor(Track, levels = c("Rounded","Model","Growout")))
+
+p_footer <- ggplot2::ggplot(
+  footer_long,
+  ggplot2::aes(x = set_x, y = Track, fill = Value)
+) +
+  ggplot2::geom_tile(color = "black", linewidth = 0.2, height = 1.0) +  # tiles touch
+  ggplot2::scale_x_continuous(
+    breaks = colmeta_cplmht$set_x,
+    labels = NULL,
+    limits = c(min(colmeta_cplmht$set_x) - 0.5, max(colmeta_cplmht$set_x) + 0.5),
+    expand = c(0, 0)
+  ) +
+  ggplot2::scale_y_discrete(expand = c(0, 0)) +                         # no vertical gaps
+  ggplot2::scale_fill_manual(values = header_fill_map, guide = "none") +
+  ggplot2::coord_cartesian(clip = "off") +
+  ggplot2::labs(x = NULL, y = NULL) +
+  ggplot2::theme_bw() +
+  ggplot2::theme(
+    panel.grid       = ggplot2::element_blank(),
+    panel.background = ggplot2::element_rect(fill = "white", color = NA),
+    axis.ticks       = ggplot2::element_blank(),
+    axis.text        = ggplot2::element_blank(),
+    panel.border     = ggplot2::element_rect(color = "black", fill = NA, linewidth = 0.6),
+    plot.margin      = grid::unit(c(0, 0, 2, 4), "pt")
+  )
+
+## ----------------------------
+## 4) Bars (right) — matched y-expansion
+## ----------------------------
+bars_df <- combo_sizes |>
+  dplyr::mutate(combo_label = factor(combo_label, levels = combo_levels_plot))
+
+p_bars <- ggplot2::ggplot(bars_df, ggplot2::aes(y = combo_label, x = n)) +
+  ggplot2::geom_col(width = 0.6, fill = "grey25", color = "black") +
+  ggplot2::labs(x = "Intersection size", y = NULL) +
+  ggplot2::scale_x_continuous(expand = c(0, 0)) +
+  ggplot2::scale_y_discrete(limits = levels(long_mat$combo_label),
+                            expand = y_expansion) +
+  ggplot2::coord_cartesian(clip = "off") +
+  ggplot2::theme_bw() +
+  ggplot2::theme(
+    panel.background = ggplot2::element_rect(fill = "white", color = NA),
+    panel.border     = ggplot2::element_rect(color = "black", fill = NA, linewidth = 0.6),
+    axis.title.x     = ggplot2::element_text(face = "bold"),
+    axis.text.x      = ggplot2::element_text(color = "black"),
+    axis.text.y      = ggplot2::element_blank(),
+    axis.ticks.y     = ggplot2::element_blank(),
+    axis.title.y     = ggplot2::element_blank(),
+    plot.margin      = grid::unit(c(2, 6, 4, 0), "pt")
+  )
+
+## ----------------------------
+## 5) Arrange (thin footer; locked alignment)
+## ----------------------------
+footer_share <- 0.04
+
+left_stack <- cowplot::plot_grid(
+  p_matrix, p_footer,
+  ncol = 1,
+  rel_heights = c(1, footer_share),
+  align = "v",
+  axis  = "lr"
+)
+
+aligned <- cowplot::align_plots(left_stack, p_bars, align = "v", axis = "tb")
+
+final_upset <- cowplot::plot_grid(
+  aligned[[1]], aligned[[2]],
+  ncol = 2,
+  rel_widths = c(0.65, 0.35),
+  align = "v",
+  axis = "tb"
+)
+
+print(final_upset)
+
+## Recommended save (stable text metrics) — optional:
+ggsave("upset.da.3.png", final_upset, width = 7, height = 8, units = "in",
+       dpi = 900, device = ragg::agg_png, bg = "white")
+
+
+```
+
+```{r}
+##We will create this version, then manually clean up the stacked bar plot
+
+## ----------------------------
+## 0) Column order (your heatmap order)
+## ----------------------------
+sets_order <- c(
+  "Collective-CPLM-Not Rounded",
+  "Collective-ZINB-Rounded",
+  "Collective-ZINB-Not Rounded",
+  "Collective-NEGBIN-Not Rounded",
+  "Collective-NEGBIN-Rounded",
+  "1-ZINB-Not Rounded",
+  "1-ZINB-Rounded",
+  "1-CPLM-Not Rounded",
+  "1-NEGBIN-Rounded",
+  "1-NEGBIN-Not Rounded",
+  "2-CPLM-Not Rounded",
+  "2-NEGBIN-Rounded",
+  "2-NEGBIN-Not Rounded",
+  "2-ZINB-Rounded",
+  "2-ZINB-Not Rounded"
+)
+
+## keep only available columns, preserve order
+sets_order <- sets_order[sets_order %in% colnames(maas_matrix_cplmht)]
+maas_matrix_cplmht <- maas_matrix_cplmht[, sets_order, drop = FALSE]
+
+## column metadata in the same order
+colmeta_cplmht <- data.frame(
+  set      = sets_order,
+  Growout  = sub("^([^\\-]+).*", "\\1", sets_order),
+  Model    = sub("^[^\\-]+\\-([^\\-]+).*", "\\1", sets_order),
+  Rounded  = sub("^[^\\-]+\\-[^\\-]+\\-(.*)$", "\\1", sets_order),
+  stringsAsFactors = FALSE
+)
+colmeta_cplmht$set_x <- seq_len(nrow(colmeta_cplmht))
+
+## ----------------------------
+## 1) Presence matrix → combos
+## ----------------------------
+present_df <- data.frame(item = rownames(maas_matrix_cplmht), check.names = FALSE)
+for (s in sets_order) present_df[[s]] <- !is.na(maas_matrix_cplmht[, s])
+
+present_df$combo_label <- apply(present_df[sets_order], 1, function(row) {
+  on <- sets_order[as.logical(row)]
+  if (length(on) == 0) "(none)" else paste(on, collapse = " ∩ ")
+})
+
+combo_sizes <- present_df |>
+  dplyr::count(combo_label) |>
+  dplyr::arrange(dplyr::desc(n))
+combo_levels_plot <- rev(combo_sizes$combo_label)
+
+long_mat <- present_df |>
+  tidyr::pivot_longer(
+    cols      = dplyr::all_of(sets_order),
+    names_to  = "set",
+    values_to = "present"
+  ) |>
+  dplyr::left_join(colmeta_cplmht, by = "set") |>
+  dplyr::mutate(
+    set         = factor(set, levels = sets_order),
+    combo_label = factor(combo_label, levels = combo_levels_plot),
+    Growout     = factor(Growout, levels = c("Collective","1","2")),
+    Model       = factor(Model,   levels = c("NEGBIN","ZINB","CPLM")),
+    Rounded     = factor(Rounded, levels = c("Rounded","Not Rounded"))
+  )
+
+## connector segments per combo
+seg_df <- long_mat |>
+  dplyr::filter(present) |>
+  dplyr::group_by(combo_label) |>
+  dplyr::summarise(x_min = min(set_x), x_max = max(set_x), .groups = "drop")
+
+## ----------------------------
+## 2) GRID (left) — Growout bands + theme_bw gridlines
+## ----------------------------
+grow_cols_bg <- c("1" = "#dbe9ff", "2" = "#ffe8d5", "Collective" = "#000004")
+grow_band_df <- colmeta_cplmht |>
+  dplyr::group_by(Growout) |>
+  dplyr::summarise(
+    xmin = min(set_x) - 0.5,
+    xmax = max(set_x) + 0.5,
+    .groups = "drop"
+  )
+
+## vertical padding to keep dots off the borders (use same for both panels)
+y_expansion <- ggplot2::expansion(add = 0.6)
+
+p_matrix <- ggplot2::ggplot() +
+  ggplot2::geom_rect(
+    data = grow_band_df,
+    ggplot2::aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf, fill = Growout),
+    inherit.aes = FALSE, alpha = 0.5, color = NA
+  ) +
+  ggplot2::scale_fill_manual(values = grow_cols_bg, guide = "none") +
+  ggplot2::geom_segment(
+    data = seg_df,
+    ggplot2::aes(y = combo_label, yend = combo_label, x = x_min, xend = x_max),
+    linewidth = 0.7, color = "grey20"
+  ) +
+  ggplot2::geom_point(
+    data = long_mat,
+    ggplot2::aes(x = set_x, y = combo_label),
+    shape = 21, size = 4.5, color = "black", fill = "white", stroke = 0.3,
+    show.legend = FALSE
+  ) +
+  ggplot2::geom_point(
+    data = long_mat |> dplyr::filter(present),
+    ggplot2::aes(x = set_x, y = combo_label),
+    shape = 21, size = 4.5, color = "black", fill = "black", stroke = 0.3,
+    show.legend = FALSE
+  ) +
+  ggplot2::scale_x_continuous(
+    breaks = colmeta_cplmht$set_x,
+    labels = NULL,
+    limits = c(min(colmeta_cplmht$set_x) - 0.5, max(colmeta_cplmht$set_x) + 0.5),
+    expand = c(0, 0)
+  ) +
+  ggplot2::scale_y_discrete(expand = y_expansion) +
+  ggplot2::coord_cartesian(clip = "off") +
+  ggplot2::labs(x = NULL, y = NULL) +
+  ggplot2::theme_bw() +
+  ggplot2::theme(
+    panel.grid.major = ggplot2::element_line(color = "grey85", linewidth = 0.3),
+    panel.grid.minor = ggplot2::element_line(color = "grey93", linewidth = 0.2),
+    panel.background = ggplot2::element_rect(fill = "white", color = NA),
+    axis.ticks       = ggplot2::element_blank(),
+    axis.text        = ggplot2::element_blank(),
+    panel.border     = ggplot2::element_rect(color = "black", fill = NA, linewidth = 0.6),
+    plot.margin      = grid::unit(c(2, 0, 0, 4), "pt")
+  )
+
+## ----------------------------
+## 3) Footer (Growout/Model/Rounded) — tiles touch (no gaps)
+## ----------------------------
+header_fill_map <- c(
+  "1" = "#dbe9ff", "2" = "#ffe8d5", "Collective" = "#000004",
+  "NEGBIN" = "#f8765c", "ZINB" = "#221150", "CPLM" = "#148F77",
+  "Rounded" = "#d3436e", "Not Rounded" = "#fcfdbf"
+)
+
+footer_long <- colmeta_cplmht |>
+  dplyr::select(set, set_x, Growout, Model, Rounded) |>
+  tidyr::pivot_longer(
+    cols = c(Growout, Model, Rounded),
+    names_to = "Track", values_to = "Value"
+  ) |>
+  dplyr::mutate(Track = factor(Track, levels = c("Growout","Model","Rounded")))
+
+p_footer <- ggplot2::ggplot(
+  footer_long,
+  ggplot2::aes(x = set_x, y = Track, fill = Value)
+) +
+  ggplot2::geom_tile(color = "black", linewidth = 0.2, height = 1.0) +
+  ggplot2::scale_x_continuous(
+    breaks = colmeta_cplmht$set_x,
+    labels = NULL,
+    limits = c(min(colmeta_cplmht$set_x) - 0.5, max(colmeta_cplmht$set_x) + 0.5),
+    expand = c(0, 0)
+  ) +
+  ggplot2::scale_y_discrete(expand = c(0, 0)) +
+  ggplot2::scale_fill_manual(values = header_fill_map, guide = "none") +
+  ggplot2::coord_cartesian(clip = "off") +
+  ggplot2::labs(x = NULL, y = NULL) +
+  ggplot2::theme_bw() +
+  ggplot2::theme(
+    panel.grid       = ggplot2::element_blank(),
+    panel.background = ggplot2::element_rect(fill = "white", color = NA),
+    axis.ticks       = ggplot2::element_blank(),
+    axis.text        = ggplot2::element_blank(),
+    panel.border     = ggplot2::element_rect(color = "black", fill = NA, linewidth = 0.6),
+    plot.margin      = grid::unit(c(0, 0, 2, 4), "pt")
+  )
+
+## ----------------------------
+## 4) Right bars — matched y-expansion
+## ----------------------------
+bars_df <- combo_sizes |>
+  dplyr::mutate(combo_label = factor(combo_label, levels = combo_levels_plot))
+
+p_bars <- ggplot2::ggplot(bars_df, ggplot2::aes(y = combo_label, x = n)) +
+  ggplot2::geom_col(width = 0.6, fill = "grey25", color = "black") +
+  ggplot2::labs(x = "Intersection size", y = NULL) +
+  ggplot2::scale_x_continuous(expand = c(0, 0)) +
+  ggplot2::scale_y_discrete(limits = levels(long_mat$combo_label),
+                            expand = y_expansion) +
+  ggplot2::coord_cartesian(clip = "off") +
+  ggplot2::theme_bw() +
+  ggplot2::theme(
+    panel.background = ggplot2::element_rect(fill = "white", color = NA),
+    panel.border     = ggplot2::element_rect(color = "black", fill = NA, linewidth = 0.6),
+    axis.title.x     = ggplot2::element_text(face = "bold"),
+    axis.text.x      = ggplot2::element_text(color = "black"),
+    axis.text.y      = ggplot2::element_blank(),
+    axis.ticks.y     = ggplot2::element_blank(),
+    axis.title.y     = ggplot2::element_blank(),
+    plot.margin      = grid::unit(c(2, 6, 4, 0), "pt")
+  )
+
+## ----------------------------
+## 5) Top stacked bar plot (shorter; closer; left-edge hard-locked)
+## ----------------------------
+top_counts <- lapply(seq_along(sets_order), function(i) {
+  s <- sets_order[i]
+  v <- maas_matrix_cplmht[, s]
+  v <- v[!is.na(v)]
+  data.frame(
+    set   = s,
+    set_x = i,
+    Negative = sum(v < 0),
+    Positive = sum(v > 0),
+    stringsAsFactors = FALSE
+  )
+})
+top_counts <- do.call(rbind, top_counts)
+
+top_counts_long <- tidyr::pivot_longer(
+  top_counts,
+  cols = c("Negative", "Positive"),
+  names_to = "Sign",
+  values_to = "count"
+)
+top_counts_long$Sign <- factor(top_counts_long$Sign, levels = c("Negative","Positive"))
+
+p_topbars <- ggplot2::ggplot(top_counts_long,
+                             ggplot2::aes(x = set_x, y = count, fill = Sign)) +
+  ggplot2::geom_col(width = 0.8, color = "black") +
+  ggplot2::scale_fill_manual(values = c(Negative = "royalblue4", Positive = "firebrick")) +
+  ggplot2::scale_x_continuous(
+    breaks = colmeta_cplmht$set_x,
+    labels = NULL,
+    limits = c(min(colmeta_cplmht$set_x) - 0.5, max(colmeta_cplmht$set_x) + 0.5),
+    expand = c(0, 0)
+  ) +
+  ggplot2::labs(x = NULL, y = "# features") +
+  ggplot2::coord_cartesian(clip = "off") +
+  ggplot2::theme_bw() +
+  ggplot2::theme(
+    panel.grid.major = ggplot2::element_line(color = "grey85", linewidth = 0.3),
+    panel.grid.minor = ggplot2::element_line(color = "grey93", linewidth = 0.2),
+    panel.background = ggplot2::element_rect(fill = "white", color = NA),
+    panel.border     = ggplot2::element_rect(color = "black", fill = NA, linewidth = 0.6),
+    axis.text.x      = ggplot2::element_blank(),
+    axis.text.y = element_text(color = 'black'),
+    axis.title.y = element_text(color = 'black', face = 'bold'),
+    axis.ticks.x     = ggplot2::element_blank(),
+    legend.position  = "none",
+    ## tighter gap above the grid:
+    plot.margin      = grid::unit(c(2, 0, 0, 4), "pt")  # bottom = 0 to sit closer
+  )
+
+## ----------------------------
+## 6) Assemble with hard width locking
+## ----------------------------
+footer_share <- 0.04   # thin footer
+top_share    <- 0.09   # shorter top bars & closer to grid
+
+## Left core (grid + footer)
+left_core <- cowplot::plot_grid(
+  p_matrix, p_footer,
+  ncol = 1,
+  rel_heights = c(1, footer_share),
+  align = "v",
+  axis  = "lr"
+)
+
+## Convert to gtables and force identical width columns (locks left panel borders)
+g_top   <- ggplotGrob(p_topbars)
+g_left  <- ggplotGrob(left_core)
+common_w <- grid::unit.pmax(g_top$widths, g_left$widths)
+g_top$widths  <- common_w
+g_left$widths <- common_w
+
+## Stack topbars over left_core with exact alignment
+left_column <- gridExtra::arrangeGrob(
+  grobs   = list(g_top, g_left),
+  ncol    = 1,
+  heights = grid::unit.c(grid::unit(top_share, "null"), grid::unit(1, "null"))
+)
+
+## Right column: spacer + right bars (keeps right bars aligned to grid area)
+p_spacer <- ggplot2::ggplot() + ggplot2::theme_void()
+right_column <- cowplot::plot_grid(
+  p_spacer, p_bars,
+  ncol = 1,
+  rel_heights = c(top_share, 1),
+  align = "v",
+  axis  = "tb"
+)
+
+final_upset_with_top <- cowplot::plot_grid(
+  left_column, right_column,
+  ncol = 2,
+  rel_widths = c(0.65, 0.35),
+  align = "v",
+  axis = "tb"
+)
+
+print(final_upset_with_top)
+
+## Suggested save (stable metrics)
+ ggsave("upset.da.with_top.png", final_upset_with_top,
+        width = 7, height = 9, units = "in",
+       dpi = 900, device = ragg::agg_png, bg = "white")
+
+
+```
+
+```{r}
+##New heatmap with all values
+
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(stringr)
+library(ComplexHeatmap)
+library(circlize)
+library(grid)
+
+alpha_fdr <- 0.05
+
+# ============================================================
+# 1. Build FULL, unfiltered ZINB/NEGBIN species results
+# ============================================================
+
+species_full <- combined_results %>%
+  dplyr::mutate(
+    qval = suppressWarnings(as.numeric(qval)),
+    coef = suppressWarnings(as.numeric(coef))
+  ) %>%
+  tidyr::separate(
+    col = Run,
+    into = c("mas", "Growout_code", "Data", "Method"),
+    sep = "_",
+    remove = FALSE
+  ) %>%
+  dplyr::mutate(
+    Level = "Species",
+    Growout = dplyr::case_when(
+      Growout_code == "g1"  ~ "1",
+      Growout_code == "g2"  ~ "2",
+      Growout_code == "all" ~ "Collective",
+      TRUE ~ Growout_code
+    ),
+    Rounded = dplyr::if_else(Data == "raw", "Not Rounded", "Rounded"),
+    Model = dplyr::case_when(
+      tolower(Method) == "zinb"   ~ "ZINB",
+      tolower(Method) == "negbin" ~ "NEGBIN",
+      TRUE ~ toupper(Method)
+    ),
+    Network = paste(Growout, Model, Rounded, sep = "-"),
+    feature = stringr::str_squish(stringr::str_replace_all(feature, "\\.", " "))
+  ) %>%
+  dplyr::filter(metadata == "Treatment")
+
+# ============================================================
+# 2. Build FULL, unfiltered ZINB/NEGBIN genus results
+# ============================================================
+
+genus_full <- combined_genus %>%
+  dplyr::mutate(
+    qval = suppressWarnings(as.numeric(qval)),
+    coef = suppressWarnings(as.numeric(coef))
+  ) %>%
+  tidyr::separate(
+    col = Run,
+    into = c("mas", "Growout_code", "Data", "MethodSuffix"),
+    sep = "_",
+    remove = FALSE
+  ) %>%
+  dplyr::mutate(
+    Method = sub("\\.genus$", "", MethodSuffix),
+    Level = "Genus",
+    Growout = dplyr::case_when(
+      Growout_code == "g1"  ~ "1",
+      Growout_code == "g2"  ~ "2",
+      Growout_code == "all" ~ "Collective",
+      TRUE ~ Growout_code
+    ),
+    Rounded = dplyr::if_else(Data == "raw", "Not Rounded", "Rounded"),
+    Model = dplyr::case_when(
+      grepl("zinb", Method, ignore.case = TRUE)   ~ "ZINB",
+      grepl("negbin", Method, ignore.case = TRUE) ~ "NEGBIN",
+      TRUE ~ toupper(Method)
+    ),
+    Network = paste(Growout, Model, Rounded, sep = "-"),
+    feature = sub("\\..*$", "", feature)
+  ) %>%
+  dplyr::filter(metadata == "Treatment")
+
+# ============================================================
+# 3. Build FULL, unfiltered CPLM results
+# ============================================================
+
+cplm_full <- all_cplm %>%
+  dplyr::mutate(
+    qval = suppressWarnings(as.numeric(qval)),
+    coef = suppressWarnings(as.numeric(coef)),
+    Run_clean = sub("\\.genus$", "", Run, ignore.case = TRUE)
+  ) %>%
+  tidyr::separate(
+    col = Run_clean,
+    into = c("mas", "Growout_code", "Data", "Method"),
+    sep = "_",
+    remove = FALSE,
+    fill = "right"
+  ) %>%
+  dplyr::mutate(
+    Growout = dplyr::case_when(
+      Growout_code == "g1"  ~ "1",
+      Growout_code == "g2"  ~ "2",
+      Growout_code == "all" ~ "Collective",
+      TRUE ~ Growout_code
+    ),
+    Rounded = dplyr::if_else(Data == "raw", "Not Rounded", "Rounded"),
+    Model = dplyr::case_when(
+      tolower(Method) == "cplm" ~ "CPLM",
+      TRUE ~ toupper(Method)
+    ),
+    Network = paste(Growout, Model, Rounded, sep = "-"),
+    feature = dplyr::if_else(
+      Level == "Genus",
+      sub("\\..*$", "", feature),
+      stringr::str_squish(stringr::str_replace_all(feature, "\\.", " "))
+    )
+  ) %>%
+  dplyr::filter(
+    metadata == "Treatment",
+    Model == "CPLM",
+    Growout != "env"
+  )
+
+# ============================================================
+# 4. Combine all full results and compute signed log-FDR metric
+# ============================================================
+
+maas_full_all <- dplyr::bind_rows(
+  species_full,
+  genus_full,
+  cplm_full
+) %>%
+  dplyr::filter(!is.na(qval), !is.na(coef), feature != "Unknown") %>%
+  dplyr::mutate(
+    feature = stringr::str_squish(feature),
+    significance = -log(qval) * sign(coef),
+    sig_mark = dplyr::case_when(
+      qval < 0.001 ~ "***",
+      qval < 0.01  ~ "**",
+      qval < 0.05  ~ "*",
+      TRUE ~ ""
+    ),
+    sig = qval < alpha_fdr
+  )
+
+# ============================================================
+# 5. Apply Collective sign/reference fix
+# ============================================================
+
+maas_full_all <- maas_full_all %>%
+  dplyr::mutate(
+    value = as.character(value),
+    needs_fix = (
+      Growout == "Collective" &
+        metadata == "Treatment" &
+        !(value %in% c("Control", "IndigoLT"))
+    ),
+    needs_fix = tidyr::replace_na(needs_fix, FALSE),
+    value = dplyr::if_else(needs_fix, "IndigoLT", value),
+    coef = dplyr::if_else(needs_fix, -coef, coef),
+    significance = dplyr::if_else(needs_fix, -significance, significance)
+  ) %>%
+  dplyr::select(-needs_fix)
+
+# Keep taxa significant in at least one model/comparison
+features_to_plot <- maas_full_all %>%
+  dplyr::group_by(Level, feature) %>%
+  dplyr::summarise(any_sig = any(sig, na.rm = TRUE), .groups = "drop") %>%
+  dplyr::filter(any_sig)
+
+plot_df <- maas_full_all %>%
+  dplyr::semi_join(features_to_plot, by = c("Level", "feature"))
+
+# ============================================================
+# 6. Build significance matrix and asterisk matrix
+# ============================================================
+
+significance_mat_df <- plot_df %>%
+  dplyr::select(Level, feature, Network, significance) %>%
+  dplyr::distinct(Level, feature, Network, .keep_all = TRUE) %>%
+  dplyr::mutate(Row = paste(Level, feature, sep = " | ")) %>%
+  dplyr::select(Row, Network, significance) %>%
+  tidyr::pivot_wider(
+    names_from = Network,
+    values_from = significance,
+    values_fill = NA_real_
+  )
+
+significance_mat <- significance_mat_df %>%
+  tibble::column_to_rownames("Row") %>%
+  as.matrix()
+
+sig_mark_mat_df <- plot_df %>%
+  dplyr::select(Level, feature, Network, sig_mark) %>%
+  dplyr::distinct(Level, feature, Network, .keep_all = TRUE) %>%
+  dplyr::mutate(Row = paste(Level, feature, sep = " | ")) %>%
+  dplyr::select(Row, Network, sig_mark) %>%
+  tidyr::pivot_wider(
+    names_from = Network,
+    values_from = sig_mark,
+    values_fill = ""
+  )
+
+sig_mark_mat <- sig_mark_mat_df %>%
+  tibble::column_to_rownames("Row") %>%
+  as.matrix()
+
+sig_mark_mat <- sig_mark_mat[
+  rownames(significance_mat),
+  colnames(significance_mat),
+  drop = FALSE
+]
+
+# Alphabetize rows and keep asterisks aligned
+row_order <- sort(rownames(significance_mat), method = "radix")
+
+significance_mat <- significance_mat[row_order, , drop = FALSE]
+sig_mark_mat     <- sig_mark_mat[row_order, , drop = FALSE]
+
+# ============================================================
+# 7. Row and column metadata
+# ============================================================
+
+row_info <- data.frame(Row = rownames(significance_mat), stringsAsFactors = FALSE) %>%
+  dplyr::mutate(
+    Level = sub(" \\| .*", "", Row),
+    feature = sub(".* \\| ", "", Row)
+  )
+
+row_split <- factor(row_info$Level, levels = c("Genus", "Species"))
+row_labels <- row_info$feature
+
+colmeta <- do.call(rbind, lapply(colnames(significance_mat), function(cn) {
+  parts <- strsplit(cn, "-", fixed = TRUE)[[1]]
+  data.frame(
+    Growout = parts[1],
+    Model   = parts[2],
+    Rounded = parts[3],
+    row.names = cn,
+    stringsAsFactors = FALSE
+  )
+}))
+
+column_split_vec <- factor(
+  colmeta$Growout,
+  levels = c("Collective", "1", "2")
+)
+
+annotation_colors <- list(
+  Growout = c("1" = "#dbe9ff", "2" = "#ffe8d5", "Collective" = "#000004"),
+  Model   = c("NEGBIN" = "#f8765c", "ZINB" = "#221150", "CPLM" = "#148F77"),
+  Rounded = c("Rounded" = "#d3436e", "Not Rounded" = "#fcfdbf")
+)
+
+col_anno <- ComplexHeatmap::HeatmapAnnotation(
+  df = colmeta,
+  which = "col",
+  col = annotation_colors,
+  show_annotation_name = FALSE,
+  annotation_legend_param = list(border = TRUE),
+  simple_anno_size = grid::unit(0.22, "cm"),
+  gp = grid::gpar(col = "black")
+)
+
+# ============================================================
+# 8. Palette and legend
+# ============================================================
+
+pal <- circlize::colorRamp2(
+  c(-10, 0, 10),
+  c("royalblue4", "white", "firebrick")
+)
+
+legend_params <- list(
+  title = "FDR",
+  title_gp = grid::gpar(fontsize = 12, fontface = "bold"),
+  labels_gp = grid::gpar(fontsize = 10),
+  border = "black",
+  lwd = 1,
+  direction = "horizontal",
+  title_position = "topcenter",
+  at = c(-10.1, -5, -2.5, 0, 2.5, 5, 10.1),
+  labels = c("<-10", "-5", "-2.5", "0", "2.5", "5", ">10"),
+  legend_width = grid::unit(5, "cm"),
+  legend_height = grid::unit(5, "cm"),
+  legend_gp = grid::gpar(col = "black", lwd = 2)
+)
+
+rowname_colors <- ifelse(
+  grepl("\\bEnterococcus\\b", row_labels, ignore.case = TRUE),
+  "red",
+  "black"
+)
+
+# ============================================================
+# 9. Heatmap: all values, no column names, darker NA, layer_fun
+# ============================================================
+
+ht_fdr <- ComplexHeatmap::Heatmap(
+  significance_mat,
+  name = "FDR",
+  na_col = "gray80",
+  col = pal,
+  cluster_rows = FALSE,
+  cluster_columns = TRUE,
+  show_column_names = FALSE,
+  column_title = NULL,
+  bottom_annotation = col_anno,
+  row_split = row_split,
+  column_split = column_split_vec,
+  row_labels = row_labels,
+  row_names_gp = grid::gpar(
+    fontface = "italic",
+    fontsize = 8,
+    col = rowname_colors
+  ),
+  rect_gp = grid::gpar(col = "gray", lwd = 1),
+  border_gp = grid::gpar(col = "black", lwd = 1.5),
+  heatmap_legend_param = legend_params,
+  layer_fun = function(j, i, x, y, width, height, fill) {
+    marks <- sig_mark_mat[cbind(i, j)]
+    keep <- !is.na(marks) & marks != ""
+    if (any(keep)) {
+      grid::grid.text(
+        marks[keep],
+        x = x[keep],
+        y = y[keep] - height[keep] * 0.25,
+        gp = grid::gpar(
+          col = "white",
+          fontsize = 11,
+          fontface = "bold"
+        )
+      )
+    }
+  }
+)
+
+ComplexHeatmap::draw(
+  ht_fdr,
+  heatmap_legend_side = "bottom",
+  annotation_legend_side = "bottom",
+  merge_legend = TRUE
+)
+
+png(
+  "combined_maaslin_FDR_heatmap_all_values_with_CPLM.png",
+  width = 5.5,
+  height = 10,
+  units = "in",
+  res = 900,
+  bg = "transparent"
+)
+
+ComplexHeatmap::draw(
+  ht_fdr,
+  heatmap_legend_side = "bottom",
+  annotation_legend_side = "bottom",
+  merge_legend = TRUE
+)
+
+dev.off()
+
+```
+
+

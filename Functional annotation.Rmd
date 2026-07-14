@@ -1,0 +1,1272 @@
+---
+title: "Functional annotation"
+author: "BH"
+date: "2025-07-28"
+output: html_document
+---
+
+```{r}
+##Now, we will obtain metadata for all identified taxa from  
+####Note that the github link below is inoperable as of 2021; must follow API tutorial
+##https://github.com/TIBHannover/BacDiveR
+##install.packages("BacDive", repos = "http://R-Forge.R-project.org")
+#library(BacDive)
+##library(curl)
+##Will use tax_table_df- taxonomy file for the decontaminated, normalized phyloseq object
+
+##Initialization
+bacdive <- open_bacdive("brett@agrigro.com", "Foliarblend2024") ##replace with email and password
+bacdive <- refresh(bacdive)
+
+##Let's grab the taxa
+# Remove rows where Species value is 'Unknown'
+species_df <- subset(tax_table_df, Species != "Unknown", select = c(Species))
+
+# Convert 'Species' column to a list
+species_list <- as.list(species_df$Species)
+
+# Function to query BacDive for a single species
+query_bacdive <- function(specie, bacdive_object) {
+  tryCatch({
+    result <- retrieve(object = bacdive_object, query = specie, search = "taxon")
+    message(paste("Successfully retrieved data for:", specie))
+    return(result)
+  }, error = function(e) {
+    message(paste("Error retrieving data for:", specie))
+    message("Detailed error message: ", e$message)
+    return(NULL) # Return NULL if there is an error
+  })
+}
+
+# Initialize an empty list to store retrieval results
+retrieval_list <- list()
+
+# Iterate through the species list
+for (specie in species_list) {
+  message(paste("Querying BacDive for species:", specie))
+  result <- query_bacdive(specie, bacdive)
+  retrieval_list[[specie]] <- result
+}
+
+# Remove NULL entries
+retrieval_list <- retrieval_list[!sapply(retrieval_list, is.null)]
+
+# Process the retrieved data
+df_list <- lapply(retrieval_list, function(entry) {
+  # Check if the entry is non-empty and can be unlisted to a vector
+  if (is.list(entry) && !is.null(entry) && length(unlist(entry)) > 0) {
+    temp_df <- data.frame(matrix(unlist(entry), nrow = 1, byrow = TRUE))
+    return(temp_df)
+  } else {
+    return(NULL) # Return NULL for problematic entries
+  }
+})
+
+# Check if df_list is populated correctly
+if (length(df_list) == 0) {
+  stop("No valid data frames were created from the retrieved data.")
+}
+
+# Remove NULL entries
+df_list <- df_list[!sapply(df_list, is.null)]
+
+# Define a function to remove duplicate columns from a data frame
+remove_duplicate_columns <- function(df) {
+  # Get indices of unique columns
+  unique_cols <- !duplicated(as.list(df))
+  # Subset the data frame to retain only the unique columns
+  df[, unique_cols]
+}
+
+# Create a copy of df_list
+df_list_copy <- df_list
+
+# Apply the function to each data frame in df_list_copy
+df_list_cleaned <- lapply(df_list_copy, remove_duplicate_columns)
+
+# Combine all cleaned data frames into a single data frame
+combined_df <- bind_rows(df_list_cleaned)
+
+# Transpose the combined data frame for easier viewing
+combined_df.t <- as.data.frame(t(combined_df))
+
+# Display the result
+combined_df.t
+
+```
+
+```{r}
+##Let's now pull out the info of interest from the bacdive results
+#print(retrieval_list)
+
+##How many taxa did we retrieve info for?
+# Count the number of sublists in retrieval_list that have a length of 1 or greater
+#valid_sublists_count <- sum(sapply(retrieval_list, function(x) length(x) >= 1)) ##1467- not bad!
+
+##Let's attempt to retrieve information
+# Helper function to flatten nested lists
+flatten_list <- function(x) {
+  if (!is.list(x)) {
+    return(x)
+  }
+  unlist(lapply(x, flatten_list), recursive = FALSE)
+}
+
+# Function to extract the required information from a record
+extract_info <- function(record) {
+  flat_record <- flatten_list(record)
+  
+  Gram_stain <- flat_record[grep("gram|negative|positive", flat_record, ignore.case = TRUE)]
+  Cell_shape <- flat_record[grep("-shape", flat_record, ignore.case = TRUE)]
+  Motility <- flat_record[grep("motility", flat_record, ignore.case = TRUE)]
+  pH_optimum <- flat_record[grep("pH", flat_record, ignore.case = TRUE)]
+  Pathogenicity <- flat_record[grep("pathogen", flat_record, ignore.case = TRUE)]
+  Matching_level <- flat_record[grep("Matching level", flat_record, ignore.case = TRUE)]
+  Oxygen_tolerance <- flat_record[grep("aerobe|aerotolerant|anaerobe|facultative aerobe|facultative anaerobe|microaerophile|microaerotolerant|obligate anaerobe|obligate aerobe", flat_record, ignore.case = TRUE)]
+  Temp_range <- flat_record[grep("hyperthermo|psychrophi|thermophi|mesophi", flat_record, ignore.case = TRUE)]
+  Hemolysis <- flat_record[grep("Hemo.*alpha|Hemo.*beta|Hemo.*alpha/beta|Hemo.*gamma|Hemo.*CAMP test", flat_record, ignore.case = TRUE)]
+  
+  Antibiotic_resistance <- unlist(lapply(record, function(subfolder) {
+    if (is.list(subfolder) && any(grepl("antibiotic resistance", names(subfolder), ignore.case = TRUE))) {
+      resistance_info <- subfolder[["antibiotic resistance"]]
+      resistant_antibiotics <- lapply(resistance_info, function(info) {
+        if (is.list(info) && !is.null(info[["is resistant"]]) && info[["is resistant"]] == "yes") {
+          return(info[["metabolite"]])
+        }
+        return(NULL)
+      })
+      return(unlist(resistant_antibiotics))
+    }
+    return(NULL)
+  }))
+  
+  Enzyme_activity <- unlist(lapply(record, function(subfolder) {
+    if (is.list(subfolder) && any(grepl("enzymes", names(subfolder), ignore.case = TRUE))) {
+      enzyme_subfolder <- subfolder[["enzymes"]]
+      enzyme_info <- lapply(enzyme_subfolder, function(enzyme) {
+        if (is.list(enzyme) && any(grepl("ase|chymotrypsin", enzyme$value, ignore.case = TRUE))) {
+          return(paste(enzyme$value, enzyme$activity, sep = ": "))
+        }
+        return(NULL)
+      })
+      return(unlist(enzyme_info))
+    }
+    return(NULL)
+  }))
+  
+  list(
+    Gram_stain = if (length(Gram_stain) > 0) Gram_stain[1] else NA,
+    Cell_shape = if (length(Cell_shape) > 0) Cell_shape[1] else NA,
+    Motility = if (length(Motility) > 0) Motility[1] else NA,
+    pH_optimum = if (length(pH_optimum) > 0) pH_optimum[1] else NA,
+    Pathogenicity = if (length(Pathogenicity) > 0) Pathogenicity[1] else NA,
+    Matching_level = if (length(Matching_level) > 0) Matching_level[1] else NA,
+    Oxygen_tolerance = if (length(Oxygen_tolerance) > 0) Oxygen_tolerance[1] else NA,
+    Antibiotic_resistance = if (length(Antibiotic_resistance) > 0) paste(Antibiotic_resistance, collapse = "; ") else NA,
+    Temp_range = if (length(Temp_range) > 0) Temp_range[1] else NA,
+    Hemolysis = if (length(Hemolysis) > 0) Hemolysis[1] else NA,
+    Enzyme_activity = if (length(Enzyme_activity) > 0) paste(Enzyme_activity, collapse = "; ") else NA
+  )
+}
+
+# Extract information for each species in retrieval_list
+final_results <- lapply(retrieval_list, function(species_records) {
+  if (length(species_records) > 0) {
+    combined_info <- lapply(species_records, extract_info)
+    combined_info <- do.call(rbind, lapply(combined_info, as.data.frame))
+    combined_info <- apply(combined_info, 2, function(col) {
+      col[!is.na(col)][1]
+    })
+    return(as.list(combined_info))
+  } else {
+    return(list(
+      Gram_stain = NA,
+      Cell_shape = NA,
+      Motility = NA,
+      pH_optimum = NA,
+      Pathogenicity = NA,
+      Matching_level = NA,
+      Oxygen_tolerance = NA,
+      Antibiotic_resistance = NA,
+      Temp_range = NA,
+      Hemolysis = NA,
+      Enzyme_activity = NA
+    ))
+  }
+})
+
+# Combine the results into a dataframe
+final_df <- do.call(rbind, lapply(final_results, as.data.frame))
+
+# Assign species names as row names
+rownames(final_df) <- names(retrieval_list)
+
+# Convert the rownames to a column
+final_df <- cbind(Species = rownames(final_df), final_df)
+rownames(final_df) <- NULL
+
+# Display the final dataframe
+#print(final_df)
+
+```
+
+```{r}
+##We will now clean up final_df so it is more usable. 
+
+##Remove columns that did not return good hits
+final_df.2 <- final_df[, !colnames(final_df) %in% c("Motility", "pH_optimum", "Matching_level", "Antibiotic_sensitivity", "Temp_range", "Hemolysis", "Pathogenicity")]
+
+##Clean up gram stain column
+final_df.2$Gram_stain <- sapply(final_df.2$Gram_stain, function(x) {
+  if (grepl("positive", x, ignore.case = TRUE)) {
+    return("Gram-positive")
+  } else if (grepl("negative", x, ignore.case = TRUE)) {
+    return("Gram-negative")
+  } else if (grepl("variable", x, ignore.case = TRUE)) {
+    return("Gram-variable")
+  } else {
+    return(NA)
+  }
+})
+
+##Clean up cell shape column
+final_df.2$Cell_shape <- sapply(final_df.2$Cell_shape, function(x) {
+  if (grepl("rod-shaped \\(0.4 µm x 0.7 µm in size\\),smooth-surfaced and non-motile", x, ignore.case = TRUE)) {
+    return("rod-shaped")
+  } else if (grepl("extensively branched substrate and aerial mycelia. The substrate mycelium is fragmented into rod-shaped elements, and spore chains consisting of smooth and rod-shaped spores are formed on the aerial mycelium", x, ignore.case = TRUE)) {
+    return("rod-shaped")
+  } else {
+    return(x)
+  }
+})
+
+##Clean up oxygen tolerance column
+final_df.2$Oxygen_tolerance <- ifelse(
+  grepl("ANAEROBE BROTH|ANAEROBE AGAR", final_df.2$Oxygen_tolerance, ignore.case = TRUE),
+  "Anaerobe",
+  final_df.2$Oxygen_tolerance
+)
+
+
+##Clean up antibiotic resistance column
+# Create a regex pattern from the antibiotics list
+# Define the list of antibiotics to retain
+antibiotics <- c(
+  "0129 \\(2,4-Diami", "kanamycin", "cycloheximide", "ampicillin", "streptomycin",
+  "gentamicin", "novobiocin", "nalidixic acid", "tetracycline", "neomycin",
+  "polymyxin b", "penicillin g", "chloramphenicol", "erythromycin", "vancomycin",
+  "lincomycin", "penicillin", "cefazolin", "lysostaphin", "trimethoprim",
+  "bacitracin", "rifampicin", "sulfamethoxazole", "amikacin", "tobramycin",
+  "oxacillin", "clindamycin", "ciprofloxacin", "carbenicillin", "norfloxacin",
+  "aztreonam", "amoxicillin", "ceftazidime", "oleandomycin", "piperacillin",
+  "optochin", "cephalothin", "colistin", "metronidazole", "cefuroxime",
+  "nystatin", "cloxacillin", "doxycycline", "ofloxacin", "cefotaxime",
+  "cefoxitin", "ceftriaxone", "minocycline", "spectinomycin", "potassium tellu"
+)
+
+# Create a regex pattern from the antibiotics list, escaping necessary characters
+antibiotics_pattern <- paste(gsub("([\\(\\)])", "\\\\\\1", antibiotics), collapse = "|")
+
+# Function to filter antibiotic names from a string
+filter_antibiotics <- function(text) {
+  matches <- unlist(regmatches(text, gregexpr(antibiotics_pattern, text, ignore.case = TRUE)))
+  if (length(matches) > 0) {
+    return(paste(unique(matches), collapse = "; "))
+  } else {
+    return(NA)
+  }
+}
+
+# Apply the function to the Antibiotic_resistance column
+final_df.2$Antibiotic_resistance <- sapply(final_df.2$Antibiotic_resistance, filter_antibiotics)
+
+##Clean up enzyme activity column
+# Function to split enzyme activities into + and - columns
+split_enzyme_activity <- function(text) {
+  enzyme_activities <- unlist(strsplit(text, "; "))
+  
+  # Separate enzymes into positive and negative activity lists
+  positive_enzymes <- grep(": \\+", enzyme_activities, value = TRUE)
+  negative_enzymes <- grep(": -", enzyme_activities, value = TRUE)
+  
+  # Remove the activity part to keep only enzyme names
+  positive_enzymes <- gsub(": \\+", "", positive_enzymes)
+  negative_enzymes <- gsub(": -", "", negative_enzymes)
+  
+  # Combine enzyme names into single strings
+  positive_enzymes <- if (length(positive_enzymes) > 0) paste(positive_enzymes, collapse = "; ") else NA
+  negative_enzymes <- if (length(negative_enzymes) > 0) paste(negative_enzymes, collapse = "; ") else NA
+  
+  return(list(Positive_enzymes = positive_enzymes, Negative_enzymes = negative_enzymes))
+}
+
+# Apply the function to the Enzyme_activity column
+enzyme_split <- do.call(rbind, lapply(final_df.2$Enzyme_activity, split_enzyme_activity))
+
+# Combine the results with the original dataframe
+final_df.2 <- cbind(final_df.2, enzyme_split)
+
+##Let's add in remaining taxa
+# Get the species list from mas.tax.growout_combined
+species_mas_tax <- rownames(mas.tax.growout_combined)
+
+# Find the missing species
+missing_species <- setdiff(species_mas_tax, final_df.2$Species)
+
+# Create a dataframe for the missing species with NA for all other columns
+missing_df <- data.frame(
+  Species = missing_species,
+  Gram_stain = NA,
+  Cell_shape = NA,
+  Oxygen_tolerance = NA,
+  Antibiotic_resistance = NA,
+  Enzyme_activity = NA,
+  Positive_enzymes = NA,
+  Negative_enzymes = NA,
+  stringsAsFactors = FALSE
+)
+
+# Ensure column names of missing_df match those of final_df.2
+colnames(missing_df) <- colnames(final_df.2)
+
+# Combine the original final_df.2 with the missing_df
+final_df.3 <- rbind(final_df.2, missing_df)
+
+# Ensure the Species column matches the rownames of mas.tax.growout_combined
+final_df.3 <- final_df.3[match(species_mas_tax, final_df.3$Species), ]
+
+##Change NA values to 'not reported'
+# Remove rows where Species is 'Unknown'
+final_df.3 <- final_df.3[final_df.3$Species != "Unknown", ]
+
+# Replace all NA values with 'Not reported'
+final_df.3[is.na(final_df.3)] <- "Not reported"
+
+# Convert all list columns to character columns
+final_df.3 <- final_df.3 %>% 
+  mutate(across(where(is.list), ~ sapply(., function(x) paste(unlist(x), collapse = "; "))))
+
+# Write final_df.3 to a CSV file
+write.csv(final_df.3, "final_df_3.csv", row.names = FALSE)
+
+```
+
+```{r}
+##Let's manually add some info to final_df.3, since some species names have additional info that interfered with the query
+# Define a regular expression to identify rows with exactly two words
+valid_species_regex <- "^[A-Za-z]+\\s+[A-Za-z]+$"
+
+# Use grep to filter rows that do not match the valid pattern
+invalid_species_rows <- final_df.3[!grepl(valid_species_regex, final_df.3$Species), ]
+
+# Replace specified values in the Species column
+final_df.3$Species <- gsub("Micromonospora endophytica Thanaboripat et al. 2015", "Micromonospora endophytica", final_df.3$Species)
+final_df.3$Species <- gsub("Paenibacillus cucumis Ahn et al. 2014", "Paenibacillus cucumis", final_df.3$Species)
+final_df.3$Species <- gsub("Streptomyces viridis \\(Lombardo-Pellegrino 1903\\) Waksman 1953", "Streptomyces viridis", final_df.3$Species)
+
+##Now, manually update metadata
+# Update metadata for Micromonospora endophytica
+final_df.3[final_df.3$Species == "Micromonospora endophytica", ] <- list(
+  Species = "Micromonospora endophytica",
+  Gram_stain = "Gram-positive",
+  Cell_shape = "Not reported",
+  Oxygen_tolerance = "Aerobe",
+  Antibiotic_resistance = final_df.3[final_df.3$Species == "Micromonospora endophytica", "Antibiotic_resistance"],
+  Enzyme_activity = final_df.3[final_df.3$Species == "Micromonospora endophytica", "Enzyme_activity"],
+  Positive_enzymes = "acid phosphatase; alkaline phosphatase; alpha-chymotrypsin; alpha-glucosidase; beta-galactosidase; beta-glucosidase; gelatinase;
+  leucine arylamidase; N-acetyl-beta-glucosaminidase; trypsin",
+  Negative_enzymes = "alpha-fucosidase; alpha-galactosidase; alpha-mannosidase; beta-glucosidase"
+)
+
+# Update metadata for Paenibacillus cucumis
+final_df.3[final_df.3$Species == "Paenibacillus cucumis", ] <- list(
+  Species = "Paenibacillus cucumis",
+  Gram_stain = "Gram-positive",
+  Cell_shape = "Rod-shaped",
+  Oxygen_tolerance = "Aerobe",
+  Antibiotic_resistance = final_df.3[final_df.3$Species == "Paenibacillus cucumis", "Antibiotic_resistance"],
+  Enzyme_activity = final_df.3[final_df.3$Species == "Paenibacillus cucumis", "Enzyme_activity"],
+  Positive_enzymes = "catalase; cytochrome oxidase; urease",
+  Negative_enzymes = "arginine dihydrolase; beta-galactosidase; gelatinase; lysine decarboxylase; ornithine decarboxylase; tryptophan deaminase; urease"
+)
+
+# Update metadata for Streptomyces viridis
+final_df.3[final_df.3$Species == "Streptomyces viridis", ] <- list(
+  Species = "Streptomyces viridis",
+  Gram_stain = "Gram-positive",
+  Cell_shape = "Rod-shaped",
+  Oxygen_tolerance = "Aerobe",
+  Antibiotic_resistance = final_df.3[final_df.3$Species == "Streptomyces viridis", "Antibiotic_resistance"],
+  Enzyme_activity = final_df.3[final_df.3$Species == "Streptomyces viridis", "Enzyme_activity"],
+  Positive_enzymes = "acid phosphatase; alkaline phosphatase; alpha-glucosidase; catalase; esterase (C 4); esterase lipase (C 8); gelatinase; leucine arylamidase; naphthol-AS-BI-phosphohydrolase; valine arylamidase",
+  Negative_enzymes = "alpha-chymotrypsin; alpha-fucosidase; alpha-galactosidase; alpha-mannosidase; beta-glucosidase; beta-glucuronidase"
+)
+
+# Write final_df.3 to a CSV file once again
+write.csv(final_df.3, "final_df_3.csv", row.names = FALSE)
+
+```
+
+```{r}
+##We are going back later to retrieve information regarding metabolite usage (+)
+# Helper function to flatten nested lists
+flatten_nested_list <- function(x) {
+  if (!is.list(x)) {
+    return(x)
+  }
+  unlist(lapply(x, flatten_nested_list), recursive = FALSE)
+}
+
+# Function to extract metabolite utilization information from a record
+extract_metabolite_utilization <- function(record) {
+  flat_record <- flatten_nested_list(record)
+  
+  metabolite_utilization_info <- unlist(lapply(record, function(subfolder) {
+    if (is.list(subfolder) && any(grepl("metabolite utilization", names(subfolder), ignore.case = TRUE))) {
+      metabolite_subfolder <- subfolder[["metabolite utilization"]]
+      metabolite_info <- lapply(metabolite_subfolder, function(metabolite) {
+        if (is.list(metabolite) && !is.null(metabolite[["utilization activity"]])) {
+          return(paste(metabolite[["metabolite"]], metabolite[["utilization activity"]], sep = ": "))
+        }
+        return(NULL)
+      })
+      return(unlist(metabolite_info))
+    }
+    return(NULL)
+  }))
+  
+  list(
+    Metabolite_utilization = if (length(metabolite_utilization_info) > 0) paste(metabolite_utilization_info, collapse = "; ") else NA
+  )
+}
+
+# Extract metabolite utilization information for each species in retrieval_list
+metabolite_utilization_results <- lapply(retrieval_list, function(species_records) {
+  if (length(species_records) > 0) {
+    combined_info <- lapply(species_records, extract_metabolite_utilization)
+    combined_info <- do.call(rbind, lapply(combined_info, as.data.frame))
+    combined_info <- apply(combined_info, 2, function(col) {
+      col[!is.na(col)][1]
+    })
+    return(as.list(combined_info))
+  } else {
+    return(list(
+      Metabolite_utilization = NA
+    ))
+  }
+})
+
+# Combine the results into a dataframe
+metabolite_utilization_df_new <- do.call(rbind, lapply(metabolite_utilization_results, as.data.frame))
+
+# Assign species names as row names
+rownames(metabolite_utilization_df_new) <- names(retrieval_list)
+
+# Convert the rownames to a column
+metabolite_utilization_df_new <- cbind(Species = rownames(metabolite_utilization_df_new), metabolite_utilization_df_new)
+rownames(metabolite_utilization_df_new) <- NULL
+
+# Display the metabolite utilization dataframe
+#print(metabolite_utilization_df_new)
+
+# Function to split metabolite utilization into positive and negative metabolites and clean up spacing
+split_metabolite_utilization_clean <- function(text) {
+  # Remove leading and trailing spaces from the entire text
+  text <- trimws(text)
+  
+  if (is.na(text) || text == "") {
+    return(list(Positive_metabolites = NA, Negative_metabolites = NA))
+  }
+  
+  # Split the text into individual metabolite utilizations
+  metabolite_utilizations <- unlist(strsplit(text, "; "))
+  
+  # Remove leading and trailing spaces from each metabolite utilization
+  metabolite_utilizations <- trimws(metabolite_utilizations)
+  
+  # Separate metabolites into positive and negative lists
+  positive_metabolites <- grep(": \\+", metabolite_utilizations, value = TRUE)
+  negative_metabolites <- grep(": -", metabolite_utilizations, value = TRUE)
+  
+  # Remove the activity part to keep only metabolite names
+  positive_metabolites <- gsub(": \\+", "", positive_metabolites)
+  negative_metabolites <- gsub(": -", "", negative_metabolites)
+  
+  # Combine metabolite names into single strings
+  positive_metabolites <- if (length(positive_metabolites) > 0) paste(positive_metabolites, collapse = "; ") else NA
+  negative_metabolites <- if (length(negative_metabolites) > 0) paste(negative_metabolites, collapse = "; ") else NA
+  
+  return(list(Positive_metabolites = positive_metabolites, Negative_metabolites = negative_metabolites))
+}
+
+# Apply the function to the Metabolite_utilization column
+enzyme_split_cleaned <- do.call(rbind, lapply(metabolite_utilization_df_new$Metabolite_utilization, split_metabolite_utilization_clean))
+
+# Combine the results with the original dataframe
+metabolite_utilization_df_final <- cbind(metabolite_utilization_df_new, enzyme_split_cleaned)
+
+# Function to remove extra spaces
+clean_spaces <- function(text) {
+  if (is.na(text)) {
+    return(NA)
+  }
+  text <- unlist(strsplit(text, "; "))
+  text <- trimws(text)
+  return(paste(text, collapse = "; "))
+}
+
+# Apply the function to the Positive_metabolites and Negative_metabolites columns
+metabolite_utilization_df_final$Positive_metabolites <- sapply(metabolite_utilization_df_final$Positive_metabolites, clean_spaces)
+metabolite_utilization_df_final$Negative_metabolites <- sapply(metabolite_utilization_df_final$Negative_metabolites, clean_spaces)
+
+```
+
+```{r}
+##Let's manually extract the info for the required bacteria
+metabolite_utilization_df_final$Species <- gsub("'Micromonospora endophytica' Thanaboripat et al. 2015", "Micromonospora endophytica", metabolite_utilization_df_final$Species)
+metabolite_utilization_df_final$Species <- gsub("'Paenibacillus cucumis' Ahn et al. 2014", "Paenibacillus cucumis", metabolite_utilization_df_final$Species)
+metabolite_utilization_df_final$Species <- gsub("'Streptomyces viridis' \\(Lombardo-Pellegrino 1903\\) Waksman 1953", "Streptomyces viridis", metabolite_utilization_df_final$Species)
+
+
+##Now update metabolite utilization
+# Update Positive_metabolites for Micromonospora endophytica
+metabolite_utilization_df_final[metabolite_utilization_df_final$Species == "Micromonospora endophytica", "Positive_metabolites"] <- "fructose; gelatin; inositol; mannose; raffinose; sucrose; xylose"
+
+# Update Positive_metabolites for Paenibacillus cucumis
+metabolite_utilization_df_final[metabolite_utilization_df_final$Species == "Paenibacillus cucumis", "Positive_metabolites"] <- "4-nitrophenyl beta-D-glucuronide; arbutin; cellobiose; D-fructose; D-galactose; D-glucose; D-mannitol; D-mannose; D-sorbitol; D-xylose; gluconate; L-alanine 4-nitroanilide; L-arabinose; L-rhamnose; malate; maltitol; maltose; myo-inositol; N-acetylglucosamine; pyruvate; salicin; sucrose; trehalose"
+
+# Update Positive_metabolites for Streptomyces viridis
+metabolite_utilization_df_final[metabolite_utilization_df_final$Species == "Streptomyces viridis", "Positive_metabolites"] <- "arabinose; citrate; D-glucose; esculin; fructose; gelatin; glucose; inositol; L-arabitol; lactate; maltose; mannose; melibiose; rhamnose; sorbitol; succinate; sucrose; xylose"
+
+##Now, add missing species
+# Helper function to standardize species names
+standardize_species_name <- function(name) {
+  # Remove any brackets and trim whitespace
+  name <- gsub("\\[|\\]", "", name)
+  name <- trimws(name)
+  return(name)
+}
+
+# Standardize species names in both data frames- based on polished final_df.3
+
+metabolite_utilization_df_final$Species <- sapply(metabolite_utilization_df_final$Species, standardize_species_name)
+final_df.3$Species <- sapply(final_df.3$Species, standardize_species_name)
+
+# Find missing species in metabolite_utilization_df_final
+missing_species <- setdiff(final_df.3$Species, metabolite_utilization_df_final$Species)
+
+# Create a data frame for the missing species with 'Not reported' for all columns except Species
+missing_df <- data.frame(
+  Species = missing_species,
+  Metabolite_utilization = "Not reported",
+  Positive_metabolites = "Not reported",
+  Negative_metabolites = "Not reported",
+  stringsAsFactors = FALSE
+)
+
+# Ensure column names of missing_df match those of metabolite_utilization_df_final
+colnames(missing_df) <- colnames(metabolite_utilization_df_final)
+
+# Combine the original metabolite_utilization_df_final with the missing_df
+metabolite_utilization_df_final <- rbind(metabolite_utilization_df_final, missing_df)
+
+```
+
+```{r}
+##Merge final_df.3 with metabolite info for supplemental metadata
+
+# Combine final_df.3 and metabolite_utilization_df_final by Species
+Master.metadata <- merge(final_df.3, metabolite_utilization_df_final, by = "Species", all = TRUE)
+
+# Replace all NA values with 'Not reported'
+Master.metadata[is.na(Master.metadata)] <- "Not reported"
+
+# Write the dataframe to a CSV file
+write.csv(Master.metadata, "Master.metadata.csv", row.names = FALSE)
+
+```
+
+```{r}
+##Let's go ahead and visualize metabolite usage
+
+# Replace NA values with "Not reported"
+metabolite_utilization_df_final$Positive_metabolites[is.na(metabolite_utilization_df_final$Positive_metabolites)] <- "Not reported"
+
+# Extract the Positive_metabolites column and split the values by semicolons
+positive_metabolite_activity <- metabolite_utilization_df_final$Positive_metabolites
+
+# Create a new dataframe with each metabolite in its own row
+positive_metabolite_activity_list <- strsplit(positive_metabolite_activity, "; ")
+positive_metabolite_activity_df <- data.frame(
+  Species = rep(metabolite_utilization_df_final$Species, sapply(positive_metabolite_activity_list, length)),
+  Positive_metabolites = unlist(positive_metabolite_activity_list)
+)
+
+# Trim whitespace from Positive_metabolites values
+positive_metabolite_activity_df$Positive_metabolites <- trimws(positive_metabolite_activity_df$Positive_metabolites)
+
+# Calculate the counts and percentages for each metabolite
+positive_metabolite_counts <- positive_metabolite_activity_df %>%
+  group_by(Positive_metabolites) %>%
+  summarise(count = n()) %>%
+  mutate(percentage = count / sum(count) * 100)
+
+# Keep 'Not reported' and top 2 metabolites by percentage, collapse others into 'Other'
+top_positive_metabolites <- positive_metabolite_counts %>%
+  filter(Positive_metabolites != "Not reported") %>%
+  arrange(desc(percentage)) %>%
+  slice(1:2)
+
+# Calculate the percentage for 'Other' category
+other_positive_percentage <- 100 - sum(top_positive_metabolites$percentage) - 
+  positive_metabolite_counts %>% filter(Positive_metabolites == "Not reported") %>% pull(percentage)
+
+# Create the new dataframe
+collapsed_positive_metabolites <- top_positive_metabolites %>%
+  bind_rows(
+    positive_metabolite_counts %>% filter(Positive_metabolites == "Not reported"),
+    data.frame(Positive_metabolites = "Other", count = sum(positive_metabolite_counts$count) - sum(top_positive_metabolites$count) - sum(positive_metabolite_counts$count[positive_metabolite_counts$Positive_metabolites == "Not reported"]),
+               percentage = other_positive_percentage)
+  )
+
+# Capitalize the first letter of each word
+collapsed_positive_metabolites$Positive_metabolites <- sapply(collapsed_positive_metabolites$Positive_metabolites, function(x) {
+  s <- strsplit(x, " ")[[1]]
+  s <- paste(toupper(substring(s, 1,1)), tolower(substring(s, 2)), sep="", collapse=" ")
+  return(s)
+})
+
+##Make sure Not reported is portrayed correctly
+collapsed_positive_metabolites$Positive_metabolites <- gsub("Not Reported", "Not reported", collapsed_positive_metabolites$Positive_metabolites)
+
+# Set the order for Positive_metabolites levels
+collapsed_positive_metabolites$Positive_metabolites <- factor(collapsed_positive_metabolites$Positive_metabolites, 
+                                                      levels = c("Maltose", "Sucrose","Other", "Not reported"))
+
+# Sort collapsed_positive_metabolites by the specified levels
+collapsed_positive_metabolites <- collapsed_positive_metabolites %>%
+  arrange(Positive_metabolites)
+
+# Calculate positions for labels
+collapsed_positive_metabolites <- collapsed_positive_metabolites %>%
+  arrange(desc(Positive_metabolites)) %>%
+  mutate(text_y = cumsum(percentage) - percentage / 2)
+
+# Define the color palette
+color_palette_positive_metabolites <- c("Maltose" = '#582b09', 
+                                    "Sucrose" = '#a95311', 
+                                    "Other" = '#f8d8c0', 
+                                    "Not reported" = "white")
+
+# Define a function to determine text color based on Positive_metabolites value
+label_color_positive_metabolites <- function(Positive_metabolites) {
+  if (Positive_metabolites %in% c("Maltose", "Sucrose")) {
+    return("white")
+  } else {
+    return("black")
+  }
+}
+
+# Add a color column to the dataframe for label colors
+collapsed_positive_metabolites$label_color <- sapply(collapsed_positive_metabolites$Positive_metabolites, label_color_positive_metabolites)
+
+# Create the pie chart
+ggplot(collapsed_positive_metabolites, aes(x = "", y = percentage, fill = Positive_metabolites)) +
+  geom_col(width = 1, color = 'black') +
+  coord_polar(theta = "y") +
+  scale_fill_manual(values = color_palette_positive_metabolites) +
+  theme_void() +
+  geom_label_repel(aes(label = paste0(round(percentage, 1), "%"), y = text_y),
+                   size = 4.5, nudge_x = 1, show.legend = FALSE, fontface = "bold",
+                   label.size = 0.5, box.padding = 0.35, point.padding = 0.5,
+                   segment.color = "black", color = collapsed_positive_metabolites$label_color) +
+  theme(legend.title = element_text(size = 12, face = "bold"),
+        legend.text = element_text(size = 10),
+        legend.position = "right") +
+  labs(fill = "Metabolite (+)")
+
+ggsave("pie.positive.metabolites.1.png", width = 3.5, height = 2, units = "in", dpi = 900)
+
+ggplot(collapsed_positive_metabolites, aes(x = "", y = percentage, fill = Positive_metabolites)) +
+  geom_col(width = 1, color = 'black') +
+  coord_polar(theta = "y") +
+  scale_fill_manual(values = color_palette_positive_metabolites) +
+  theme_void() +
+  geom_label_repel(aes(label = paste0(round(percentage, 1), "%"), y = text_y),
+                   size = 4.5, nudge_x = 1, show.legend = FALSE, fontface = "bold",
+                   label.size = 0.5, box.padding = 0.35, point.padding = 0.5,
+                   segment.color = "black", color = collapsed_positive_metabolites$label_color) +
+  theme(legend.position = "none")
+
+ggsave("pie.positive.metabolites.2.png", width = 3.5, height = 2, units = "in", dpi = 900)
+
+```
+
+```{r}
+##We will now begin visualizing the other metadata
+##library(ggrepel)
+# Create a color palette with shades of blue and white for "Not reported"
+color_palette <- c("Gram-positive" = "#407bb4", "Gram-negative" = '#193148', "Gram-variable" = "#cbdcec", "Not reported" = "white")
+
+# Calculate the percentage of each unique value in Gram_stain
+gram_stain_counts <- final_df.3 %>%
+  group_by(Gram_stain) %>%
+  summarise(count = n()) %>%
+  mutate(percentage = count / sum(count) * 100)
+
+
+# Add a position column for label placement
+gram_stain_counts <- gram_stain_counts %>%
+  arrange(desc(Gram_stain)) %>%
+  mutate(pos = cumsum(percentage) - 0.5 * percentage)
+
+# Create the pie chart
+ggplot(gram_stain_counts, aes(x = "", y = percentage, fill = Gram_stain)) +
+  geom_bar(width = 1, stat = "identity", color = 'black') +
+  coord_polar("y") +
+  scale_fill_manual(values = color_palette) +
+  theme_void() +
+  geom_label_repel(aes(y = pos, label = paste0(round(percentage, 1), "%")),
+                   size = 4.5, nudge_x = 1, show.legend = FALSE, color = "black", fontface = "bold") +
+  theme(legend.title = element_text(size = 12, face = "bold"),
+        legend.text = element_text(size = 10)) +
+  labs(fill = "Gram stain")
+
+
+# Define a function to determine text color based on Gram_stain value
+label_color <- function(Gram_stain) {
+  if (Gram_stain %in% c("Gram-positive", "Gram-negative")) {
+    return("white")
+  } else {
+    return("black")
+  }
+}
+
+# Add a color column to the dataframe for label colors
+# Create the pie chart
+label_colors <- ifelse(gram_stain_counts$Gram_stain %in% c("Gram-positive", "Gram-negative"), "white", "black")
+
+# Create the pie chart
+ggplot(gram_stain_counts, aes(x = "", y = percentage, fill = Gram_stain)) +
+  geom_bar(width = 1, stat = "identity", color = 'black') +
+  coord_polar("y") +
+  scale_fill_manual(values = color_palette) +
+  theme_void() +
+  geom_label_repel(aes(y = pos, label = paste0(round(percentage, 1), "%")),
+                   size = 4.5, nudge_x = 1, show.legend = FALSE, fontface = "bold",
+                   label.size = 0.5, box.padding = 0.35, point.padding = 0.5,
+                   segment.color = "black", color = label_colors) +
+  theme(legend.title = element_text(size = 12, face = "bold"),
+        legend.text = element_text(size = 10)) +
+  labs(fill = "Gram stain")
+
+ggsave("pie.gram.stain.1.png", width = 3.5, height = 2, units = "in", dpi = 900)
+
+ggplot(gram_stain_counts, aes(x = "", y = percentage, fill = Gram_stain)) +
+  geom_bar(width = 1, stat = "identity", color = 'black') +
+  coord_polar("y") +
+  scale_fill_manual(values = color_palette) +
+  theme_void() +
+  geom_label_repel(aes(y = pos, label = paste0(round(percentage, 1), "%")),
+                   size = 4.5, nudge_x = 1, show.legend = FALSE, fontface = "bold",
+                   label.size = 0.5, box.padding = 0.35, point.padding = 0.5,
+                   segment.color = "black", color = label_colors) +
+  theme(legend.position = 'none')
+  #labs(fill = "Gram stain")
+
+ggsave("pie.gram.stain.2.png", width = 3.5, height = 2, units = "in", dpi = 900)
+
+```
+
+```{r}
+##Let's now visualize cell shape
+
+# Capitalize the first letter of each value in the Cell_shape column
+final_df.3$Cell_shape <- tolower(final_df.3$Cell_shape)
+final_df.3$Cell_shape <- gsub("(^\\w)(\\w*)", "\\U\\1\\L\\2", final_df.3$Cell_shape, perl = TRUE)
+
+# Recalculate the percentage of each unique value in Cell_shape
+cell_shape_counts <- final_df.3 %>%
+  group_by(Cell_shape) %>%
+  summarise(count = n()) %>%
+  mutate(percentage = count / sum(count) * 100)
+
+# Collapse less common shapes into "Other"
+cell_shape_counts <- cell_shape_counts %>%
+  mutate(Cell_shape = ifelse(Cell_shape %in% c("Coccus-shaped", "Rod-shaped", "Not reported"), 
+                             Cell_shape, "Other")) %>%
+  group_by(Cell_shape) %>%
+  summarise(count = sum(count), percentage = sum(percentage)) %>%
+  arrange(factor(Cell_shape, levels = c("Coccus-shaped", "Rod-shaped", "Other", "Not reported")))
+
+# Set the order for Cell_shape levels
+cell_shape_counts$Cell_shape <- factor(cell_shape_counts$Cell_shape, levels = c("Coccus-shaped", "Rod-shaped", "Other", "Not reported"))
+
+# Sort cell_shape_counts by the specified levels
+cell_shape_counts <- cell_shape_counts %>%
+  arrange(Cell_shape)
+
+# Calculate positions for labels
+cell_shape_counts <- cell_shape_counts %>%
+  arrange(desc(Cell_shape)) %>%
+  mutate(text_y = cumsum(count) - count / 2)
+
+# Create a color palette with shades of blue and white for "Not reported"
+color_palette_shape <- c(
+  "Coccus-shaped" = '#2d543e', #'#335f46'
+  "Rod-shaped" = '#3e7455', 
+  "Other" = '#d1e6da', 
+  "Not reported" = "white"
+)
+
+# Define a function to determine text color based on Cell_shape value
+label_color_shape <- function(Cell_shape) {
+  if (Cell_shape %in% c("Rod-shaped", "Coccus-shaped")) {
+    return("white")
+  } else {
+    return("black")
+  }
+}
+
+# Add a color column to the dataframe for label colors
+cell_shape_counts$label_color <- sapply(cell_shape_counts$Cell_shape, label_color_shape)
+
+# Create the pie chart
+ggplot(cell_shape_counts, aes(x = "", y = count, fill = Cell_shape)) +
+  geom_col(width = 1, color = 'black') +
+  coord_polar(theta = "y") +
+  scale_fill_manual(values = color_palette_shape) +
+  theme_void() +
+  geom_label_repel(aes(label = paste0(round(percentage, 1), "%"), y = text_y),
+                   nudge_x = 0.9, nudge_y = 0.6,
+                   size = 5, show.legend = FALSE, 
+                   fontface = "bold", color = cell_shape_counts$label_color,
+                   box.padding = 0.35, point.padding = 0.5, 
+                   segment.color = "black") +
+  theme(legend.title = element_text(size = 12, face = "bold"),
+        legend.text = element_text(size = 10)) +
+  labs(fill = "Cell shape")
+
+ggsave("pie.cell.shape.1.png", width = 3.5, height = 2, units = "in", dpi = 900)
+
+# Create the pie chart
+ggplot(cell_shape_counts, aes(x = "", y = count, fill = Cell_shape)) +
+  geom_col(width = 1, color = 'black') +
+  coord_polar(theta = "y") +
+  scale_fill_manual(values = color_palette_shape) +
+  theme_void() +
+  geom_label_repel(aes(label = paste0(round(percentage, 1), "%"), y = text_y),
+                   nudge_x = 1, nudge_y = 0.6,
+                   size = 4.5, show.legend = FALSE, 
+                   fontface = "bold", color = cell_shape_counts$label_color,
+                   box.padding = 0.35, point.padding = 0.5, 
+                   segment.color = "black") +
+  theme(legend.position = 'none')
+  #labs(fill = "Cell shape")
+
+ggsave("pie.cell.shape.4.png", width = 3.5, height = 2, units = "in", dpi = 900)
+
+```
+
+```{r}
+# Capitalize the first word of each category
+final_df.3$Oxygen_tolerance <- gsub("(\\w)(\\w*)", "\\U\\1\\L\\2", tolower(final_df.3$Oxygen_tolerance), perl = TRUE)
+
+# Calculate percentages
+oxygen_tolerance_counts <- final_df.3 %>%
+  group_by(Oxygen_tolerance) %>%
+  summarise(count = n()) %>%
+  mutate(percentage = count / sum(count) * 100)
+
+# Consolidate categories within oxygen_tolerance_counts
+oxygen_tolerance_counts <- oxygen_tolerance_counts %>%
+  mutate(Oxygen_tolerance = case_when(
+    grepl("anaerobe", Oxygen_tolerance, ignore.case = TRUE) ~ "Facultative/obligate anaerobe",
+    grepl("aerobe", Oxygen_tolerance, ignore.case = TRUE) ~ "Facultative/obligate aerobe",
+    Oxygen_tolerance == "Not Reported" ~ "Not reported",
+    TRUE ~ Oxygen_tolerance
+  ))
+
+# Recalculate percentages after consolidation
+oxygen_tolerance_counts <- oxygen_tolerance_counts %>%
+  group_by(Oxygen_tolerance) %>%
+  summarise(count = sum(count)) %>%
+  mutate(percentage = count / sum(count) * 100)
+
+# Add a position column for label placement
+oxygen_tolerance_counts <- oxygen_tolerance_counts %>%
+  arrange(desc(Oxygen_tolerance)) %>%
+  mutate(pos = cumsum(percentage) - 0.5 * percentage)
+
+# Define the color palette
+color_palette <- c("Facultative/obligate aerobe" = '#343150', 
+                   "Facultative/obligate anaerobe" = '#5b578d', 
+                   "Microaerophile" = '#d5d4e4', 
+                   "Not reported" = "white")
+
+# Define a function to determine text color based on Oxygen_tolerance value
+label_color <- function(Oxygen_tolerance) {
+  if (Oxygen_tolerance %in% c("Facultative/obligate aerobe", "Facultative/obligate anaerobe")) {
+    return("white")
+  } else {
+    return("black")
+  }
+}
+
+# Add a color column to the dataframe for label colors
+oxygen_tolerance_counts$label_color <- sapply(oxygen_tolerance_counts$Oxygen_tolerance, label_color)
+
+# Create the pie chart
+ggplot(oxygen_tolerance_counts, aes(x = "", y = percentage, fill = Oxygen_tolerance)) +
+  geom_bar(width = 1, stat = "identity", color = 'black') +
+  coord_polar("y") +
+  scale_fill_manual(values = color_palette) +
+  theme_void() +
+  geom_label_repel(aes(y = pos, label = paste0(round(percentage, 1), "%"), color = label_color),
+                   size = 4.5, nudge_x = 1, show.legend = FALSE, fontface = "bold",
+                   label.size = 0.5, box.padding = 0.35, point.padding = 0.5,
+                   segment.color = "black") +
+  theme(legend.title = element_text(size = 12, face = "bold"),
+        legend.text = element_text(size = 10)) +
+  labs(fill = "Oxygen tolerance") +
+  scale_color_identity()
+
+ggsave("pie.o2.tolerance.1.png", width = 3.5, height = 2, units = "in", dpi = 900)
+
+# Create the pie chart
+ggplot(oxygen_tolerance_counts, aes(x = "", y = percentage, fill = Oxygen_tolerance)) +
+  geom_bar(width = 1, stat = "identity", color = 'black') +
+  coord_polar("y") +
+  scale_fill_manual(values = color_palette) +
+  theme_void() +
+  geom_label_repel(aes(y = pos, label = paste0(round(percentage, 1), "%"), color = label_color),
+                   size = 4.5, nudge_x = 1, show.legend = FALSE, fontface = "bold",
+                   label.size = 0.5, box.padding = 0.35, point.padding = 0.5,
+                   segment.color = "black") +
+  theme(legend.position = 'none') +
+  #labs(fill = "Oxygen tolerance") +
+  scale_color_identity()
+
+ggsave("pie.o2.tolerance.2.png", width = 3.5, height = 2, units = "in", dpi = 900)
+
+```
+
+```{r}
+##Now to visualize antibiotic resistance
+# Extract the Antibiotic_resistance column and split the values by semicolons
+antibiotic_resistance <- final_df.3$Antibiotic_resistance
+
+# Create a new dataframe with each antibiotic in its own row
+antibiotic_resistance_list <- strsplit(antibiotic_resistance, "; ")
+antibiotic_resistance_df <- data.frame(
+  Species = rep(final_df.3$Species, sapply(antibiotic_resistance_list, length)),
+  Antibiotic_resistance = unlist(antibiotic_resistance_list)
+)
+
+# Calculate the counts and percentages for each antibiotic
+antibiotic_counts <- antibiotic_resistance_df %>%
+  group_by(Antibiotic_resistance) %>%
+  summarise(count = n()) %>%
+  mutate(percentage = count / sum(count) * 100)
+
+# Function to capitalize the first letter of each word
+capitalize_first_letter <- function(string) {
+  sapply(string, function(x) {
+    paste(toupper(substring(x, 1, 1)), tolower(substring(x, 2)), sep = "")
+  })
+}
+
+# Keep 'Not reported' and top 5 antibiotics by percentage, collapse others into 'Other'
+top_antibiotics <- antibiotic_counts %>%
+  filter(Antibiotic_resistance != "Not reported") %>%
+  arrange(desc(percentage)) %>%
+  slice(1:2)
+
+# Calculate the percentage for 'Other' category
+other_percentage <- 100 - sum(top_antibiotics$percentage) - 
+                    antibiotic_counts %>% filter(Antibiotic_resistance == "Not reported") %>% select(percentage)
+
+# Create the new dataframe
+collapsed_antibiotics <- top_antibiotics %>%
+  bind_rows(
+    antibiotic_counts %>% filter(Antibiotic_resistance == "Not reported"),
+    data.frame(Antibiotic_resistance = "Other", count = sum(antibiotic_counts$count) - sum(top_antibiotics$count) - sum(antibiotic_counts$count[antibiotic_counts$Antibiotic_resistance == "Not reported"]),
+               percentage = other_percentage)
+  )
+
+# Capitalize the first letter of each word
+collapsed_antibiotics$Antibiotic_resistance <- capitalize_first_letter(collapsed_antibiotics$Antibiotic_resistance)
+
+# Set the order for Antibiotic_resistance levels
+collapsed_antibiotics$Antibiotic_resistance <- factor(collapsed_antibiotics$Antibiotic_resistance, 
+                                                      levels = c("Lysostaphin", "Nalidixic acid","Other", "Not reported"))
+
+# Sort collapsed_antibiotics by the specified levels
+collapsed_antibiotics <- collapsed_antibiotics %>%
+  arrange(Antibiotic_resistance)
+
+# Calculate positions for labels
+collapsed_antibiotics <- collapsed_antibiotics %>%
+  arrange(desc(Antibiotic_resistance)) %>%
+  mutate(text_y = cumsum(percentage) - percentage / 2)
+
+# Define the color palette
+color_palette <- c(#"Streptomycin" = '#f5c5c3', 
+                   "Other" = '#f5c5c3',
+                   "Not reported" = "white", 
+                   "Nalidixic acid" = '#cc2820', #'#e97b75', 
+                   "Lysostaphin" = '#771713') #'#cc2820', 
+                   #"Kanamycin" = '#771713', 
+                   #"Gentamicin" = '#460e0b')
+
+# Define a function to determine text color based on Antibiotic_resistance value
+label_color <- function(Antibiotic_resistance) {
+  if (Antibiotic_resistance %in% c("Lysostaphin", "Nalidixic acid")) {
+    return("white")
+  } else {
+    return("black")
+  }
+}
+
+# Add a color column to the dataframe for label colors
+collapsed_antibiotics$label_color <- sapply(collapsed_antibiotics$Antibiotic_resistance, label_color)
+
+# Create the pie chart
+ggplot(collapsed_antibiotics, aes(x = "", y = percentage, fill = Antibiotic_resistance)) +
+  geom_col(width = 1, color = 'black') +
+  coord_polar(theta = "y") +
+  scale_fill_manual(values = color_palette) +
+  theme_void() +
+  geom_label_repel(aes(label = paste0(round(percentage, 1), "%"), y = text_y),
+                   size = 4.5, nudge_x = 1, show.legend = FALSE, fontface = "bold",
+                   label.size = 0.5, box.padding = 0.35, point.padding = 0.5,
+                   segment.color = "black", color = collapsed_antibiotics$label_color) +
+  theme(legend.title = element_text(size = 12, face = "bold"),
+        legend.text = element_text(size = 10)) +
+  labs(fill = "Antibiotic resistance")
+
+ggsave("pie.antibiotic.resistance.1.png", width = 3.5, height = 2, units = "in", dpi = 900)
+
+# Create the pie chart
+ggplot(collapsed_antibiotics, aes(x = "", y = percentage, fill = Antibiotic_resistance)) +
+  geom_col(width = 1, color = 'black') +
+  coord_polar(theta = "y") +
+  scale_fill_manual(values = color_palette) +
+  theme_void() +
+  geom_label_repel(aes(label = paste0(round(percentage, 1), "%"), y = text_y),
+                   size = 4.5, nudge_x = 1, show.legend = FALSE, fontface = "bold", #nudge_y = 2,
+                   label.size = 0.5, box.padding = 0.35, point.padding = 0.5,
+                   segment.color = "black", color = collapsed_antibiotics$label_color) +
+  theme(legend.position = 'none')
+
+ggsave("pie.antibiotic.resistance.3.png", width = 3.5, height = 2, units = "in", dpi = 900)
+
+```
+
+```{r}
+##Positive enzymes
+# Extract the Enzyme_activity column and split the values by semicolons
+enzyme_activity <- final_df.3$Positive_enzymes
+
+# Create a new dataframe with each enzyme in its own row
+enzyme_activity_list <- strsplit(enzyme_activity, "; ")
+enzyme_activity_df <- data.frame(
+  Species = rep(final_df.3$Species, sapply(enzyme_activity_list, length)),
+  Positive_enzymes = unlist(enzyme_activity_list)
+)
+
+# Calculate the counts and percentages for each enzyme
+enzyme_counts <- enzyme_activity_df %>%
+  group_by(Positive_enzymes) %>%
+  summarise(count = n()) %>%
+  mutate(percentage = count / sum(count) * 100)
+
+# Function to capitalize the first letter of each word
+capitalize_first_letter <- function(string) {
+  sapply(string, function(x) {
+    paste(toupper(substring(x, 1, 1)), tolower(substring(x, 2)), sep = "")
+  })
+}
+
+# Keep 'Not reported' and top 2 enzymes by percentage, collapse others into 'Other'
+top_enzymes <- enzyme_counts %>%
+  filter(Positive_enzymes != "Not reported") %>%
+  arrange(desc(percentage)) %>%
+  slice(1:2)
+
+# Calculate the percentage for 'Other' category
+other_percentage <- 100 - sum(top_enzymes$percentage) - 
+  enzyme_counts %>% filter(Positive_enzymes == "Not reported") %>% pull(percentage)
+
+# Create the new dataframe
+collapsed_enzymes <- top_enzymes %>%
+  bind_rows(
+    enzyme_counts %>% filter(Positive_enzymes == "Not reported"),
+    data.frame(Positive_enzymes = "Other", count = sum(enzyme_counts$count) - sum(top_enzymes$count) - sum(enzyme_counts$count[enzyme_counts$Positive_enzymes == "Not reported"]),
+               percentage = other_percentage)
+  )
+
+# Capitalize the first letter of each word
+collapsed_enzymes$Positive_enzymes <- capitalize_first_letter(collapsed_enzymes$Positive_enzymes)
+
+# Set the order for Positive_enzymes levels
+collapsed_enzymes$Positive_enzymes <- factor(collapsed_enzymes$Positive_enzymes, 
+                                                      levels = c("Alkaline phosphatase", "Catalase","Other", "Not reported"))
+# Sort collapsed_enzymes by the specified levels
+collapsed_enzymes <- collapsed_enzymes %>%
+  arrange(Positive_enzymes)
+
+# Calculate positions for labels
+collapsed_enzymes <- collapsed_enzymes %>%
+  arrange(desc(Positive_enzymes)) %>%
+  mutate(text_y = cumsum(percentage) - percentage / 2)
+
+# Define the color palette
+color_palette_enzymes <- c("Alkaline phosphatase" = '#6b4f1f', 
+                           "Catalase" = '#b68736', 
+                           "Other" = '#e3cca3', 
+                           "Not reported" = "white")
+
+# Define a function to determine text color based on Positive_enzymes value
+label_color_enzymes <- function(Positive_enzymes) {
+  if (Positive_enzymes %in% c("Alkaline phosphatase", "Catalase")) {
+    return("white")
+  } else {
+    return("black")
+  }
+}
+
+# Add a color column to the dataframe for label colors
+collapsed_enzymes$label_color <- sapply(collapsed_enzymes$Positive_enzymes, label_color_enzymes)
+
+# Create the pie chart
+ggplot(collapsed_enzymes, aes(x = "", y = percentage, fill = Positive_enzymes)) +
+  geom_col(width = 1, color = 'black') +
+  coord_polar(theta = "y") +
+  scale_fill_manual(values = color_palette_enzymes) +
+  theme_void() +
+  geom_label_repel(aes(label = paste0(round(percentage, 1), "%"), y = text_y),
+                   size = 4.5, nudge_x = 1, show.legend = FALSE, fontface = "bold",
+                   label.size = 0.5, box.padding = 0.35, point.padding = 0.5,
+                   segment.color = "black", color = collapsed_enzymes$label_color) +
+  theme(legend.title = element_text(size = 12, face = "bold"),
+        legend.text = element_text(size = 10)) +
+  labs(fill = "Enzyme (+)")
+
+ggsave("pie.positive.enzyme.1.png", width = 3.5, height = 2, units = "in", dpi = 900)
+
+# Create the pie chart
+ggplot(collapsed_enzymes, aes(x = "", y = percentage, fill = Positive_enzymes)) +
+  geom_col(width = 1, color = 'black') +
+  coord_polar(theta = "y") +
+  scale_fill_manual(values = color_palette_enzymes) +
+  theme_void() +
+  geom_label_repel(aes(label = paste0(round(percentage, 1), "%"), y = text_y),
+                   size = 4.5, nudge_x = 1, show.legend = FALSE, fontface = "bold",
+                   label.size = 0.5, box.padding = 0.35, point.padding = 0.5,
+                   segment.color = "black", color = collapsed_enzymes$label_color) +
+  theme(legend.position = 'none')
+
+ggsave("pie.positive.enzyme.2.png", width = 3.5, height = 2, units = "in", dpi = 900)
+
+```
+
+```{r}
+# Extract the Negative_enzymes column and split the values by semicolons
+negative_enzyme_activity <- final_df.3$Negative_enzymes
+
+# Create a new dataframe with each enzyme in its own row
+negative_enzyme_activity_list <- strsplit(negative_enzyme_activity, "; ")
+negative_enzyme_activity_df <- data.frame(
+  Species = rep(final_df.3$Species, sapply(negative_enzyme_activity_list, length)),
+  Negative_enzymes = unlist(negative_enzyme_activity_list)
+)
+
+# Calculate the counts and percentages for each enzyme
+negative_enzyme_counts <- negative_enzyme_activity_df %>%
+  group_by(Negative_enzymes) %>%
+  summarise(count = n()) %>%
+  mutate(percentage = count / sum(count) * 100)
+
+# Keep 'Not reported' and top 2 enzymes by percentage, collapse others into 'Other'
+top_negative_enzymes <- negative_enzyme_counts %>%
+  filter(Negative_enzymes != "Not reported") %>%
+  arrange(desc(percentage)) %>%
+  slice(1:2)
+
+# Calculate the percentage for 'Other' category
+other_negative_percentage <- 100 - sum(top_negative_enzymes$percentage) - 
+  negative_enzyme_counts %>% filter(Negative_enzymes == "Not reported") %>% pull(percentage)
+
+# Create the new dataframe
+collapsed_negative_enzymes <- top_negative_enzymes %>%
+  bind_rows(
+    negative_enzyme_counts %>% filter(Negative_enzymes == "Not reported"),
+    data.frame(Negative_enzymes = "Other", count = sum(negative_enzyme_counts$count) - sum(top_negative_enzymes$count) - sum(negative_enzyme_counts$count[negative_enzyme_counts$Negative_enzymes == "Not reported"]),
+               percentage = other_negative_percentage)
+  )
+
+# Capitalize the first letter of each word
+collapsed_negative_enzymes$Negative_enzymes <- capitalize_first_letter(collapsed_negative_enzymes$Negative_enzymes)
+
+# Set the order for Negative_enzymes levels
+collapsed_negative_enzymes$Negative_enzymes <- factor(collapsed_negative_enzymes$Negative_enzymes, 
+                                                      levels = c("Beta-glucuronidase", "Urease","Other", "Not reported"))
+
+# Sort collapsed_negative_enzymes by the specified levels
+collapsed_negative_enzymes <- collapsed_negative_enzymes %>%
+  arrange(Negative_enzymes)
+
+# Calculate positions for labels
+collapsed_negative_enzymes <- collapsed_negative_enzymes %>%
+  arrange(desc(Negative_enzymes)) %>%
+  mutate(text_y = cumsum(percentage) - percentage / 2)
+
+# Define the color palette
+color_palette_negative_enzymes <- c("Beta-glucuronidase" = '#582b09', 
+                                    "Urease" = '#a95311', 
+                                    "Other" = '#f8d8c0', 
+                                    "Not reported" = "white")
+
+# Define a function to determine text color based on Negative_enzymes value
+label_color_negative_enzymes <- function(Negative_enzymes) {
+  if (Negative_enzymes %in% c("Beta-glucuronidase", "Urease")) {
+    return("white")
+  } else {
+    return("black")
+  }
+}
+
+# Add a color column to the dataframe for label colors
+collapsed_negative_enzymes$label_color <- sapply(collapsed_negative_enzymes$Negative_enzymes, label_color_negative_enzymes)
+
+# Create the pie chart
+ggplot(collapsed_negative_enzymes, aes(x = "", y = percentage, fill = Negative_enzymes)) +
+  geom_col(width = 1, color = 'black') +
+  coord_polar(theta = "y") +
+  scale_fill_manual(values = color_palette_negative_enzymes) +
+  theme_void() +
+  geom_label_repel(aes(label = paste0(round(percentage, 1), "%"), y = text_y),
+                   size = 4.5, nudge_x = 1, show.legend = FALSE, fontface = "bold",
+                   label.size = 0.5, box.padding = 0.35, point.padding = 0.5,
+                   segment.color = "black", color = collapsed_negative_enzymes$label_color) +
+  theme(legend.title = element_text(size = 12, face = "bold"),
+        legend.text = element_text(size = 10)) +
+  labs(fill = "Enzyme (-)")
+
+ggsave("pie.negative.enzyme.1.png", width = 3.5, height = 2, units = "in", dpi = 900)
+
+ggplot(collapsed_negative_enzymes, aes(x = "", y = percentage, fill = Negative_enzymes)) +
+  geom_col(width = 1, color = 'black') +
+  coord_polar(theta = "y") +
+  scale_fill_manual(values = color_palette_negative_enzymes) +
+  theme_void() +
+  geom_label_repel(aes(label = paste0(round(percentage, 1), "%"), y = text_y),
+                   size = 4.5, nudge_x = 1, show.legend = FALSE, fontface = "bold",
+                   label.size = 0.5, box.padding = 0.35, point.padding = 0.5,
+                   segment.color = "black", color = collapsed_negative_enzymes$label_color) +
+  theme(legend.position = 'none')
+
+ggsave("pie.negative.enzyme.2.png", width = 3.5, height = 2, units = "in", dpi = 900)
+
+```

@@ -1,0 +1,1069 @@
+---
+title: "kipa.in.vitro"
+author: "BH"
+date: "2026-06-04"
+output: html_document
+---
+
+```{r}
+##Import data
+ILT_CFU_Count <- read.csv("~/Documents/DeQueen_Litter/ILT_CFU_Count.csv")
+
+```
+
+```{r}
+##Visualize and run stats
+# ==============================================================
+# ILT CFU Count — ANOVA + Tukey CLD + visualization
+# Dose-response modeling will be handled separately later
+# ==============================================================
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggtext)
+library(multcompView)
+
+# ==============================================================
+# 1. Pivot to long format + clean treatment names
+# ==============================================================
+
+ILT_long <- ILT_CFU_Count %>%
+  tidyr::pivot_longer(
+    cols = -c(Target, Day, Replicate),
+    names_to = "Treatment_raw",
+    values_to = "Log10"
+  ) %>%
+  dplyr::mutate(
+    Treatment = dplyr::case_when(
+      Treatment_raw == "Media.Control"    ~ "MCT",
+      Treatment_raw == "Bacteria.Control" ~ "BCT",
+      grepl("^ILT", Treatment_raw) ~ gsub("ILT\\.|\\.$", "", Treatment_raw),
+      TRUE ~ Treatment_raw
+    ),
+    Treatment = dplyr::recode(
+      Treatment,
+      "0.75" = "0.75%",
+      "1.5"  = "1.5%",
+      "3"    = "3%",
+      "6"    = "6%",
+      "12"   = "12%",
+      "24"   = "24%"
+    ),
+    Treatment = factor(
+      Treatment,
+      levels = c("MCT", "BCT", "0.75%", "1.5%", "3%", "6%", "12%", "24%")
+    ),
+    Day = factor(Day, levels = sort(unique(Day))),
+    Target_label = dplyr::recode(
+      as.character(Target),
+      "E. cecorum" = "*E. cecorum*",
+      "E. hirae"   = "*E. hirae*"
+    ),
+    Target_label = factor(
+      Target_label,
+      levels = c("*E. cecorum*", "*E. hirae*")
+    )
+  )
+
+# ==============================================================
+# 2. Summary stats
+# ==============================================================
+
+ILT_summary <- ILT_long %>%
+  dplyr::group_by(Target, Target_label, Day, Treatment) %>%
+  dplyr::summarise(
+    Mean = mean(Log10, na.rm = TRUE),
+    SD   = sd(Log10, na.rm = TRUE),
+    N    = dplyr::n(),
+    SEM  = SD / sqrt(N),
+    .groups = "drop"
+  )
+
+# ==============================================================
+# 3. One-way ANOVA by Target x Day
+# ==============================================================
+
+ILT_anova_results <- ILT_long %>%
+  dplyr::group_by(Target, Target_label, Day) %>%
+  dplyr::group_modify(~ {
+    fit <- aov(Log10 ~ Treatment, data = .x)
+    out <- summary(fit)[[1]]
+
+    data.frame(
+      df_treatment = out["Treatment", "Df"],
+      df_residual  = out["Residuals", "Df"],
+      F_value      = out["Treatment", "F value"],
+      p_value      = out["Treatment", "Pr(>F)"]
+    )
+  }) %>%
+  dplyr::ungroup()
+
+cat("\n=== ANOVA results ===\n")
+print(ILT_anova_results)
+
+# ==============================================================
+# 4. Pairwise t-tests by Target x Day
+# ==============================================================
+
+ILT_pairwise_ttest_results <- ILT_long %>%
+  dplyr::group_by(Target, Day) %>%
+  dplyr::group_split() %>%
+  setNames(
+    ILT_long %>%
+      dplyr::distinct(Target, Day) %>%
+      dplyr::mutate(name = paste(Target, Day, sep = " | Day ")) %>%
+      dplyr::pull(name)
+  ) %>%
+  lapply(function(df) {
+    pairwise.t.test(
+      x = df$Log10,
+      g = df$Treatment,
+      p.adjust.method = "none",
+      pool.sd = FALSE
+    )
+  })
+
+cat("\n=== Pairwise t-test results ===\n")
+print(ILT_pairwise_ttest_results)
+
+# ==============================================================
+# 5. Tukey HSD + CLD letters by Target x Day
+# ==============================================================
+
+ILT_cld <- ILT_long %>%
+  dplyr::group_by(Target, Target_label, Day) %>%
+  dplyr::group_modify(~ {
+    fit <- aov(Log10 ~ Treatment, data = .x)
+    tuk <- TukeyHSD(fit)
+    cld <- multcompView::multcompLetters4(fit, tuk)
+
+    data.frame(
+      Treatment = names(cld$Treatment$Letters),
+      CLD = cld$Treatment$Letters,
+      stringsAsFactors = FALSE
+    )
+  }) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(
+    Treatment = factor(
+      Treatment,
+      levels = c("MCT", "BCT", "0.75%", "1.5%", "3%", "6%", "12%", "24%")
+    )
+  ) %>%
+  dplyr::left_join(
+    ILT_summary,
+    by = c("Target", "Target_label", "Day", "Treatment")
+  ) %>%
+  dplyr::mutate(
+    y_pos = Mean + SEM + 0.4
+  )
+
+# ==============================================================
+# 6. Treatment fill colors
+# ==============================================================
+
+biofilm_fills <- c(
+  "MCT"   = "grey85",
+  "BCT"   = "grey45",
+  "0.75%" = "#fcfdbf",
+  "1.5%"  = "#febb81",
+  "3%"    = "#f8765c",
+  "6%"    = "#d3436e",
+  "12%"   = "#982d80",
+  "24%"   = "#221150"
+)
+
+# ==============================================================
+# 7. Plot
+# ==============================================================
+
+p_ILT_CFU <- ggplot(
+  ILT_summary,
+  aes(x = Treatment, y = Mean, fill = Treatment)
+) +
+  geom_col(
+    color = "black",
+    width = 0.75
+  ) +
+  geom_errorbar(
+    aes(ymin = Mean - SEM, ymax = Mean + SEM),
+    width = 0.3,
+    linewidth = 0.5
+  ) +
+  geom_point(
+    data = ILT_long,
+    aes(x = Treatment, y = Log10),
+    position = position_jitter(width = 0.08),
+    shape = 21,
+    size = 1.4,
+    fill = "white",
+    color = "black",
+    stroke = 0.4,
+    alpha = 0.9,
+    show.legend = FALSE
+  ) +
+  geom_text(
+    data = ILT_cld,
+    aes(x = Treatment, y = y_pos, label = CLD),
+    size = 2.6,
+    fontface = "bold",
+    vjust = -0.35,
+    show.legend = FALSE
+  ) +
+  facet_grid(
+    rows = vars(Target_label),
+    cols = vars(Day),
+    scales = "free_y"
+  ) +
+  scale_fill_manual(values = biofilm_fills, drop = FALSE) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.18))) +
+  labs(
+    x = NULL,
+    y = expression(bold(Log[10]~CFU/mL))
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(size = 6, color = "black"),
+    axis.ticks.x = element_line(color = "black"),
+    axis.text.y = element_text(size = 9, color = "black"),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 12, face = "bold", color = "black"),
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    strip.text.x = ggtext::element_markdown(size = 10, color = "white", face = "bold"),
+    strip.text.y = element_text(size = 10, color = "white", face = "bold"),
+    strip.background = element_rect(fill = "black", color = "black")
+  )
+
+print(p_ILT_CFU)
+
+# ==============================================================
+# 9. Save
+# ==============================================================
+
+png("mic_lot.png", width = 7, height = 4, units = "in", res = 900)
+print(p_ILT_CFU)
+dev.off()
+
+```
+
+```{r}
+# ==============================================================
+# ILT CFU Count — % growth inhibition plot with CLDs + ANOVA p
+# Bars/points show % inhibition relative to BCT
+# CLDs and ANOVA p-values are based on Log10 CFU/mL
+# ==============================================================
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggtext)
+library(ggh4x)
+library(multcompView)
+
+# ==============================================================
+# 1. Long format + clean treatments
+# ==============================================================
+
+ILT_growth_long <- ILT_CFU_Count %>%
+  tidyr::pivot_longer(
+    cols = -c(Target, Day, Replicate),
+    names_to = "Treatment_raw",
+    values_to = "Log10"
+  ) %>%
+  dplyr::mutate(
+    Treatment = dplyr::case_when(
+      Treatment_raw == "Media.Control"    ~ "MCT",
+      Treatment_raw == "Bacteria.Control" ~ "BCT",
+      grepl("^ILT", Treatment_raw) ~ gsub("ILT\\.|\\.$", "", Treatment_raw),
+      TRUE ~ Treatment_raw
+    ),
+    Treatment = dplyr::recode(
+      Treatment,
+      "0.75" = "0.75%",
+      "1.5"  = "1.5%",
+      "3"    = "3%",
+      "6"    = "6%",
+      "12"   = "12%",
+      "24"   = "24%"
+    ),
+    Treatment = factor(
+      Treatment,
+      levels = c("MCT", "BCT", "0.75%", "1.5%", "3%", "6%", "12%", "24%")
+    ),
+    Day = factor(
+      Day,
+      levels = sort(unique(Day)),
+      labels = paste("Day", sort(unique(Day)))
+    ),
+    Target_label = dplyr::recode(
+      as.character(Target),
+      "E. cecorum" = "E. cecorum",
+      "E. hirae"   = "E. hirae"
+    ),
+    Target_label = factor(
+      Target_label,
+      levels = c("E. cecorum", "E. hirae")
+    )
+  )
+
+# ==============================================================
+# 2. Calculate % growth inhibition relative to BCT
+# ==============================================================
+
+ILT_bct_lookup <- ILT_growth_long %>%
+  dplyr::filter(Treatment == "BCT") %>%
+  dplyr::select(Target, Day, Replicate, BCT_Log10 = Log10)
+
+ILT_growth_inhibition <- ILT_growth_long %>%
+  dplyr::filter(Treatment != "MCT") %>%
+  dplyr::left_join(
+    ILT_bct_lookup,
+    by = c("Target", "Day", "Replicate")
+  ) %>%
+  dplyr::mutate(
+    Growth_inhibition = ((BCT_Log10 - Log10) / BCT_Log10) * 100,
+    Growth_inhibition = pmax(0, pmin(100, Growth_inhibition))
+  )
+
+# ==============================================================
+# 3. Summary for bars
+# ==============================================================
+
+ILT_growth_summary <- ILT_growth_inhibition %>%
+  dplyr::group_by(Target, Target_label, Day, Treatment) %>%
+  dplyr::summarise(
+    Mean = mean(Growth_inhibition, na.rm = TRUE),
+    SD   = sd(Growth_inhibition, na.rm = TRUE),
+    N    = dplyr::n(),
+    SEM  = SD / sqrt(N),
+    .groups = "drop"
+  )
+
+# ==============================================================
+# 4. ANOVA p-values on Log10 CFU/mL
+# ==============================================================
+
+fmt_p_rich <- function(p) {
+  if (is.na(p)) return("<i>p</i> = NA")
+  if (p < 0.01) {
+    sprintf("<i>p</i> = %s", formatC(p, format = "e", digits = 1))
+  } else {
+    sprintf("<i>p</i> = %.2f", p)
+  }
+}
+
+ILT_anova_labels <- ILT_growth_long %>%
+  dplyr::filter(Treatment != "MCT") %>%
+  dplyr::group_by(Target, Target_label, Day) %>%
+  dplyr::group_modify(~ {
+    fit <- aov(Log10 ~ Treatment, data = .x)
+    out <- summary(fit)[[1]]
+
+    data.frame(
+      anova_p = out["Treatment", "Pr(>F)"]
+    )
+  }) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(
+    P_Label = paste0("ANOVA ", vapply(anova_p, fmt_p_rich, character(1))),
+    x_lab = 0.65,
+    y_lab = Inf
+  )
+
+# ==============================================================
+# 5. Tukey HSD CLDs on Log10 CFU/mL
+# ==============================================================
+
+ILT_growth_cld <- ILT_growth_long %>%
+  dplyr::filter(Treatment != "MCT") %>%
+  dplyr::group_by(Target, Target_label, Day) %>%
+  dplyr::group_modify(~ {
+    fit <- aov(Log10 ~ Treatment, data = .x)
+    tuk <- TukeyHSD(fit)
+    cld <- multcompView::multcompLetters4(fit, tuk)
+
+    data.frame(
+      Treatment = names(cld$Treatment$Letters),
+      CLD = cld$Treatment$Letters,
+      stringsAsFactors = FALSE
+    )
+  }) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(
+    Treatment = factor(
+      Treatment,
+      levels = c("BCT", "0.75%", "1.5%", "3%", "6%", "12%", "24%")
+    )
+  ) %>%
+  dplyr::left_join(
+    ILT_growth_summary,
+    by = c("Target", "Target_label", "Day", "Treatment")
+  ) %>%
+  dplyr::mutate(
+    y_pos = Mean + SEM + 5
+  )
+
+# ==============================================================
+# 6. Colors
+# ==============================================================
+
+biofilm_fills <- c(
+  "BCT"   = "grey45",
+  "0.75%" = "#fcfdbf",
+  "1.5%"  = "#febb81",
+  "3%"    = "#f8765c",
+  "6%"    = "#d3436e",
+  "12%"   = "#982d80",
+  "24%"   = "#221150"
+)
+
+# ==============================================================
+# 7. Italic facet labels
+# ==============================================================
+
+target_labeller <- as_labeller(
+  c(
+    "E. cecorum" = "*E. cecorum*",
+    "E. hirae"   = "*E. hirae*"
+  )
+)
+
+# ==============================================================
+# 8. Plot
+# ==============================================================
+
+p_ILT_growth_inhibition <- ggplot(
+  ILT_growth_summary,
+  aes(x = Treatment, y = Mean, fill = Treatment)
+) +
+  geom_hline(
+    yintercept = 50,
+    linetype = "dashed",
+    linewidth = 0.5
+  ) +
+  geom_col(
+    color = "black",
+    width = 0.75
+  ) +
+  geom_errorbar(
+    aes(ymin = Mean - SEM, ymax = Mean + SEM),
+    width = 0.3,
+    linewidth = 0.5
+  ) +
+  geom_point(
+    data = ILT_growth_inhibition,
+    aes(x = Treatment, y = Growth_inhibition),
+    position = position_jitter(width = 0.08),
+    shape = 21,
+    size = 1.4,
+    fill = "white",
+    color = "black",
+    stroke = 0.4,
+    alpha = 0.9,
+    show.legend = FALSE
+  ) +
+  geom_text(
+    data = ILT_growth_cld,
+    aes(x = Treatment, y = y_pos, label = CLD),
+    size = 2.6,
+    fontface = "bold",
+    vjust = -0.35,
+    show.legend = FALSE
+  ) +
+  ggtext::geom_richtext(
+    data = ILT_anova_labels,
+    aes(x = x_lab, y = y_lab, label = P_Label),
+    inherit.aes = FALSE,
+    hjust = 0,
+    vjust = 2,
+    size = 2.5,
+    fill = NA,
+    label.colour = NA,
+    label.padding = unit(0, "lines")
+  ) +
+  ggh4x::facet_grid2(
+    rows = vars(Day),
+    cols = vars(Target_label),
+    scales = "free",
+    independent = "all",
+    labeller = labeller(Target_label = target_labeller)
+  ) +
+  scale_fill_manual(values = biofilm_fills, drop = FALSE) +
+  scale_y_continuous(
+    expand = expansion(mult = c(0.03, 0.18))
+  ) +
+  labs(
+    x = NULL,
+    y = "% growth inhibition"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(size = 6, color = "black"),
+    axis.ticks.x = element_line(color = "black"),
+    axis.text.y = element_text(size = 9, color = "black"),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 12, face = "bold", color = "black"),
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    strip.text.x = ggtext::element_markdown(size = 10, color = "white", face = "bold"),
+    strip.text.y = element_text(size = 10, color = "white", face = "bold"),
+    strip.background = element_rect(fill = "black", color = "black")
+  )
+
+print(p_ILT_growth_inhibition)
+
+png("mic_inhibition_plot.png", width = 4.5, height = 6.5, units = "in", res = 900)
+print(p_ILT_growth_inhibition)
+dev.off()
+
+```
+
+```{r}
+p_ILT_growth_inhibition_fixed <- ggplot(
+  ILT_growth_summary,
+  aes(x = Treatment, y = Mean, fill = Treatment)
+) +
+  geom_hline(
+    yintercept = 50,
+    linetype = "dashed",
+    linewidth = 0.5
+  ) +
+  geom_col(
+    color = "black",
+    width = 0.75
+  ) +
+  geom_errorbar(
+    aes(ymin = Mean - SEM, ymax = Mean + SEM),
+    width = 0.3,
+    linewidth = 0.5
+  ) +
+  geom_point(
+    data = ILT_growth_inhibition,
+    aes(x = Treatment, y = Growth_inhibition),
+    position = position_jitter(width = 0.08),
+    shape = 21,
+    size = 1.4,
+    fill = "white",
+    color = "black",
+    stroke = 0.4,
+    alpha = 0.9,
+    show.legend = FALSE
+  ) +
+  geom_text(
+    data = ILT_growth_cld,
+    aes(x = Treatment, y = y_pos, label = CLD),
+    size = 2.6,
+    fontface = "bold",
+    vjust = -0.35,
+    show.legend = FALSE
+  ) +
+  ggtext::geom_richtext(
+    data = ILT_anova_labels,
+    aes(x = x_lab, y = y_lab, label = P_Label),
+    inherit.aes = FALSE,
+    hjust = 0,
+    vjust = 2,
+    size = 2.5,
+    fill = NA,
+    label.colour = NA,
+    label.padding = unit(0, "lines")
+  ) +
+  ggh4x::facet_grid2(
+    rows = vars(Day),
+    cols = vars(Target_label),
+    scales = "fixed",
+    labeller = labeller(Target_label = target_labeller)
+  ) +
+  scale_fill_manual(values = biofilm_fills, drop = FALSE) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    expand = expansion(mult = c(0.03, 0.18))
+  ) +
+  labs(
+    x = NULL,
+    y = "% growth inhibition"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(size = 6, color = "black"),
+    axis.ticks.x = element_line(color = "black"),
+    axis.text.y = element_text(size = 9, color = "black"),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 12, face = "bold", color = "black"),
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    strip.text.x = ggtext::element_markdown(size = 10, color = "white", face = "bold"),
+    strip.text.y = element_text(size = 10, color = "white", face = "bold"),
+    strip.background = element_rect(fill = "black", color = "black")
+  )
+
+print(p_ILT_growth_inhibition_fixed)
+
+png("mic_inhibition_plot_fixed.png", width = 4.5, height = 6.5, units = "in", res = 900)
+print(p_ILT_growth_inhibition_fixed)
+dev.off()
+```
+
+```{r}
+p_ILT_growth_inhibition_yfree <- ggplot(
+  ILT_growth_summary,
+  aes(x = Treatment, y = Mean, fill = Treatment)
+)  +
+  geom_col(
+    color = "black",
+    width = 0.75
+  ) +
+  geom_errorbar(
+    aes(ymin = Mean - SEM, ymax = Mean + SEM),
+    width = 0.3,
+    linewidth = 0.5
+  ) +
+  geom_point(
+    data = ILT_growth_inhibition,
+    aes(x = Treatment, y = Growth_inhibition),
+    position = position_jitter(width = 0.08),
+    shape = 21,
+    size = 1.4,
+    fill = "white",
+    color = "black",
+    stroke = 0.4,
+    alpha = 0.9,
+    show.legend = FALSE
+  ) +
+  geom_text(
+    data = ILT_growth_cld,
+    aes(x = Treatment, y = y_pos, label = CLD),
+    size = 2.6,
+    fontface = "bold",
+    vjust = -0.35,
+    show.legend = FALSE
+  ) +
+  ggtext::geom_richtext(
+    data = ILT_anova_labels,
+    aes(x = x_lab, y = y_lab, label = P_Label),
+    inherit.aes = FALSE,
+    hjust = 0,
+    vjust = 2,
+    size = 2.5,
+    fill = NA,
+    label.colour = NA,
+    label.padding = unit(0, "lines")
+  ) +
+  ggh4x::facet_grid2(
+    rows = vars(Day),
+    cols = vars(Target_label),
+    scales = "free_y",          # ✅ only y varies
+    independent = "y",          # ✅ ensure independence only for y
+    labeller = labeller(Target_label = target_labeller)
+  ) +
+  scale_fill_manual(values = biofilm_fills, drop = FALSE) +
+  scale_y_continuous(
+    expand = expansion(mult = c(0.03, 0.18))
+  ) +
+  labs(
+    x = NULL,
+    y = "% growth inhibition"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(size = 6, color = "black"),
+    axis.ticks.x = element_line(color = "black"),
+    axis.text.y = element_text(size = 9, color = "black"),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 12, face = "bold", color = "black"),
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    strip.text.x = ggtext::element_markdown(size = 14),
+    strip.text.y = element_text(size = 12),
+    strip.background = element_blank()
+  )
+
+print(p_ILT_growth_inhibition_yfree)
+
+png("mic_inhibition_plot_yfree.png", width = 4.5, height = 6.5, units = "in", res = 900)
+print(p_ILT_growth_inhibition_yfree)
+dev.off()
+
+```
+
+```{r}
+##plot of log10 values for supplemental figure
+##mimics structure above
+
+# ==============================================================
+# ILT CFU Count — Log10 CFU/mL supplemental plot with CLDs + ANOVA p
+# Same aesthetics/layout as % growth inhibition plot
+# CLDs and ANOVA p-values are based on Log10 CFU/mL
+# ==============================================================
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggtext)
+library(ggh4x)
+library(multcompView)
+
+# ==============================================================
+# 1. Long format + clean treatments
+# ==============================================================
+
+ILT_log10_long <- ILT_CFU_Count %>%
+  tidyr::pivot_longer(
+    cols = -c(Target, Day, Replicate),
+    names_to = "Treatment_raw",
+    values_to = "Log10"
+  ) %>%
+  dplyr::mutate(
+    Treatment = dplyr::case_when(
+      Treatment_raw == "Media.Control"    ~ "MCT",
+      Treatment_raw == "Bacteria.Control" ~ "BCT",
+      grepl("^ILT", Treatment_raw) ~ gsub("ILT\\.|\\.$", "", Treatment_raw),
+      TRUE ~ Treatment_raw
+    ),
+    Treatment = dplyr::recode(
+      Treatment,
+      "0.75" = "0.75%",
+      "1.5"  = "1.5%",
+      "3"    = "3%",
+      "6"    = "6%",
+      "12"   = "12%",
+      "24"   = "24%"
+    ),
+    Treatment = factor(
+      Treatment,
+      levels = c("MCT", "BCT", "0.75%", "1.5%", "3%", "6%", "12%", "24%")
+    ),
+    Day = factor(
+      Day,
+      levels = sort(unique(Day)),
+      labels = paste("Day", sort(unique(Day)))
+    ),
+    Target_label = dplyr::recode(
+      as.character(Target),
+      "E. cecorum" = "E. cecorum",
+      "E. hirae"   = "E. hirae"
+    ),
+    Target_label = factor(
+      Target_label,
+      levels = c("E. cecorum", "E. hirae")
+    )
+  ) %>%
+  dplyr::filter(Treatment != "MCT")
+
+# ==============================================================
+# 2. Summary for bars
+# ==============================================================
+
+ILT_log10_summary <- ILT_log10_long %>%
+  dplyr::group_by(Target, Target_label, Day, Treatment) %>%
+  dplyr::summarise(
+    Mean = mean(Log10, na.rm = TRUE),
+    SD   = sd(Log10, na.rm = TRUE),
+    N    = dplyr::n(),
+    SEM  = SD / sqrt(N),
+    .groups = "drop"
+  )
+
+# ==============================================================
+# 3. ANOVA p-values on Log10 CFU/mL
+# ==============================================================
+
+fmt_p_rich <- function(p) {
+  if (is.na(p)) return("<i>p</i> = NA")
+  if (p < 0.01) {
+    sprintf("<i>p</i> = %s", formatC(p, format = "e", digits = 1))
+  } else {
+    sprintf("<i>p</i> = %.2f", p)
+  }
+}
+
+ILT_log10_anova_labels <- ILT_log10_long %>%
+  dplyr::group_by(Target, Target_label, Day) %>%
+  dplyr::group_modify(~ {
+    fit <- aov(Log10 ~ Treatment, data = .x)
+    out <- summary(fit)[[1]]
+
+    data.frame(
+      anova_p = out["Treatment", "Pr(>F)"]
+    )
+  }) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(
+    P_Label = paste0("ANOVA ", vapply(anova_p, fmt_p_rich, character(1))),
+    x_lab = 0.65,
+    y_lab = Inf
+  )
+
+# ==============================================================
+# 4. Tukey HSD CLDs on Log10 CFU/mL
+# ==============================================================
+
+ILT_log10_cld <- ILT_log10_long %>%
+  dplyr::group_by(Target, Target_label, Day) %>%
+  dplyr::group_modify(~ {
+    fit <- aov(Log10 ~ Treatment, data = .x)
+    tuk <- TukeyHSD(fit)
+    cld <- multcompView::multcompLetters4(fit, tuk)
+
+    data.frame(
+      Treatment = names(cld$Treatment$Letters),
+      CLD = cld$Treatment$Letters,
+      stringsAsFactors = FALSE
+    )
+  }) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(
+    Treatment = factor(
+      Treatment,
+      levels = c("BCT", "0.75%", "1.5%", "3%", "6%", "12%", "24%")
+    )
+  ) %>%
+  dplyr::left_join(
+    ILT_log10_summary,
+    by = c("Target", "Target_label", "Day", "Treatment")
+  ) %>%
+  dplyr::mutate(
+    y_pos = Mean + SEM + 0.35
+  )
+
+# ==============================================================
+# 5. Colors
+# ==============================================================
+
+biofilm_fills <- c(
+  "BCT"   = "grey45",
+  "0.75%" = "#fcfdbf",
+  "1.5%"  = "#febb81",
+  "3%"    = "#f8765c",
+  "6%"    = "#d3436e",
+  "12%"   = "#982d80",
+  "24%"   = "#221150"
+)
+
+# ==============================================================
+# 6. Italic facet labels
+# ==============================================================
+
+target_labeller <- as_labeller(
+  c(
+    "E. cecorum" = "*E. cecorum*",
+    "E. hirae"   = "*E. hirae*"
+  )
+)
+
+# ==============================================================
+# 7. Plot
+# ==============================================================
+
+p_ILT_log10_CFU <- ggplot(
+  ILT_log10_summary,
+  aes(x = Treatment, y = Mean, fill = Treatment)
+) +
+  geom_col(
+    color = "black",
+    width = 0.75
+  ) +
+  geom_errorbar(
+    aes(ymin = Mean - SEM, ymax = Mean + SEM),
+    width = 0.3,
+    linewidth = 0.5
+  ) +
+  geom_point(
+    data = ILT_log10_long,
+    aes(x = Treatment, y = Log10),
+    position = position_jitter(width = 0.08),
+    shape = 21,
+    size = 1.4,
+    fill = "white",
+    color = "black",
+    stroke = 0.4,
+    alpha = 0.9,
+    show.legend = FALSE
+  ) +
+  geom_text(
+    data = ILT_log10_cld,
+    aes(x = Treatment, y = y_pos, label = CLD),
+    size = 2.6,
+    fontface = "bold",
+    vjust = -0.6,
+    show.legend = FALSE
+  ) +
+  ggtext::geom_richtext(
+    data = ILT_log10_anova_labels,
+    aes(x = x_lab, y = y_lab, label = P_Label),
+    inherit.aes = FALSE,
+    hjust = 0,
+    vjust = 2,
+    size = 2.5,
+    fill = NA,
+    label.colour = NA,
+    label.padding = unit(0, "lines")
+  ) +
+  ggh4x::facet_grid2(
+    rows = vars(Day),
+    cols = vars(Target_label),
+    scales = "free_y",
+    independent = "y",
+    labeller = labeller(Target_label = target_labeller)
+  ) +
+  scale_fill_manual(values = biofilm_fills, drop = FALSE) +
+  scale_y_continuous(
+    expand = expansion(mult = c(0.05, 0.35))  #increased top expansion
+  ) +
+  labs(
+    x = NULL,
+    y = expression(bold(Log[10]~CFU/mL))
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(size = 6, color = "black"),
+    axis.ticks.x = element_line(color = "black"),
+    axis.text.y = element_text(size = 9, color = "black"),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 12, face = "bold", color = "black"),
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    strip.text.x = ggtext::element_markdown(size = 14),
+    strip.text.y = element_text(size = 12),
+    strip.background = element_blank()
+  )
+
+print(p_ILT_log10_CFU)
+
+png("mic_log10_cfu_plot.png", width = 4.5, height = 6.5, units = "in", res = 900)
+print(p_ILT_log10_CFU)
+dev.off()
+
+```
+
+```{r}
+##Pull info for results section
+
+library(dplyr)
+library(tidyr)
+library(broom)
+
+# ==============================================================
+# 6. Summary: Log10 CFU/mL, % inhibition, and fold-change vs BCT
+# ==============================================================
+
+ILT_bct_summary <- ILT_growth_long %>%
+  filter(Treatment == "BCT") %>%
+  group_by(Target, Target_label, Day) %>%
+  summarise(
+    BCT_mean_log10 = mean(Log10, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+ILT_mic_summary <- ILT_growth_inhibition %>%
+  filter(Treatment != "BCT") %>%
+  group_by(Target, Target_label, Day, Treatment) %>%
+  summarise(
+    mean_log10 = mean(Log10, na.rm = TRUE),
+    sd_log10   = sd(Log10, na.rm = TRUE),
+    n          = dplyr::n(),
+    sem_log10  = sd_log10 / sqrt(n),
+
+    mean_inhibition = mean(Growth_inhibition, na.rm = TRUE),
+    sd_inhibition   = sd(Growth_inhibition, na.rm = TRUE),
+    sem_inhibition  = sd_inhibition / sqrt(n),
+
+    .groups = "drop"
+  ) %>%
+  left_join(
+    ILT_bct_summary,
+    by = c("Target", "Target_label", "Day")
+  ) %>%
+  mutate(
+    log10_reduction_vs_BCT = BCT_mean_log10 - mean_log10,
+    fold_reduction_vs_BCT  = 10^log10_reduction_vs_BCT
+  ) %>%
+  arrange(Target_label, Day, Treatment)
+
+print(ILT_mic_summary, n = Inf)
+
+
+# ==============================================================
+# 7. BCT summary for reference
+# ==============================================================
+
+ILT_bct_reference <- ILT_growth_long %>%
+  filter(Treatment == "BCT") %>%
+  group_by(Target, Target_label, Day, Treatment) %>%
+  summarise(
+    mean_log10 = mean(Log10, na.rm = TRUE),
+    sd_log10   = sd(Log10, na.rm = TRUE),
+    n          = dplyr::n(),
+    sem_log10  = sd_log10 / sqrt(n),
+    .groups = "drop"
+  ) %>%
+  arrange(Target_label, Day)
+
+print(ILT_bct_reference, n = Inf)
+
+
+# ==============================================================
+# 8. Full ANOVA output on Log10 CFU/mL
+# ==============================================================
+
+ILT_anova_full <- ILT_growth_long %>%
+  filter(Treatment != "MCT") %>%
+  group_by(Target, Target_label, Day) %>%
+  group_modify(~ {
+    fit <- aov(Log10 ~ Treatment, data = .x)
+
+    broom::tidy(fit) %>%
+      filter(term == "Treatment") %>%
+      transmute(
+        df_treatment = df,
+        df_residual  = fit$df.residual,
+        F_value      = statistic,
+        p_value      = p.value
+      )
+  }) %>%
+  ungroup() %>%
+  arrange(Target_label, Day)
+
+print(ILT_anova_full, n = Inf)
+
+
+# ==============================================================
+# 9. Tukey HSD pairwise p values on Log10 CFU/mL
+# ==============================================================
+
+ILT_tukey_pairwise <- ILT_growth_long %>%
+  filter(Treatment != "MCT") %>%
+  group_by(Target, Target_label, Day) %>%
+  group_modify(~ {
+    fit <- aov(Log10 ~ Treatment, data = .x)
+    tuk <- TukeyHSD(fit)$Treatment
+
+    as.data.frame(tuk) %>%
+      tibble::rownames_to_column("contrast") %>%
+      rename(
+        diff_log10 = diff,
+        lower_ci   = lwr,
+        upper_ci   = upr,
+        p_adj      = `p adj`
+      )
+  }) %>%
+  ungroup() %>%
+  arrange(Target_label, Day, p_adj)
+
+print(ILT_tukey_pairwise, n = Inf)
+
+
+# ==============================================================
+# 10. Only pairwise comparisons versus BCT
+# ==============================================================
+
+ILT_tukey_vs_BCT <- ILT_tukey_pairwise %>%
+  filter(grepl("BCT", contrast)) %>%
+  arrange(Target_label, Day, p_adj)
+
+print(ILT_tukey_vs_BCT, n = Inf)
+
+```
+

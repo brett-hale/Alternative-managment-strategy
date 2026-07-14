@@ -1,0 +1,2297 @@
+---
+title: "nutrient.analysis.dry.metric"
+author: "BH"
+date: "2025-12-16"
+output: html_document
+---
+
+```{r}
+##Starting with DeQueen.nutrient_dry, we will convert dry nutrient values to metric (lbs/US ton to kg/metric ton)
+
+## Convert original (already dry-basis) nutrient values to metric
+## lbs/US ton -> kg/metric ton (× 0.5)
+## Overwrites the incorrectly moisture-corrected .dry columns
+
+nutr_cols <- c("Nitrogen", "Ammonium.N", "Phosphorus", "Potassium")
+
+DeQueen.nutrient_metric <- DeQueen.nutrient_dry %>%
+  dplyr::mutate(
+    dplyr::across(
+      dplyr::all_of(nutr_cols),
+      ~ .x * 0.5,
+      .names = "{.col}.dry"
+    ),
+    NH4_to_TotalN = Ammonium.N.dry / Nitrogen.dry
+  )
+
+## Quick sanity check
+cat("\n=== Original values (lbs/US ton, already dry basis) ===\n")
+dplyr::select(DeQueen.nutrient_dry,
+              Sample.Name, Nitrogen, Ammonium.N) %>%
+  head() %>%
+  print()
+
+cat("\n=== Metric conversion (kg/metric ton) ===\n")
+dplyr::select(DeQueen.nutrient_metric,
+              Sample.Name, Nitrogen, Nitrogen.dry, Ammonium.N, Ammonium.N.dry, NH4_to_TotalN) %>%
+  head() %>%
+  print()
+
+## ----------------------------
+## Long-format (metric) with clean labels & order
+## ----------------------------
+
+metric_cols_metric <- c(
+  "Ammonium.N.dry", "Nitrogen.dry", "Phosphorus.dry", "Potassium.dry",
+  "Moisture", "NH4_to_TotalN"
+)
+
+Nutrient_long.metric <- DeQueen.nutrient_metric %>%
+  tidyr::pivot_longer(
+    cols      = dplyr::all_of(metric_cols_metric),
+    names_to  = "Metric",
+    values_to = "Level"
+  ) %>%
+  dplyr::mutate(
+    Growout   = factor(as.character(Growout), levels = c("Baseline", "1", "2")),
+    Treatment = factor(as.character(Treatment)),
+    Metric = dplyr::recode(
+      Metric,
+      Ammonium.N.dry = "NH4+ (kg/mt)",
+      Nitrogen.dry   = "Total N (kg/mt)",
+      Phosphorus.dry = "P (kg/mt)",
+      Potassium.dry  = "K (kg/mt)",
+      Moisture       = "Moisture (% wb)",
+      NH4_to_TotalN  = "NH4+/Total N"
+    ),
+    Metric = factor(
+      Metric,
+      levels = c("NH4+ (kg/mt)", "Total N (kg/mt)", "NH4+/Total N",
+                 "P (kg/mt)", "K (kg/mt)", "Moisture (% wb)")
+    )
+  ) %>%
+  dplyr::filter(!is.na(Level), !is.na(Growout))
+
+```
+
+```{r}
+## ================================================================
+## Global model (METRIC): Growout + Treatment*Growout interaction included
+## Re-uses your prior DRY workflow, but uses Nutrient_long.metric as input
+## and writes NEW objects with .metric suffix (no overwrites).
+## ================================================================
+
+## --- Packages (assumed loaded elsewhere) -------------------------------------
+# library(dplyr); library(tidyr); library(purrr); library(tibble)
+# library(MASS);  library(glmmTMB); library(DHARMa); library(emmeans); library(car)
+
+## ================================================================
+## Helpers (.metric)
+## ================================================================
+fmt_aics.metric <- function(x) {
+  if (is.null(x) || length(x) == 0) return(NA_character_)
+  x_num <- suppressWarnings(as.numeric(x))
+  nms   <- names(x); if (is.null(nms)) nms <- rep("", length(x))
+  if (any(is.na(x_num))) {
+    paste(nms, as.character(x), sep = ":", collapse = "; ")
+  } else {
+    paste(nms, sprintf("%.1f", x_num), sep = ":", collapse = "; ")
+  }
+}
+
+fit_dists_AIC.metric <- function(y) {
+  y <- y[is.finite(y)]
+  fits <- list()
+
+  # normal on all finite values
+  fits$normal <- tryCatch(MASS::fitdistr(y, "normal"), error = function(e) NULL)
+
+  # gamma / lognormal on positive values only
+  y_pos <- y[y > 0]
+  fits$gamma <- if (length(y_pos) > 1) {
+    tryCatch(MASS::fitdistr(y_pos, "gamma"), error = function(e) NULL)
+  } else NULL
+
+  fits$lognorm <- if (length(y_pos) > 1) {
+    tryCatch(MASS::fitdistr(y_pos, "lognormal"), error = function(e) NULL)
+  } else NULL
+
+  aics <- c(
+    normal  = if (!is.null(fits$normal))  AIC(fits$normal)  else NA_real_,
+    gamma   = if (!is.null(fits$gamma))   AIC(fits$gamma)   else NA_real_,
+    lognorm = if (!is.null(fits$lognorm)) AIC(fits$lognorm) else NA_real_
+  )
+
+  best <- names(which.min(aics))[1]
+  list(aics = aics, best = best)
+}
+
+rbc_two_sample.metric <- function(x, y) {
+  diffs <- outer(y, x, FUN = "-")
+  mean(sign(diffs))
+}
+
+growout_levels.metric <- c("Baseline","1","2")
+
+## ================================================================
+## 0) Ensure clean factors (METRIC input)
+##    NOTE: does NOT overwrite Nutrient_long.metric
+## ================================================================
+Nutrient_long.metric2 <- Nutrient_long.metric %>%
+  dplyr::mutate(
+    Growout   = factor(as.character(Growout), levels = growout_levels.metric),
+    Treatment = factor(Treatment),
+    Position  = factor(Position),
+    House     = if ("House" %in% colnames(.)) factor(House) else factor(NA_character_)
+  ) %>%
+  dplyr::filter(
+    !is.na(Level),
+    !is.na(Growout),
+    !is.na(Treatment)
+  )
+
+## ================================================================
+## 1) BASELINE Wilcoxon: Treatment comparison within each Metric
+## ================================================================
+wilcox_baseline.metric <- Nutrient_long.metric2 %>%
+  dplyr::filter(Growout == "Baseline") %>%
+  dplyr::group_by(Metric) %>%
+  dplyr::group_modify(~{
+    df <- .x
+    trts <- unique(df$Treatment)
+
+    if (length(trts) != 2) {
+      return(tibble::tibble(
+        Growout = "Baseline",
+        group1  = NA_character_,
+        group2  = NA_character_,
+        n1      = NA_integer_,
+        n2      = NA_integer_,
+        p.value = NA_real_,
+        RBC     = NA_real_
+      ))
+    }
+
+    # Try to keep Control vs Trt / IndigoLT if present
+    if (all(c("Control","Trt") %in% levels(df$Treatment))) {
+      g1 <- "Control"; g2 <- "Trt"
+    } else if (all(c("Control","IndigoLT") %in% levels(df$Treatment))) {
+      g1 <- "Control"; g2 <- "IndigoLT"
+    } else {
+      ord <- sort(as.character(trts))
+      g1 <- ord[1]; g2 <- ord[2]
+    }
+
+    x <- df$Level[df$Treatment == g1]
+    y <- df$Level[df$Treatment == g2]
+
+    wt  <- suppressWarnings(
+      wilcox.test(x, y, alternative = "two.sided",
+                  exact = FALSE, correct = FALSE)
+    )
+    RBC <- rbc_two_sample.metric(x, y)
+
+    tibble::tibble(
+      Growout = "Baseline",
+      group1  = g1,
+      group2  = g2,
+      n1      = length(x),
+      n2      = length(y),
+      p.value = unname(wt$p.value),
+      RBC     = RBC
+    )
+  }) %>%
+  dplyr::ungroup()
+
+## ================================================================
+## 2) BEST DISTRIBUTION per Metric (Growouts 1 & 2 combined)
+## ================================================================
+dist_picker_global.metric <- Nutrient_long.metric2 %>%
+  dplyr::filter(Growout %in% c("1","2")) %>%
+  dplyr::group_by(Metric) %>%
+  dplyr::summarise(
+    .fits   = list(fit_dists_AIC.metric(Level)),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    best_dist = purrr::map_chr(.fits, "best"),
+    AICs      = purrr::map(.fits, "aics")
+  ) %>%
+  dplyr::select(-.fits)
+
+dist_picker_out_global.metric <- dist_picker_global.metric %>%
+  dplyr::mutate(AICs_fmt = purrr::map_chr(AICs, fmt_aics.metric)) %>%
+  dplyr::select(Metric, best_dist, AICs_fmt)
+
+print(dist_picker_out_global.metric, n = Inf)
+utils::write.csv(
+  dist_picker_out_global.metric,
+  "nutrient_best_distributions_by_metric_global.METRIC.csv",
+  row.names = FALSE
+)
+
+## ================================================================
+## 3) Global GLMMs per Metric across Growouts 1 & 2
+##    - lognorm: log(Level) ~ Gaussian
+##    - gamma:   Gamma(link="log")
+##    - normal:  Gaussian
+##    - random: (1 | Growout:House), dropped if variance <= 1e-6
+##    - fixed:  Treatment * Growout + Position
+##    - emmeans: Treatment within Growout (BH-adjusted)
+## ================================================================
+.get_family.metric <- function(fam_name) {
+  if (fam_name == "normal")  return(stats::gaussian(link = "identity"))
+  if (fam_name == "gamma")   return(stats::Gamma(link = "log"))
+  if (fam_name == "lognorm") return(stats::gaussian(link = "identity"))  # on log(Level)
+  stop("Unsupported family: ", fam_name)
+}
+
+.extract_rand_var.metric <- function(model) {
+  vc <- try(glmmTMB::VarCorr(model), silent = TRUE)
+  if (inherits(vc, "try-error")) return(NA_real_)
+  vcdf <- try(as.data.frame(vc), silent = TRUE)
+  if (inherits(vcdf, "try-error") || !nrow(vcdf)) return(NA_real_)
+  row <- vcdf[vcdf$component == "cond" & grepl("Growout:House", vcdf$grp), , drop = FALSE]
+  if (!nrow(row)) return(NA_real_)
+  as.numeric(row$sdcor[1])^2
+}
+
+fit_one_glmm_joint.metric <- function(metric,
+                                      fam_name,
+                                      var_thresh  = 1e-6,
+                                      n_sims      = 1000,
+                                      plot_dharma = FALSE) {
+
+  df <- Nutrient_long.metric2 %>%
+    dplyr::filter(Growout %in% c("1","2"), Metric == metric) %>%
+    droplevels()
+
+  # Make sure Growout, Treatment, Position, House are factors
+  df <- df %>%
+    dplyr::mutate(
+      Growout   = factor(Growout, levels = c("1","2")),
+      Treatment = factor(Treatment),
+      Position  = factor(Position),
+      House     = if ("House" %in% colnames(.)) factor(House) else factor(NA_character_)
+    )
+
+  # Response
+  resp <- "Level"
+  if (fam_name == "lognorm") {
+    if (any(df$Level <= 0, na.rm = TRUE)) {
+      stop("Metric '", metric, "' has non-positive values; cannot log-transform for lognormal.")
+    }
+    df$Level_log <- log(df$Level)
+    resp <- "Level_log"
+  }
+
+  fam <- .get_family.metric(fam_name)
+
+  # Sum-to-zero contrasts for Type III
+  old_contr <- options(contrasts = c("contr.sum","contr.poly"))
+
+  # Random effect structure
+  use_house <- ("House" %in% colnames(df)) && (nlevels(df$House) > 1)
+  form_full <- if (use_house) {
+    stats::as.formula(paste0(resp, " ~ Treatment * Growout + Position + (1 | Growout:House)"))
+  } else {
+    stats::as.formula(paste0(resp, " ~ Treatment * Growout + Position"))
+  }
+
+  mod <- glmmTMB::glmmTMB(form_full, family = fam, data = df)
+
+  # Drop random effect if variance ~ 0
+  kept_random <- FALSE
+  if (use_house) {
+    rv <- .extract_rand_var.metric(mod)
+    if (!is.na(rv) && rv > var_thresh) {
+      kept_random <- TRUE
+    } else {
+      form_simpl <- stats::as.formula(paste0(resp, " ~ Treatment * Growout + Position"))
+      mod <- glmmTMB::glmmTMB(form_simpl, family = fam, data = df)
+    }
+  }
+
+  # Type III tests
+  a3 <- car::Anova(mod, type = 3)
+
+  # emmeans: Treatment within Growout
+  emm_by <- emmeans::emmeans(mod, ~ Treatment | Growout)
+  pw     <- emmeans::contrast(emm_by, method = "pairwise", adjust = "BH")
+  pw_df  <- as.data.frame(summary(pw))
+
+  # Identify CL columns (emmeans version-safe)
+  lo <- dplyr::case_when(
+    "lower.CL"  %in% names(pw_df) ~ "lower.CL",
+    "asymp.LCL" %in% names(pw_df) ~ "asymp.LCL",
+    "LCL"       %in% names(pw_df) ~ "LCL",
+    TRUE ~ NA_character_
+  )
+  hi <- dplyr::case_when(
+    "upper.CL"  %in% names(pw_df) ~ "upper.CL",
+    "asymp.UCL" %in% names(pw_df) ~ "asymp.UCL",
+    "UCL"       %in% names(pw_df) ~ "UCL",
+    TRUE ~ NA_character_
+  )
+
+  if (fam_name %in% c("gamma","lognorm")) {
+    # Ratios on response scale
+    pw_df_out <- pw_df %>%
+      dplyr::mutate(
+        estimate  = exp(estimate),
+        lower.CL  = if (!is.na(lo)) exp(.data[[lo]]) else NA_real_,
+        upper.CL  = if (!is.na(hi)) exp(.data[[hi]]) else NA_real_,
+        df        = if ("df" %in% names(.)) df else NA_real_,
+        effect_scale = ifelse(fam_name == "gamma",
+                              "ratio_of_means",
+                              "ratio_of_geometric_means")
+      ) %>%
+      dplyr::select(Growout, contrast, estimate, SE, df,
+                    lower.CL, upper.CL, p.value, effect_scale)
+  } else {
+    # Differences on response scale
+    pw_df_out <- pw_df %>%
+      dplyr::mutate(
+        lower.CL     = if (!is.na(lo)) .data[[lo]] else NA_real_,
+        upper.CL     = if (!is.na(hi)) .data[[hi]] else NA_real_,
+        df           = if ("df" %in% names(.)) df else NA_real_,
+        effect_scale = "difference_in_means"
+      ) %>%
+      dplyr::select(Growout, contrast, estimate, SE, df,
+                    lower.CL, upper.CL, p.value, effect_scale)
+  }
+
+  # DHARMa
+  simres <- DHARMa::simulateResiduals(fittedModel = mod, n = n_sims)
+  disp   <- DHARMa::testDispersion(simres)
+  outs   <- DHARMa::testOutliers(simres)
+  quants <- DHARMa::testQuantiles(simres)
+
+  if (plot_dharma) {
+    cat("\n--- DHARMa diagnostics (metric) ---\n")
+    print(disp); print(outs); print(quants)
+    plot(simres, main = paste("DHARMa residuals:", metric))
+  }
+
+  # Restore contrasts
+  options(old_contr)
+
+  list(
+    metric       = metric,
+    family_used  = fam_name,
+    transform    = if (fam_name == "lognorm") "log" else "none",
+    kept_random  = kept_random,
+    model        = mod,
+    anova3       = a3,
+    emmeans      = emm_by,
+    pairs_contr  = pw,
+    pairs_df     = pw_df_out,
+    dharma       = list(sim = simres,
+                        dispersion = disp,
+                        outliers   = outs,
+                        quantiles  = quants)
+  )
+}
+
+## ---- Fit all global models ----
+nutrient_models_joint.metric <- purrr::pmap(
+  list(
+    metric   = dist_picker_global.metric$Metric,
+    fam_name = dist_picker_global.metric$best_dist
+  ),
+  ~ fit_one_glmm_joint.metric(
+    metric     = ..1,
+    fam_name   = ..2,
+    var_thresh = 1e-6,
+    n_sims     = 1000,
+    plot_dharma = FALSE
+  )
+)
+names(nutrient_models_joint.metric) <- dist_picker_global.metric$Metric
+
+## ================================================================
+## 4) Collect GLMM outputs: ANOVA + emmeans contrasts
+## ================================================================
+
+# 4a) Pairwise Treatment contrasts within Growout (from emmeans)
+nutrient_pairs_joint.metric <- do.call(
+  rbind,
+  lapply(nutrient_models_joint.metric, function(x) {
+    out <- x$pairs_df
+    out$Metric <- x$metric
+    out$family <- x$family_used
+    out
+  })
+)
+row.names(nutrient_pairs_joint.metric) <- NULL
+
+# 4b) Type III ANOVA tables
+nutrient_anova_joint_df.metric <- do.call(
+  rbind,
+  lapply(nutrient_models_joint.metric, function(x) {
+    a3 <- as.data.frame(x$anova3)
+    a3$Term   <- rownames(a3)
+    a3$Metric <- x$metric
+    a3$family <- x$family_used
+    rownames(a3) <- NULL
+    a3[, c("Metric","family","Term", setdiff(names(a3), c("Metric","family","Term")))]
+  })
+)
+row.names(nutrient_anova_joint_df.metric) <- NULL
+
+## ================================================================
+## 5) Combine Baseline Wilcoxon + GLMM contrasts and export
+## ================================================================
+
+baseline_brief.metric <- wilcox_baseline.metric %>%
+  dplyr::transmute(
+    Metric,
+    Growout,
+    method       = "Wilcoxon rank-sum",
+    contrast     = paste0(group2, " - ", group1),
+    effect_scale = "rank-biserial",
+    estimate     = RBC,
+    lower.CL     = NA_real_,
+    upper.CL     = NA_real_,
+    p.value      = p.value
+  )
+
+glmm_brief.metric <- nutrient_pairs_joint.metric %>%
+  dplyr::transmute(
+    Metric,
+    Growout,
+    method       = paste0("GLMM (", family, "), Treatment within Growout"),
+    contrast,
+    effect_scale,
+    estimate,
+    lower.CL,
+    upper.CL,
+    p.value
+  )
+
+nutrient_results_all_global.metric <- dplyr::bind_rows(
+  baseline_brief.metric,
+  glmm_brief.metric
+) %>%
+  dplyr::arrange(Metric,
+                 factor(Growout, levels = growout_levels.metric))
+
+## ---- Console checks ----
+print(nutrient_anova_joint_df.metric,     n = Inf)
+print(nutrient_pairs_joint.metric,        n = Inf)
+print(nutrient_results_all_global.metric, n = Inf)
+
+## ---- Write to CSV ----
+utils::write.csv(
+  nutrient_anova_joint_df.metric,
+  "nutrient_GLMM_TypeIII_global.METRIC.csv",
+  row.names = FALSE
+)
+
+utils::write.csv(
+  nutrient_pairs_joint.metric,
+  "nutrient_GLMM_treatment_contrasts_global_byGrowout.METRIC.csv",
+  row.names = FALSE
+)
+
+utils::write.csv(
+  nutrient_results_all_global.metric,
+  "nutrient_treatment_results_all_global.METRIC.csv",
+  row.names = FALSE
+)
+
+
+```
+
+```{r}
+##Visualization (METRIC) — MATCH TEMPLATE AESTHETICS EXACTLY
+## Uses:
+##   - Nutrient_long.metric2
+##   - nutrient_results_all_global.metric
+##   - predefined pal_fill, pal_color, dodge_width (do not redefine unless missing)
+
+## =====================================================================
+## 1) Build p-value labels for plotting from *metric* stats object
+## =====================================================================
+p_values_plot_df.metric <- nutrient_results_all_global.metric %>%
+  dplyr::filter(
+    (Growout == "Baseline" & grepl("Wilcoxon", method)) |
+      (Growout %in% c("1", "2") & grepl("^GLMM", method))
+  ) %>%
+  dplyr::group_by(Metric, Growout) %>%
+  dplyr::slice(1) %>%  # ensure single row per Metric × Growout
+  dplyr::ungroup() %>%
+  dplyr::mutate(
+    Metric  = factor(Metric,  levels = levels(Nutrient_long.metric2$Metric)),
+    Growout = factor(Growout, levels = levels(Nutrient_long.metric2$Growout)),
+    P_Value = p.value,
+    P_Label = dplyr::if_else(
+      is.na(P_Value),
+      NA_character_,
+      sprintf("italic(p) == %.3f", P_Value)
+    )
+  )
+
+## =====================================================================
+## 2) y-positions just above the tallest point per Metric × Growout
+## =====================================================================
+y_pos_df.metric <- Nutrient_long.metric2 %>%
+  dplyr::group_by(Metric, Growout) %>%
+  dplyr::summarise(y_pos = max(Level, na.rm = TRUE) * 1.03, .groups = "drop")
+
+p_values_plot_df.metric <- dplyr::left_join(
+  p_values_plot_df.metric, y_pos_df.metric,
+  by = c("Metric","Growout")
+)
+
+## =====================================================================
+## 3) Helper data for plot: stripe + mean lines
+## =====================================================================
+.g_levels.metric <- levels(Nutrient_long.metric2$Growout)
+.idx1.metric <- which(.g_levels.metric == "1")
+
+stripes_df.metric <- tibble::tibble(
+  xmin = if (length(.idx1.metric)) .idx1.metric - 0.5 else NA_real_,
+  xmax = if (length(.idx1.metric)) .idx1.metric + 0.5 else NA_real_
+) %>%
+  dplyr::filter(is.finite(xmin), is.finite(xmax))
+
+mean_levels_df.metric <- Nutrient_long.metric2 %>%
+  dplyr::group_by(Metric, Growout, Treatment) %>%
+  dplyr::summarise(Mean_Level = mean(Level, na.rm = TRUE), .groups = "drop")
+
+## =====================================================================
+## 4) Graphics params (use existing template palettes)
+## =====================================================================
+if (!exists("dodge_width")) dodge_width <- 0.6
+if (!exists("pal_fill")) {
+  trts <- levels(Nutrient_long.metric2$Treatment)
+  pal_fill <- stats::setNames(
+    RColorBrewer::brewer.pal(max(3, length(trts)), "Set2")[seq_along(trts)],
+    trts
+  )
+}
+if (!exists("pal_color")) pal_color <- pal_fill
+
+## =====================================================================
+## 5) Plot — COPY TEMPLATE AESTHETICS EXACTLY
+## =====================================================================
+p.metric.horizontal <- ggplot(Nutrient_long.metric2, aes(x = Growout, y = Level)) +
+  # Light stripe for Growout "1"
+  { if (nrow(stripes_df.metric))
+      geom_rect(
+        data  = stripes_df.metric,
+        aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf),
+        inherit.aes = FALSE,
+        fill  = "gray85",
+        alpha = 0.5
+      )
+    else
+      NULL } +
+  # Boxplots
+  geom_boxplot(
+    aes(fill = Treatment),
+    color = "black",
+    alpha = 0.9,
+    width = 0.65,
+    outlier.shape = NA,
+    position = position_dodge(width = dodge_width)
+  ) +
+  # Mean points
+  stat_summary(
+    aes(fill = Treatment),
+    fun = mean,
+    geom = "point",
+    shape = 23,
+    size  = 3,
+    color = "white",
+    position = position_dodge(width = dodge_width),
+    show.legend = FALSE
+  ) +
+  # Jittered observations
+  geom_jitter(
+    aes(color = Treatment),
+    shape = 21,
+    size  = 1.25,
+    alpha = 0.9,
+    fill  = "white",
+    position = position_jitterdodge(
+      jitter.width = 0.10,
+      dodge.width  = dodge_width
+    ),
+    show.legend = FALSE
+  ) +
+  # Treatment trendlines (means)
+  geom_line(
+    data = mean_levels_df.metric,
+    aes(x = Growout, y = Mean_Level, group = Treatment, color = Treatment),
+    position = position_dodge(width = dodge_width),
+    linewidth = 0.6
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.2))) +
+  # p-value labels (only where present)
+  geom_text(
+    data = p_values_plot_df.metric %>% dplyr::filter(!is.na(P_Label)),
+    aes(x = Growout, y = y_pos, label = P_Label),
+    parse = TRUE,
+    size  = 3,
+    vjust = 0,
+    inherit.aes = FALSE
+  ) +
+  scale_fill_manual(values = pal_fill,  drop = FALSE) +
+  scale_color_manual(values = pal_color, drop = FALSE) +
+  facet_wrap(~ Metric, scales = "free_y", nrow = 2) +
+  theme_bw() +
+  theme(
+    axis.title.x     = element_text(size = 14, face = "bold"),
+    axis.title.y     = element_blank(),
+    axis.text        = element_text(size = 12, color = "black"),
+    axis.ticks.x     = element_blank(),
+    strip.text       = element_text(size = 12),
+    strip.background = element_blank(),
+    legend.title     = element_text(size = 14, face = "bold"),
+    legend.text      = element_text(size = 14),
+    legend.position  = "top"
+  ) +
+  labs(x = "Growout", fill = "Treatment", color = "Treatment")
+
+print(p.metric.horizontal)
+
+ggsave(
+  "nutrients_box_with_pvals_metric.horizontal.png",
+  p.metric.horizontal,
+  width = 7, height = 5, units = "in", dpi = 900
+)
+
+
+```
+
+```{r}
+##Get nutrient data into phyloseq (METRIC)
+
+## ============================
+## Get *metric* nutrient data into phyloseq (kg/metric ton)
+## (Note: in DeQueen.nutrient_metric, the converted values live in the SAME
+##        .dry column names, and the ratio column is still NH4_to_TotalN)
+## ============================
+
+# --- 1) Start from your existing phyloseq -------------------------------------
+ps0.metric <- ps
+sd0.metric <- as(sample_data(ps0.metric), "data.frame")
+orig_sample_names.metric <- sample_names(ps0.metric)   # authoritative
+
+# --- 2) Build a nutrient key (metric) with valid, non-baseline sample IDs -----
+nutr_key.metric <- DeQueen.nutrient_metric %>%
+  dplyr::mutate(Growout_chr = as.character(Growout)) %>%
+  dplyr::filter(!grepl("^\\s*baseline\\s*$", tolower(Growout_chr))) %>%
+  dplyr::mutate(.id_num = stringr::str_extract(as.character(Sample.Name), "\\d+")) %>%
+  dplyr::filter(!is.na(.id_num)) %>%
+  dplyr::mutate(Sample.ID = paste0("Sample_", .id_num)) %>%
+  dplyr::filter(Sample.ID %in% orig_sample_names.metric) %>%
+  dplyr::distinct(Sample.ID, .keep_all = TRUE) %>%
+  dplyr::select(
+    dplyr::all_of(c(
+      "Sample.ID",
+      "Nitrogen.dry",       # now kg/metric ton (because you multiplied by 0.5)
+      "Ammonium.N.dry",     # kg/metric ton
+      "Phosphorus.dry",     # kg/metric ton
+      "Potassium.dry",      # kg/metric ton
+      "Moisture",           # % wb
+      "NH4_to_TotalN"       # recomputed from converted .dry cols
+    ))
+  )
+
+# --- 3) Join nutrients (metric) into sample metadata, restore & order rownames --
+sd_aug.metric <- sd0.metric %>%
+  dplyr::left_join(nutr_key.metric, by = "Sample.ID")
+
+rownames(sd_aug.metric) <- orig_sample_names.metric
+sd_aug.metric <- sd_aug.metric[orig_sample_names.metric, , drop = FALSE]
+stopifnot(identical(rownames(sd_aug.metric), orig_sample_names.metric))
+
+# --- 4) Wrap back into sample_data and rebuild phyloseq ------------------------
+sd_aug_ps.metric <- sample_data(sd_aug.metric)
+
+pieces.metric <- list(otu_table(ps0.metric), sd_aug_ps.metric)
+
+tt.metric <- try(tax_table(ps0.metric, errorIfNULL = FALSE), silent = TRUE)
+if (!inherits(tt.metric, "try-error") && !is.null(tt.metric)) pieces.metric <- c(pieces.metric, list(tt.metric))
+
+tr.metric <- try(phy_tree(ps0.metric, errorIfNULL = FALSE), silent = TRUE)
+if (!inherits(tr.metric, "try-error") && !is.null(tr.metric)) pieces.metric <- c(pieces.metric, list(tr.metric))
+
+rs.metric <- try(refseq(ps0.metric, errorIfNULL = FALSE), silent = TRUE)
+if (!inherits(rs.metric, "try-error") && !is.null(rs.metric)) pieces.metric <- c(pieces.metric, list(rs.metric))
+
+physeq_no_growout3_css_nutr.metric <- do.call(phyloseq, pieces.metric)
+
+# Final verification
+stopifnot(identical(sample_names(physeq_no_growout3_css_nutr.metric), orig_sample_names.metric))
+
+
+```
+
+```{r}
+##Maaslin analysis (METRIC)
+# ============================================================
+# MaAsLin2: Species ~ Physicochemical variables (METRIC UNITS)
+# USING: physeq_no_growout3_css_nutr.metric
+# NOTE: In your metric phyloseq, nutrient columns are still named
+#       Nitrogen.dry, Ammonium.N.dry, Phosphorus.dry, Potassium.dry,
+#       and NH4_to_TotalN (values are now kg/metric ton for the .dry cols)
+# ============================================================
+
+# ---------- 0) Features (rows) x Samples (cols) + metadata ----------
+X.metric <- as.data.frame(otu_table(physeq_no_growout3_css_nutr.metric))
+if (!taxa_are_rows(physeq_no_growout3_css_nutr.metric)) {
+  X.metric <- as.data.frame(t(X.metric))  # rows = species/features, cols = samples
+}
+meta.metric <- as(sample_data(physeq_no_growout3_css_nutr.metric), "data.frame")
+
+# Align samples
+common.metric <- intersect(colnames(X.metric), rownames(meta.metric))
+if (length(common.metric) < 10) stop("Too few overlapping samples between features and metadata.")
+X.metric    <- X.metric[, common.metric, drop = FALSE]
+meta.metric <- meta.metric[common.metric, , drop = FALSE]
+
+# Ensure numeric feature matrix
+X.metric[] <- lapply(X.metric, function(v) as.numeric(v))
+
+# Drop all-zero species
+keep_feat.metric <- rowSums(X.metric) > 0
+if (!all(keep_feat.metric)) {
+  message("Dropping ", sum(!keep_feat.metric), " all-zero species.")
+  X.metric <- X.metric[keep_feat.metric, , drop = FALSE]
+}
+
+# Rounded copy for exploratory NEGBIN/ZINB
+X_round.metric <- X.metric
+X_round.metric[] <- lapply(X_round.metric, function(v) as.numeric(round(v, 0)))
+
+# ---------- 1) Variables ----------
+# Use the same column NAMES (values are metric). Exclude ratio.
+env_vars.metric <- intersect(
+  c("Nitrogen.dry","Ammonium.N.dry","Phosphorus.dry","Potassium.dry","Moisture"),
+  colnames(meta.metric)
+)
+if (length(env_vars.metric) == 0) {
+  stop("None of the physicochemical variables are present in sample_data.")
+}
+
+covars.metric   <- intersect(c("Treatment","Growout","Position"), colnames(meta.metric))
+rand_eff.metric <- intersect("House", colnames(meta.metric))  # optional random effect
+
+# ---------- 2) Build Maaslin2 'reference' vector for categorical covariates ----------
+build_reference_vec.metric <- function(meta_df, covariate_names) {
+  ref <- character(0)
+  for (v in covariate_names) {
+    if (!v %in% colnames(meta_df)) next
+    vals <- meta_df[[v]]
+    levs <- sort(unique(as.character(vals)))
+    if (length(levs) <= 1) next
+    preferred <- switch(
+      v,
+      "Position"  = if ("A" %in% levs) "A" else levs[1],
+      "Treatment" = if ("Control" %in% levs) "Control" else levs[1],
+      "Growout"   = if ("1" %in% levs) "1" else if ("G1" %in% levs) "G1" else levs[1],
+      levs[1]
+    )
+    ref <- c(ref, v, preferred)
+  }
+  ref
+}
+
+# ---------- 3) Helper to run MaAsLin2 ----------
+run_maaslin2.metric <- function(Xmat, meta_df, outdir, analysis_method, fixed, random = NULL,
+                                ref_vec = NULL,
+                                normalization = "NONE", transform = "NONE",
+                                min_prev = 0.25) {
+  Maaslin2::Maaslin2(
+    input_data       = Xmat,
+    input_metadata   = meta_df,
+    output           = outdir,
+    fixed_effects    = fixed,
+    random_effects   = random,
+    reference        = ref_vec,
+    normalization    = normalization,   # CSS already applied upstream
+    transform        = transform,       # keep CSS scale
+    analysis_method  = analysis_method, # "CPLM","LM","NEGBIN","ZINB"
+    standardize      = TRUE,            # z-score continuous metadata
+    min_prevalence   = min_prev,
+    min_abundance    = 0.0,
+    correction       = "BH",
+    plot_heatmap     = FALSE,
+    plot_scatter     = FALSE,
+    cores            = 1
+  )
+}
+
+# =========================
+# 4) RUNS (METRIC)
+# =========================
+
+# --- Primary: CPLM on CSS (ENV-ONLY) ---
+run_maaslin2.metric(
+  X.metric, meta.metric,
+  outdir  = "maaslin_env_only_cplm_metric",
+  analysis_method = "CPLM",
+  fixed   = env_vars.metric,
+  random  = NULL,
+  ref_vec = NULL
+)
+
+# --- Primary: CPLM on CSS (ENV + COVARIATES) ---
+if (length(covars.metric) > 0) {
+  ref_vec.metric <- build_reference_vec.metric(meta.metric, covars.metric)
+  run_maaslin2.metric(
+    X.metric, meta.metric,
+    outdir  = "maaslin_env_covars_cplm_metric",
+    analysis_method = "CPLM",
+    fixed   = c(env_vars.metric, covars.metric),
+    random  = if (length(rand_eff.metric) == 1) rand_eff.metric else NULL,
+    ref_vec = ref_vec.metric
+  )
+}
+
+# --- Sensitivity: LM on CSS (ENV-ONLY) ---
+run_maaslin2.metric(
+  X.metric, meta.metric,
+  outdir  = "maaslin_env_only_lm_metric",
+  analysis_method = "LM",
+  fixed   = env_vars.metric,
+  random  = NULL,
+  ref_vec = NULL
+)
+
+# --- Sensitivity: LM on CSS (ENV + COVARIATES) ---
+if (length(covars.metric) > 0) {
+  ref_vec.metric <- build_reference_vec.metric(meta.metric, covars.metric)
+  run_maaslin2.metric(
+    X.metric, meta.metric,
+    outdir  = "maaslin_env_covars_lm_metric",
+    analysis_method = "LM",
+    fixed   = c(env_vars.metric, covars.metric),
+    random  = if (length(rand_eff.metric) == 1) rand_eff.metric else NULL,
+    ref_vec = ref_vec.metric
+  )
+}
+
+# --- Exploratory: NEGBIN/ZINB on *rounded* CSS (ENV-ONLY) ---
+run_maaslin2.metric(
+  X_round.metric, meta.metric,
+  outdir  = "maaslin_env_only_negbin_roundedCSS_metric",
+  analysis_method = "NEGBIN",
+  fixed   = env_vars.metric,
+  random  = NULL,
+  ref_vec = NULL
+)
+
+run_maaslin2.metric(
+  X_round.metric, meta.metric,
+  outdir  = "maaslin_env_only_zinb_roundedCSS_metric",
+  analysis_method = "ZINB",
+  fixed   = env_vars.metric,
+  random  = NULL,
+  ref_vec = NULL
+)
+
+# --- Exploratory: NEGBIN/ZINB on *rounded* CSS (ENV + COVARIATES) ---
+if (length(covars.metric) > 0) {
+  ref_vec.metric <- build_reference_vec.metric(meta.metric, covars.metric)
+
+  run_maaslin2.metric(
+    X_round.metric, meta.metric,
+    outdir  = "maaslin_env_covars_negbin_roundedCSS_metric",
+    analysis_method = "NEGBIN",
+    fixed   = c(env_vars.metric, covars.metric),
+    random  = if (length(rand_eff.metric) == 1) rand_eff.metric else NULL,
+    ref_vec = ref_vec.metric
+  )
+
+  run_maaslin2.metric(
+    X_round.metric, meta.metric,
+    outdir  = "maaslin_env_covars_zinb_roundedCSS_metric",
+    analysis_method = "ZINB",
+    fixed   = c(env_vars.metric, covars.metric),
+    random  = if (length(rand_eff.metric) == 1) rand_eff.metric else NULL,
+    ref_vec = ref_vec.metric
+  )
+}
+
+message("MaAsLin2 (metric) runs complete. Check *_metric output folders for results.")
+
+```
+
+```{r}
+## Visualize results from: CPLM on CSS (ENV + COVARIATES) — METRIC
+
+# Path to the MaAsLin2 output (metric)
+res_path.metric <- file.path("maaslin_env_covars_cplm_metric", "all_results.tsv")
+if (!file.exists(res_path.metric)) {
+  stop("File not found: ", res_path.metric,
+       "\nMake sure the 'maaslin_env_covars_cplm_metric' run completed successfully.")
+}
+
+# Read the table
+env_correlation.metric <- read.delim(
+  res_path.metric,
+  header = TRUE,
+  sep = "\t",
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+# Keep only significant associations (qval ≤ 0.05), sorted by qval
+env_correlation_sig.metric <- env_correlation.metric[
+  !is.na(env_correlation.metric$qval) & env_correlation.metric$qval <= 0.05,
+]
+env_correlation_sig.metric <- env_correlation_sig.metric[order(env_correlation_sig.metric$qval), ]
+
+# Quick summary
+cat("\nLoaded rows (metric):", nrow(env_correlation.metric),
+    "\nSignificant (q ≤ 0.05):", nrow(env_correlation_sig.metric), "\n\n")
+
+# Show significant results
+print(env_correlation_sig.metric)
+
+
+```
+
+```{r}
+## Keep only associations where `metadata` is one of the *metric* environmental variables
+
+env_vars.metric <- c(
+  "Moisture",
+  "Nitrogen.dry",
+  "Phosphorus.dry",
+  "Potassium.dry",
+  "Ammonium.N.dry"
+)
+
+env_correlation_env.metric <- env_correlation_sig.metric[
+  !is.na(env_correlation_sig.metric$metadata) &
+    env_correlation_sig.metric$metadata %in% env_vars.metric,
+]
+
+env_correlation_env.metric <- env_correlation_env.metric[
+  order(env_correlation_env.metric$qval),
+]
+
+cat(
+  "\nSignificant metric env associations (q ≤ 0.05) retained:",
+  nrow(env_correlation_env.metric), "rows\n\n"
+)
+
+print(env_correlation_env.metric)
+
+
+```
+
+```{r}
+## Add a signed significance column based on qval and coef (metric objects)
+
+env_correlation_env_sig.metric <- env_correlation_env.metric %>%
+  dplyr::filter(!is.na(qval)) %>%
+  dplyr::mutate(
+    significance = -log(qval) * sign(coef)
+  )
+
+# quick peek
+dplyr::glimpse(env_correlation_env_sig.metric)
+
+
+```
+
+```{r}
+## Create matrix for visualization (METRIC objects)
+
+feat_meta_mat.metric <- env_correlation_env_sig.metric %>%
+  dplyr::mutate(feature_clean = gsub("\\.", " ", feature)) %>%
+  dplyr::select(feature_clean, metadata, significance) %>%
+  # If there are multiple rows per (feature, metadata), average them
+  dplyr::group_by(feature_clean, metadata) %>%
+  dplyr::summarise(significance = mean(significance, na.rm = TRUE), .groups = "drop") %>%
+  tidyr::pivot_wider(names_from = metadata, values_from = significance) %>%
+  as.data.frame()
+
+# Move feature names to rownames and drop the helper column
+rownames(feat_meta_mat.metric) <- feat_meta_mat.metric$feature_clean
+feat_meta_mat.metric$feature_clean <- NULL
+
+## Rename columns to plotting-friendly labels (metric stream)
+rename_map.metric <- c(
+  "Potassium.dry"   = "K",
+  "Nitrogen.dry"    = "Total N",
+  "Ammonium.N.dry"  = "NH4+",
+  "Phosphorus.dry"  = "P",
+  "Moisture"        = "Moisture",
+  "NH4_to_TotalN"   = "NH4+/Total N"
+)
+
+old_cols.metric <- intersect(names(rename_map.metric), colnames(feat_meta_mat.metric))
+if (length(old_cols.metric) > 0) {
+  colnames(feat_meta_mat.metric)[match(old_cols.metric, colnames(feat_meta_mat.metric))] <-
+    rename_map.metric[old_cols.metric]
+}
+
+# quick peek
+str(feat_meta_mat.metric)
+
+
+```
+
+```{r}
+# --- Order columns (keep only those present) ----------------------------------
+col_order.metric <- c("NH4+", "Total N", "P", "K", "Moisture")
+col_keep.metric  <- intersect(col_order.metric, colnames(feat_meta_mat.metric))
+mat_plot.metric  <- as.matrix(feat_meta_mat.metric[, col_keep.metric, drop = FALSE])
+
+# --- Palette and legend -------------------------------------------------------
+pal.metric <- circlize::colorRamp2(c(-10, 0, 10), c("royalblue4", "white", "firebrick"))
+lgd_list.mas.metric <- list(
+  title = expression(Log[2]~FC),
+  title_gp = grid::gpar(fontsize = 12, fontface = "bold"),
+  labels_gp = grid::gpar(fontsize = 10),
+  border = "black", lwd = 1,
+  direction = "horizontal",
+  title_position = "topcenter",
+  at = c(-10.1, -5, -2.5, 0, 2.5, 5, 10.1),
+  labels = c("<-10", "-5", "-2.5", "0", "2.5", "5", ">10"),
+  legend_width  = grid::unit(5, "cm"),
+  legend_height = grid::unit(5, "cm"),
+  x = grid::unit(0.5, "cm"), y = grid::unit(0.5, "cm"),
+  legend_gp = grid::gpar(col = "black", lwd = 2)
+)
+
+# --- Heatmap (no row split, no annotations) -----------------------------------
+ht.env.metric <- ComplexHeatmap::Heatmap(
+  mat_plot.metric,
+  name = "Log₂FC",
+  na_col = "gray99",
+  col = pal.metric,
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+  show_column_names = TRUE,
+  row_names_gp = grid::gpar(fontface = "italic", fontsize = 8),
+  rect_gp = grid::gpar(col = "gray", lwd = 1),
+  column_names_rot = 45,
+  border_gp = grid::gpar(col = "black", lwd = 1.5),
+  heatmap_legend_param = lgd_list.mas.metric
+)
+
+png("nutrient.heat.1.metric.png", width = 3.2, height = 10, units = "in", res = 900, bg = "transparent")
+ComplexHeatmap::draw(
+  ht.env.metric,
+  heatmap_legend_side = "bottom",
+  padding = grid::unit(c(5, 7.5, 5, 0), "mm")
+)
+dev.off()
+
+
+```
+
+```{r}
+##Maaslin summary for the manuscript
+ ## ============================================================
+## Summarize significant taxa–environment associations (UPDATED)
+## Goal:
+##   1) Per-metric counts (sig / pos / neg)
+##   2) Top 3–5 taxa with most associations + details
+##   3) Genus-level patterns WITHIN a single physicochemical metric:
+##        -> Identify the strongest genus–metric "signals"
+##           (many taxa within a genus associated with the same metric,
+##            with directionality + top genera per metric)
+## Outputs printed.
+## ============================================================
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+})
+
+## ---- 0) Input checks & coercion ----
+stopifnot(exists("mat_plot.metric"))
+stopifnot(!is.null(rownames(mat_plot.metric)))
+
+mat <- as.data.frame(mat_plot.metric)
+mat[] <- lapply(mat, as.numeric)
+
+env_metrics <- colnames(mat)
+stopifnot(length(env_metrics) > 0)
+
+cat("\n====================\n")
+cat("Association matrix summary\n")
+cat("====================\n")
+cat("Taxa (rows):", nrow(mat), "\n")
+cat("Env metrics (cols):", ncol(mat), "\n")
+cat("Metrics:", paste(env_metrics, collapse = ", "), "\n")
+
+## ---- 1) Per-metric summary (#sig, #pos, #neg) ----
+per_metric_summary <- tibble(Metric = env_metrics) %>%
+  rowwise() %>%
+  mutate(
+    n_sig = sum(!is.na(mat[[Metric]])),
+    n_pos = sum(mat[[Metric]] > 0, na.rm = TRUE),
+    n_neg = sum(mat[[Metric]] < 0, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  arrange(desc(n_sig))
+
+cat("\n\n====================\n")
+cat("1) Per-metric significant association counts\n")
+cat("====================\n")
+print(per_metric_summary)
+
+## ---- 2) Convert to long format (non-NA only) ----
+long_df <- mat %>%
+  mutate(Taxon = rownames(mat)) %>%
+  pivot_longer(
+    cols = all_of(env_metrics),
+    names_to = "EnvMetric",
+    values_to = "Effect"
+  ) %>%
+  filter(!is.na(Effect)) %>%
+  mutate(
+    Direction = ifelse(Effect > 0, "Positive", "Negative"),
+    Genus = word(Taxon, 1)
+  )
+
+cat("\n\n====================\n")
+cat("2) Long-format association table (first 10 rows)\n")
+cat("====================\n")
+print(head(long_df, 10))
+
+## ---- 3) Top taxa with most associations (3–5) ----
+top_n_taxa <- 5  # change to 3 if you want only top 3
+
+taxon_assoc_counts <- long_df %>%
+  group_by(Taxon) %>%
+  summarise(
+    n_assoc = n(),
+    n_pos = sum(Direction == "Positive"),
+    n_neg = sum(Direction == "Negative"),
+    signed_metrics = paste0(
+      EnvMetric, "=", round(Effect, 3), " (", ifelse(Effect > 0, "+", "-"), ")"
+    ) %>% paste(collapse = "; "),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(n_assoc), desc(n_pos), Taxon)
+
+top_taxa <- taxon_assoc_counts %>% slice(1:top_n_taxa)
+
+cat("\n\n====================\n")
+cat("3) Top taxa by number of significant associations (top", top_n_taxa, ")\n")
+cat("====================\n")
+print(top_taxa)
+
+## Ready-to-write strings for the paragraph (per-metric + top taxa)
+metric_sentence_bits <- per_metric_summary %>%
+  mutate(summary = paste0(Metric, ": n=", n_sig, " (", n_pos, " positive; ", n_neg, " negative)")) %>%
+  pull(summary)
+
+top_taxa_sentence_bits <- top_taxa %>%
+  mutate(summary = paste0(Taxon, " (", n_assoc, "): ", signed_metrics)) %>%
+  pull(summary)
+
+cat("\n\n====================\n")
+cat("3b) Ready-to-write summary strings\n")
+cat("====================\n")
+cat("\nPer-metric:\n")
+print(metric_sentence_bits)
+cat("\nTop taxa:\n")
+print(top_taxa_sentence_bits)
+
+## ============================================================
+## 4) Genus-level patterns within a single physicochemical metric
+##    We want "substantial patterns" where:
+##      - Many taxa within a genus associate with the same metric
+##      - Directionality is coherent (mostly + or mostly -)
+##    We'll compute:
+##      A) Genus x Metric summary (# taxa, pos taxa, neg taxa, prop_pos)
+##      B) Rank genus-metric pairs by a "signal score":
+##           score = n_taxa * abs(prop_pos - 0.5) * 2
+##           (increases with more taxa AND stronger directionality)
+##      C) Return top 3 genus-metric pairs overall + top 3 per metric
+## ============================================================
+
+genus_metric <- long_df %>%
+  group_by(Genus, EnvMetric) %>%
+  summarise(
+    n_taxa = n_distinct(Taxon),
+    n_pos_taxa = n_distinct(Taxon[Direction == "Positive"]),
+    n_neg_taxa = n_distinct(Taxon[Direction == "Negative"]),
+    prop_pos = n_pos_taxa / n_taxa,
+    dominant_dir = ifelse(prop_pos >= 0.5, "Positive", "Negative"),
+    dominance = pmax(prop_pos, 1 - prop_pos),  # how one-sided the direction is
+    .groups = "drop"
+  ) %>%
+  mutate(
+    # signal score: many taxa + strong one-sided directionality
+    signal_score = n_taxa * (abs(prop_pos - 0.5) * 2),
+    # a simple readable label
+    summary = paste0(
+      Genus, " ~ ", EnvMetric, ": n_taxa=", n_taxa,
+      " (pos=", n_pos_taxa, "; neg=", n_neg_taxa, "; dominant=", dominant_dir,
+      "; prop_pos=", round(prop_pos, 2), "; score=", round(signal_score, 2), ")"
+    )
+  ) %>%
+  arrange(desc(signal_score), desc(n_taxa))
+
+cat("\n\n====================\n")
+cat("4) Genus x Metric summary (top 30 by signal_score)\n")
+cat("====================\n")
+print(genus_metric %>% slice(1:30))
+
+## ---- Top 3 genus–metric "signals" overall ----
+top3_genus_metric_overall <- genus_metric %>% slice(1:3)
+
+cat("\n\n====================\n")
+cat("4b) Top 3 genus–metric associations overall (strongest patterns)\n")
+cat("====================\n")
+print(top3_genus_metric_overall %>% select(Genus, EnvMetric, n_taxa, n_pos_taxa, n_neg_taxa, prop_pos, dominant_dir, signal_score))
+
+cat("\n\nTop 3 genus–metric (ready-to-write):\n")
+print(top3_genus_metric_overall$summary)
+
+## ---- Top 3 genus–metric patterns per environmental variable ----
+top3_by_metric <- genus_metric %>%
+  group_by(EnvMetric) %>%
+  arrange(desc(signal_score), desc(n_taxa), Genus) %>%
+  slice(1:3) %>%
+  ungroup()
+
+cat("\n\n====================\n")
+cat("4c) Top 3 genus–metric patterns within EACH environmental metric\n")
+cat("====================\n")
+print(top3_by_metric %>% select(EnvMetric, Genus, n_taxa, n_pos_taxa, n_neg_taxa, prop_pos, dominant_dir, signal_score))
+
+## ============================================================
+## 5) Drill-down helper: list taxa driving a genus–metric pattern
+## ============================================================
+
+taxa_by_genus_metric <- function(genus, metric, n_show = 20){
+  long_df %>%
+    filter(Genus == genus, EnvMetric == metric) %>%
+    arrange(desc(abs(Effect))) %>%
+    mutate(label = paste0(Taxon, ": ", round(Effect, 3), ifelse(Effect > 0, " (+)", " (-)"))) %>%
+    select(Taxon, Effect, Direction, label) %>%
+    slice(1:n_show)
+}
+
+cat("\n\n====================\n")
+cat("5) Taxa driving the TOP genus–metric association overall\n")
+cat("====================\n")
+
+if(nrow(top3_genus_metric_overall) > 0){
+  g0 <- top3_genus_metric_overall$Genus[1]
+  m0 <- top3_genus_metric_overall$EnvMetric[1]
+  cat("\nTop genus–metric:", g0, "~", m0, "\n")
+  print(taxa_by_genus_metric(g0, m0, n_show = 20))
+}
+
+cat("\n\nDone.\n")
+
+```
+
+```{r}
+##Let's simply plot the correlation among metrics (METRIC UNITS, with FDR correction)
+## assumes: alpha_diversity_meta, DeQueen.nutrient_metric
+
+# -----------------------------------------------
+# 1) Join alpha diversity metrics onto *metric* nutrients
+# -----------------------------------------------
+s_alpha.metric <- alpha_diversity_meta[, c("Sample","Observed","Shannon","InvSimpson","Faith_PD")]
+
+nutr.metric <- DeQueen.nutrient_metric
+
+# Harmonize "Sample" key in nutrient df to match alpha_diversity_meta$Sample
+# NOTE: your prior chunk assumed Sample.Name matches the numeric suffix in "Sample_#".
+# We keep the same logic here (no overwrite of existing objects).
+if (!("Sample.ID" %in% names(nutr.metric))) {
+  nutr.metric$Sample.ID <- paste0("Sample_", as.character(nutr.metric$Sample.Name))
+}
+nutr.metric$Sample <- nutr.metric$Sample.ID
+
+# Merge (left join on alpha samples)
+merged_df.metric <- merge(
+  s_alpha.metric,
+  nutr.metric,
+  by = "Sample",
+  all.x = TRUE, all.y = FALSE
+)
+
+# -----------------------------------------------
+# 2) Build data frame: 4 metric-unit nutrients + moisture + ratio + 4 alpha metrics
+#    (dry nutrient columns are still named *.dry, but they are now kg/metric ton)
+# -----------------------------------------------
+vars.metric <- c(
+  "Nitrogen.dry", "Ammonium.N.dry", "Phosphorus.dry", "Potassium.dry",
+  "Moisture", "NH4_to_TotalN",
+  "Observed","Shannon","InvSimpson","Faith_PD"
+)
+
+vars.metric <- intersect(vars.metric, colnames(merged_df.metric))  # guard
+E2.metric <- merged_df.metric[, vars.metric, drop = FALSE]
+
+# -----------------------------------------------
+# 3) Spearman correlation and p-values (raw)
+# -----------------------------------------------
+M2.metric <- suppressWarnings(cor(E2.metric, method = "spearman", use = "pairwise.complete.obs"))
+
+p_mat2.metric <- matrix(
+  NA_real_, ncol = ncol(E2.metric), nrow = ncol(E2.metric),
+  dimnames = list(colnames(E2.metric), colnames(E2.metric))
+)
+
+for (i in seq_len(ncol(E2.metric))) {
+  for (j in seq_len(ncol(E2.metric))) {
+    xi <- E2.metric[[i]]; yj <- E2.metric[[j]]
+    ok <- is.finite(xi) & is.finite(yj)
+    if (sum(ok) >= 3) {
+      p_mat2.metric[i, j] <- suppressWarnings(cor.test(xi[ok], yj[ok], method = "spearman")$p.value)
+    } else {
+      p_mat2.metric[i, j] <- NA_real_
+    }
+  }
+}
+
+# -----------------------------------------------
+# 4) Multiple-testing correction (BH/FDR) over unique pairs
+# -----------------------------------------------
+idx_upper.metric <- which(upper.tri(p_mat2.metric), arr.ind = TRUE)
+p_upper.metric   <- p_mat2.metric[idx_upper.metric]
+
+p_adj_upper.metric <- rep(NA_real_, length(p_upper.metric))
+ok.metric <- is.finite(p_upper.metric)
+p_adj_upper.metric[ok.metric] <- p.adjust(p_upper.metric[ok.metric], method = "BH")
+
+p_adj2.metric <- matrix(
+  NA_real_, nrow = nrow(p_mat2.metric), ncol = ncol(p_mat2.metric),
+  dimnames = dimnames(p_mat2.metric)
+)
+p_adj2.metric[idx_upper.metric] <- p_adj_upper.metric
+p_adj2.metric <- t(p_adj2.metric)
+p_adj2.metric[idx_upper.metric] <- p_adj_upper.metric
+diag(p_adj2.metric) <- NA_real_
+
+# -----------------------------------------------
+# 5) Pretty labels for the plot
+# -----------------------------------------------
+lab_map2.metric <- c(
+  "Nitrogen.dry"    = "Total N (kg/MT)",
+  "Ammonium.N.dry"  = "NH4+ (kg/MT)",
+  "Phosphorus.dry"  = "P (kg/MT)",
+  "Potassium.dry"   = "K (kg/MT)",
+  "Moisture"        = "Moisture",
+  "NH4_to_TotalN"   = "NH4+/Total N",
+  "Observed"        = "Observed",
+  "Shannon"         = "Shannon",
+  "InvSimpson"      = "InvSimpson",
+  "Faith_PD"        = "Faith's PD"
+)
+
+cn.metric <- colnames(M2.metric)
+lab_ok.metric <- intersect(names(lab_map2.metric), cn.metric)
+colnames(M2.metric)[match(lab_ok.metric, cn.metric)] <- lab_map2.metric[lab_ok.metric]
+rownames(M2.metric)[match(lab_ok.metric, rownames(M2.metric))] <- lab_map2.metric[lab_ok.metric]
+
+cnp.metric <- colnames(p_adj2.metric)
+lab_ok_p.metric <- intersect(names(lab_map2.metric), cnp.metric)
+colnames(p_adj2.metric)[match(lab_ok_p.metric, cnp.metric)] <- lab_map2.metric[lab_ok_p.metric]
+rownames(p_adj2.metric)[match(lab_ok_p.metric, rownames(p_adj2.metric))] <- lab_map2.metric[lab_ok_p.metric]
+
+# -----------------------------------------------
+# 6) Corrplot using *adjusted* p-values
+# -----------------------------------------------
+stopifnot(identical(dimnames(M2.metric), dimnames(p_adj2.metric)))
+
+png("correlation.metric.FDR.png", width = 6.5, height = 4.5, units = "in", res = 900, bg = "transparent")
+
+corrplot::corrplot(
+  M2.metric,
+  method      = "color",
+  type        = "lower",
+  diag        = FALSE,
+  order       = "AOE",
+  tl.col      = "black",
+  tl.srt      = 45,
+  col         = colorRampPalette(c("royalblue4","white","firebrick"))(200),
+
+  p.mat       = p_adj2.metric,
+  sig.level   = c(0.001, 0.01, 0.05),
+  insig       = "label_sig",
+  pch.cex     = 0.9,
+  pch.col     = "grey20",
+
+  addgrid.col = "black",
+  addCoef.col = NULL
+)
+
+dev.off()
+
+cat("\nSpearman correlation matrix (metric nutrients + alpha diversity):\n")
+print(round(M2.metric, 3))
+cat("\nBH-adjusted p-value matrix:\n")
+print(signif(p_adj2.metric, 3))
+
+```
+
+```{r}
+##Better visualization (METRIC UNITS; ggplot lower-triangle heatmap)
+## assumes you already ran the metric correlation chunk and have:
+##   M2.metric, p_adj2.metric
+
+# Build a tidy lower-triangle data frame (exclude diagonal)
+cn.metric <- colnames(M2.metric)
+rn.metric <- rownames(M2.metric)
+
+df.metric <- expand.grid(x = cn.metric, y = rn.metric, stringsAsFactors = FALSE)
+df.metric$i <- match(df.metric$y, rn.metric)
+df.metric$j <- match(df.metric$x, cn.metric)
+df.metric <- subset(df.metric, i > j)  # lower triangle only
+
+# Pull rho and adj. p into the long frame
+df.metric$rho <- M2.metric[cbind(df.metric$i, df.metric$j)]
+df.metric$p   <- p_adj2.metric[cbind(df.metric$i, df.metric$j)]
+
+# Significance stars (BH-adjusted p-values)
+df.metric$stars <- ""
+df.metric$stars[!is.na(df.metric$p) & df.metric$p < 0.05]  <- "*"
+df.metric$stars[!is.na(df.metric$p) & df.metric$p < 0.01]  <- "**"
+df.metric$stars[!is.na(df.metric$p) & df.metric$p < 0.001] <- "***"
+
+# Factor levels for pretty matrix layout: x left→right, y top→bottom
+df.metric$x <- factor(df.metric$x, levels = cn.metric)
+df.metric$y <- factor(df.metric$y, levels = rev(rn.metric))  # reverse so origin is top-left
+
+# Draw with ggplot (white tile borders, diverging fill by correlation)
+if (!requireNamespace("ggplot2", quietly = TRUE)) stop("Please install ggplot2")
+library(ggplot2)
+
+p_heat.metric <- ggplot(df.metric, aes(x = x, y = y, fill = rho)) +
+  geom_tile(color = "white", linewidth = 0.6, linejoin = "mitre") +
+  geom_text(aes(label = stars), size = 3.6, color = "black", fontface = "bold") +
+  scale_fill_gradient2(
+    name = "Spearman \u03c1",
+    low = "royalblue4", mid = "white", high = "firebrick",
+    midpoint = 0, limits = c(-1, 1), breaks = seq(-1, 1, by = 0.5)
+  ) +
+  coord_fixed() +
+  labs(x = NULL, y = NULL) +
+  theme_minimal(base_size = 10) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, color = "black"),
+    axis.text.y = element_text(color = "black"),
+    legend.position = "none",
+    plot.background = element_rect(fill = "transparent", color = NA)
+  )
+
+ggsave(
+  "correlation.metric.FDR.ggplot.png",
+  p_heat.metric,
+  width = 4.5, height = 4.5, dpi = 900, bg = "transparent"
+)
+
+print(p_heat.metric)
+
+```
+
+```{r}
+## Impacts on microbiome composition/beta diversity (METRIC environmental variables)
+## Uses: physeq_no_growout3_css_nutr.metric
+## Notes:
+##   - Same logic as DRY chunk, but swap in metric-unit nutrient columns.
+##   - Permutations constrained within Position (strata), as before.
+
+# -------------------------------
+# 0) Data + distances (METRIC)
+# -------------------------------
+sample_data_df.metric <- data.frame(phyloseq::sample_data(physeq_no_growout3_css_nutr.metric))
+sample_data_df.metric$Position  <- factor(sample_data_df.metric$Position)
+sample_data_df.metric$House     <- factor(sample_data_df.metric$House)
+sample_data_df.metric$Growout   <- factor(sample_data_df.metric$Growout)
+sample_data_df.metric$Treatment <- factor(sample_data_df.metric$Treatment)
+
+bray_dist.metric     <- phyloseq::distance(physeq_no_growout3_css_nutr.metric, method = "bray")
+wunifrac_dist.metric <- phyloseq::UniFrac(physeq_no_growout3_css_nutr.metric, weighted = TRUE,  normalized = TRUE)
+uunifrac_dist.metric <- phyloseq::UniFrac(physeq_no_growout3_css_nutr.metric, weighted = FALSE, normalized = TRUE)
+
+n_permutations <- 9999
+
+# -------------------------------
+# 1) MAIN-EFFECTS model (METRIC)
+#    -> order-invariant marginal tests for each covariate (by="margin")
+# -------------------------------
+form_metric_main <- ~ House + Growout + Treatment +
+  Ammonium.N.dry + Nitrogen.dry + Phosphorus.dry + Potassium.dry + Moisture
+
+permanova_bray_full.metric <- vegan::adonis2(
+  update(form_metric_main, bray_dist.metric ~ .),
+  data         = sample_data_df.metric,
+  permutations = n_permutations,
+  strata       = sample_data_df.metric$Position,
+  by           = "margin"
+)
+permanova_bray_full.metric$qval <- p.adjust(permanova_bray_full.metric$`Pr(>F)`, "fdr")
+cat("\n--- METRIC • Bray-Curtis (main effects; by=margin) ---\n"); print(permanova_bray_full.metric)
+
+permanova_wunifrac_full.metric <- vegan::adonis2(
+  update(form_metric_main, wunifrac_dist.metric ~ .),
+  data         = sample_data_df.metric,
+  permutations = n_permutations,
+  strata       = sample_data_df.metric$Position,
+  by           = "margin"
+)
+permanova_wunifrac_full.metric$qval <- p.adjust(permanova_wunifrac_full.metric$`Pr(>F)`, "fdr")
+cat("\n--- METRIC • Weighted UniFrac (main effects; by=margin) ---\n"); print(permanova_wunifrac_full.metric)
+
+permanova_uunifrac_full.metric <- vegan::adonis2(
+  update(form_metric_main, uunifrac_dist.metric ~ .),
+  data         = sample_data_df.metric,
+  permutations = n_permutations,
+  strata       = sample_data_df.metric$Position,
+  by           = "margin"
+)
+permanova_uunifrac_full.metric$qval <- p.adjust(permanova_uunifrac_full.metric$`Pr(>F)`, "fdr")
+cat("\n--- METRIC • Unweighted UniFrac (main effects; by=margin) ---\n"); print(permanova_uunifrac_full.metric)
+
+# -------------------------------
+# 2) INTERACTION model (METRIC)
+#    -> adds Treatment:Growout (order-invariant test for interaction)
+# -------------------------------
+form_metric_int <- ~ House + Growout + Treatment +
+  Ammonium.N.dry + Nitrogen.dry + Phosphorus.dry + Potassium.dry + Moisture +
+  Treatment:Growout
+
+permanova_bray_int.metric <- vegan::adonis2(
+  update(form_metric_int, bray_dist.metric ~ .),
+  data         = sample_data_df.metric,
+  permutations = n_permutations,
+  strata       = sample_data_df.metric$Position,
+  by           = "margin"
+)
+permanova_bray_int.metric$qval <- p.adjust(permanova_bray_int.metric$`Pr(>F)`, "fdr")
+cat("\n--- METRIC • Bray-Curtis (interaction model; by=margin) ---\n"); print(permanova_bray_int.metric)
+
+permanova_wunifrac_int.metric <- vegan::adonis2(
+  update(form_metric_int, wunifrac_dist.metric ~ .),
+  data         = sample_data_df.metric,
+  permutations = n_permutations,
+  strata       = sample_data_df.metric$Position,
+  by           = "margin"
+)
+permanova_wunifrac_int.metric$qval <- p.adjust(permanova_wunifrac_int.metric$`Pr(>F)`, "fdr")
+cat("\n--- METRIC • Weighted UniFrac (interaction model; by=margin) ---\n"); print(permanova_wunifrac_int.metric)
+
+permanova_uunifrac_int.metric <- vegan::adonis2(
+  update(form_metric_int, uunifrac_dist.metric ~ .),
+  data         = sample_data_df.metric,
+  permutations = n_permutations,
+  strata       = sample_data_df.metric$Position,
+  by           = "margin"
+)
+permanova_uunifrac_int.metric$qval <- p.adjust(permanova_uunifrac_int.metric$`Pr(>F)`, "fdr")
+cat("\n--- METRIC • Unweighted UniFrac (interaction model; by=margin) ---\n"); print(permanova_uunifrac_int.metric)
+
+# -------------------------------
+# 3) Extractor for tables (METRIC)
+# -------------------------------
+extract_permanova_terms.metric <- function(ad2_obj, distance_label) {
+  df <- as.data.frame(ad2_obj, stringsAsFactors = FALSE)
+  df$Covariate <- rownames(df)
+  keep <- !grepl("Residual|Total|Model", df$Covariate, ignore.case = TRUE)
+  df <- df[keep, , drop = FALSE]
+  out <- data.frame(
+    Covariate = df$Covariate,
+    Distance  = distance_label,
+    R2        = df[["R2"]],
+    p.value   = df[["Pr(>F)"]],
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+  ok <- is.finite(out$p.value)
+  out$q.value <- NA_real_
+  out$q.value[ok] <- p.adjust(out$p.value[ok], method = "BH")
+  rownames(out) <- NULL
+  out
+}
+
+permanova_terms_long.metric <- rbind(
+  extract_permanova_terms.metric(permanova_bray_full.metric,     "Bray-Curtis"),
+  extract_permanova_terms.metric(permanova_wunifrac_full.metric, "Weighted UniFrac"),
+  extract_permanova_terms.metric(permanova_uunifrac_full.metric, "Unweighted UniFrac"),
+  extract_permanova_terms.metric(permanova_bray_int.metric,      "Bray-Curtis"),
+  extract_permanova_terms.metric(permanova_wunifrac_int.metric,  "Weighted UniFrac"),
+  extract_permanova_terms.metric(permanova_uunifrac_int.metric,  "Unweighted UniFrac")
+)
+
+cov_order.metric <- c("House","Growout","Treatment",
+                      "Treatment:Growout",
+                      "Ammonium.N.dry","Nitrogen.dry","Phosphorus.dry","Potassium.dry","Moisture")
+
+permanova_terms_long.metric$Covariate <- factor(
+  permanova_terms_long.metric$Covariate,
+  levels = intersect(cov_order.metric, unique(permanova_terms_long.metric$Covariate))
+)
+
+permanova_terms_long.metric <- permanova_terms_long.metric[
+  order(permanova_terms_long.metric$Covariate, permanova_terms_long.metric$Distance),
+]
+
+cat("\n--- METRIC • Marginal terms (long) ---\n"); print(permanova_terms_long.metric)
+
+```
+
+```{r}
+## ===============================
+## PROTEST (metric): community vs env
+## ===============================
+## Assumes in workspace:
+## - physeq_no_growout3_css_nutr.metric
+## - sample_data_df.metric (from your PERMANOVA metric chunk)
+## - bray_dist.metric, wunifrac_dist.metric, uunifrac_dist.metric (dist objects)
+
+## 1) Pick *metric-unit* environmental variables & standardize
+env_vars_metric <- c("Nitrogen.dry","Ammonium.N.dry","Phosphorus.dry","Potassium.dry","Moisture")
+env_vars_metric <- env_vars_metric[env_vars_metric %in% colnames(sample_data_df.metric)]
+stopifnot(length(env_vars_metric) > 0)
+
+env_raw.metric <- sample_data_df.metric[, env_vars_metric, drop = FALSE]
+
+## Drop rows with any NA in env; PROTEST requires matched samples
+keep_rows.metric <- stats::complete.cases(env_raw.metric)
+env_std.metric   <- scale(env_raw.metric[keep_rows.metric, , drop = FALSE])  # center/scale
+env_ids.metric   <- rownames(sample_data_df.metric)[keep_rows.metric]
+
+cat("[PROTEST•metric] Variables:", paste(colnames(env_std.metric), collapse = ", "), "\n")
+cat("[PROTEST•metric] Samples kept:", length(env_ids.metric), "\n")
+
+## 2) Helper: subset a 'dist' to selected labels
+subset_dist.metric <- function(d, keep) {
+  m  <- as.matrix(d)
+  m2 <- m[keep, keep, drop = FALSE]
+  stats::as.dist(m2)
+}
+
+## 3) Align each community distance to the env samples
+bray_sub.metric     <- subset_dist.metric(bray_dist.metric,     env_ids.metric)
+wunifrac_sub.metric <- subset_dist.metric(wunifrac_dist.metric, env_ids.metric)
+uunifrac_sub.metric <- subset_dist.metric(uunifrac_dist.metric, env_ids.metric)
+
+## 4) Environmental Euclidean distance (on standardized env)
+env_dist.metric <- vegan::vegdist(env_std.metric, method = "euclidean")
+
+## 5) Run PROTEST (9,999 perms) for each metric
+set.seed(1)
+protest_bray.metric     <- vegan::protest(X = bray_sub.metric,     Y = env_dist.metric, permutations = 9999)
+protest_wunifrac.metric <- vegan::protest(X = wunifrac_sub.metric, Y = env_dist.metric, permutations = 9999)
+protest_uunifrac.metric <- vegan::protest(X = uunifrac_sub.metric, Y = env_dist.metric, permutations = 9999)
+
+## 6) Tidy summary (p-only as requested)
+get_protest.metric <- function(obj, metric) {
+  data.frame(
+    Metric       = metric,
+    Procrustes_r = as.numeric(obj$t0),
+    p_value      = as.numeric(obj$signif),
+    stringsAsFactors = FALSE
+  )
+}
+
+protest_summary.metric <- rbind(
+  get_protest.metric(protest_bray.metric,     "Bray-Curtis"),
+  get_protest.metric(protest_wunifrac.metric, "Weighted UniFrac"),
+  get_protest.metric(protest_uunifrac.metric, "Unweighted UniFrac")
+)
+
+## 7) Print
+cat("\n--- PROTEST (metric) summary ---\n")
+print(
+  protest_summary.metric |>
+    dplyr::mutate(
+      Procrustes_r = round(Procrustes_r, 3),
+      p_value      = signif(p_value, 3)
+    )
+)
+
+```
+
+```{r}
+## ================================================================
+## Per-variable comparisons across methods (NO re-running PERMANOVA)
+## p-only pipeline • db-RDA replaces p-RDA • METRIC UNITS
+## ================================================================
+
+## ---- Assumptions already in your workspace (METRIC) -----------------------
+## - env_std.metric, bray_sub.metric, wunifrac_sub.metric, uunifrac_sub.metric (aligned IDs)
+## - sample_data_df.metric
+## - physeq_no_growout3_css_nutr.metric
+## - permanova_bray_full.metric, permanova_wunifrac_full.metric, permanova_uunifrac_full.metric
+## Packages loaded: vegan, phyloseq, dplyr, tidyr
+
+## ---- 0) METRIC variables of interest --------------------------------------
+env_vars.metric <- c("Nitrogen.dry","Ammonium.N.dry","Phosphorus.dry","Potassium.dry","Moisture")
+env_vars.metric <- env_vars.metric[env_vars.metric %in% colnames(sample_data_df.metric)]
+stopifnot(length(env_vars.metric) > 0)
+
+## Sanity: ensure aligned/standardized env + distances exist
+stopifnot(exists("env_std.metric"), exists("bray_sub.metric"),
+          exists("wunifrac_sub.metric"), exists("uunifrac_sub.metric"))
+
+## Prepare the model frame (constraints/conditions) matching env_std.metric rows
+keep_ids.metric <- rownames(env_std.metric)
+dat.metric <- sample_data_df.metric[keep_ids.metric, , drop = FALSE]
+dat.metric$House     <- factor(dat.metric$House)
+dat.metric$Growout   <- factor(dat.metric$Growout)
+dat.metric$Treatment <- factor(dat.metric$Treatment)
+dat.metric$Position  <- factor(dat.metric$Position)
+
+## ---- 1) Mantel (singletons): Spearman r per variable ----------------------
+.per_var_mantel.metric <- function(comm_dist, env_std, perms = 9999L) {
+  out <- lapply(colnames(env_std), function(v) {
+    d <- dist(env_std[, v, drop = FALSE], method = "euclidean")
+    fit <- vegan::mantel(comm_dist, d, method = "spearman", permutations = perms)
+    data.frame(
+      Variable = v,
+      Effect   = unname(fit$statistic),  # Mantel Spearman r
+      p_value  = unname(fit$signif),
+      stringsAsFactors = FALSE
+    )
+  })
+  do.call(rbind, out)
+}
+
+bioenv_single_bray.metric     <- .per_var_mantel.metric(bray_sub.metric,     env_std.metric)
+bioenv_single_wunifrac.metric <- .per_var_mantel.metric(wunifrac_sub.metric, env_std.metric)
+bioenv_single_uunifrac.metric <- .per_var_mantel.metric(uunifrac_sub.metric, env_std.metric)
+
+bioenv_long.metric <- dplyr::bind_rows(
+  dplyr::mutate(bioenv_single_bray.metric,     Metric = "Bray-Curtis"),
+  dplyr::mutate(bioenv_single_wunifrac.metric, Metric = "Weighted UniFrac"),
+  dplyr::mutate(bioenv_single_uunifrac.metric, Metric = "Unweighted UniFrac")
+) |>
+  dplyr::mutate(
+    Analysis = "BIO-ENV (singleton)",
+    Stat     = "Spearman r"
+  ) |>
+  dplyr::filter(Variable %in% env_vars.metric)
+
+## ---- 2) db-RDA (per distance): per-variable unique partial adj. R² --------
+## For each distance metric, fit:
+##   dbrda(D ~ var + Condition(House + Growout + Treatment + Position))
+## Extract adj. R² (constrained fraction) and permutation p for the var.
+.per_var_dbrda.metric <- function(comm_dist, metric_label, dat, env_vars, perms = 9999L) {
+  res <- lapply(env_vars, function(v) {
+    f  <- as.formula(paste("comm_dist ~", v, "+ Condition(House + Growout + Treatment + Position)"))
+    mv <- vegan::dbrda(f, data = dat)  # LHS is a "dist" object
+    a  <- vegan::anova.cca(mv, permutations = perms)
+    p  <- tryCatch(a$`Pr(>F)`[1], error = function(e) NA_real_)
+    R2 <- vegan::RsquareAdj(mv)$adj.r.squared
+    data.frame(
+      Variable = v,
+      Effect   = max(0, R2),   # partial adj. R² (non-negative)
+      p_value  = p,
+      Metric   = metric_label,
+      Analysis = "db-RDA (partial)",
+      Stat     = "partial adj. R²",
+      stringsAsFactors = FALSE
+    )
+  })
+  do.call(rbind, res)
+}
+
+dbrda_bray_long.metric     <- .per_var_dbrda.metric(bray_sub.metric,     "Bray-Curtis",        dat.metric, env_vars.metric)
+dbrda_wunifrac_long.metric <- .per_var_dbrda.metric(wunifrac_sub.metric, "Weighted UniFrac",   dat.metric, env_vars.metric)
+dbrda_uunifrac_long.metric <- .per_var_dbrda.metric(uunifrac_sub.metric, "Unweighted UniFrac", dat.metric, env_vars.metric)
+
+dbrda_long.metric <- dplyr::bind_rows(
+  dbrda_bray_long.metric,
+  dbrda_wunifrac_long.metric,
+  dbrda_uunifrac_long.metric
+)
+
+## ---- 3) PERMANOVA (by="margin"): extract env terms ONLY -------------------
+extract_permanova_env.metric <- function(ad2_obj, metric_label, env_vars) {
+  df <- as.data.frame(ad2_obj, stringsAsFactors = FALSE)
+  df$Term <- rownames(df)
+  df <- df[df$Term %in% env_vars, , drop = FALSE]
+  if (!nrow(df)) return(NULL)
+  pcol <- grep("^Pr\\(>F\\)$", names(df), value = TRUE)
+  data.frame(
+    Variable = df$Term,
+    Effect   = df$R2,          # partial R²
+    p_value  = df[[pcol]],
+    Metric   = metric_label,
+    Analysis = "PERMANOVA (margin)",
+    Stat     = "partial R²",
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+}
+
+perm_env_long.metric <- dplyr::bind_rows(
+  extract_permanova_env.metric(permanova_bray_full.metric,     "Bray-Curtis",        env_vars.metric),
+  extract_permanova_env.metric(permanova_wunifrac_full.metric, "Weighted UniFrac",   env_vars.metric),
+  extract_permanova_env.metric(permanova_uunifrac_full.metric, "Unweighted UniFrac", env_vars.metric)
+)
+
+## ---- 4) Combine all results (p-only; db-RDA replaces p-RDA) ---------------
+all_long_p_only.metric <- dplyr::bind_rows(
+  bioenv_long.metric[,   c("Variable","Effect","p_value","Metric","Analysis","Stat")],
+  perm_env_long.metric[, c("Variable","Effect","p_value","Metric","Analysis","Stat")],
+  dbrda_long.metric[,    c("Variable","Effect","p_value","Metric","Analysis","Stat")]
+)
+
+## Order variables and facets
+all_long_p_only.metric$Variable <- factor(all_long_p_only.metric$Variable, levels = env_vars.metric)
+all_long_p_only.metric$Analysis <- factor(all_long_p_only.metric$Analysis,
+                                         levels = c("BIO-ENV (singleton)", "PERMANOVA (margin)", "db-RDA (partial)"))
+all_long_p_only.metric$Metric   <- factor(all_long_p_only.metric$Metric,
+                                         levels = c("Bray-Curtis","Weighted UniFrac","Unweighted UniFrac"))
+
+## Significance stars from raw p-values
+all_long_p_only.metric$stars <- dplyr::case_when(
+  is.finite(all_long_p_only.metric$p_value) & all_long_p_only.metric$p_value < 0.001 ~ "***",
+  is.finite(all_long_p_only.metric$p_value) & all_long_p_only.metric$p_value < 0.01  ~ "**",
+  is.finite(all_long_p_only.metric$p_value) & all_long_p_only.metric$p_value < 0.05  ~ "*",
+  TRUE ~ ""
+)
+
+## ---- 5) (Optional) Tidy table print ---------------------------------------
+print(
+  all_long_p_only.metric |>
+    dplyr::mutate(Effect = round(Effect, 3),
+                  p_value = signif(p_value, 3)) |>
+    dplyr::arrange(Analysis, Metric, Variable)
+)
+
+## Resulting object for plotting downstream:
+## - all_long_p_only.metric
+
+```
+
+```{r}
+## =========================
+## Lollipop plot (finalized) — METRIC
+## =========================
+
+# 1) Rename facets/variables; add Significance; set factor orders
+viz_df.metric <- all_long_p_only.metric |>
+  dplyr::mutate(
+    Analysis = dplyr::recode(
+      Analysis,
+      "BIO-ENV (singleton)" = "Mantel",
+      "PERMANOVA (margin)"  = "PERMANOVA",
+      "db-RDA (partial)"    = "db-RDA"
+    ),
+    Variable = dplyr::recode(
+      Variable,
+      "Potassium.dry"   = "K",
+      "Phosphorus.dry"  = "P",
+      "Ammonium.N.dry"  = "NH4+",
+      "Nitrogen.dry"    = "Total N"
+    ),
+    Variable = factor(Variable, levels = c("Total N","NH4+","P","K","Moisture")),
+    Metric   = factor(Metric, levels = c("Bray-Curtis","Weighted UniFrac","Unweighted UniFrac")),
+    Significance = factor(
+      dplyr::if_else(is.finite(p_value) & p_value < 0.05, "<0.05", "≥0.05"),
+      levels = c("<0.05", "≥0.05")
+    )
+  )
+
+# 2) Aesthetics (unchanged)
+analysis_cols.metric <- c(
+  "Mantel"     = "#2A788EFF",
+  "PERMANOVA"  = "#d3436e",
+  "db-RDA"     = "#000004"
+)
+
+p_methods_lollipop.metric <- ggplot(viz_df.metric, aes(y = Variable, x = Effect)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black") +
+  geom_segment(aes(x = 0, xend = Effect, yend = Variable, color = Analysis),
+               linewidth = 0.6) +
+  geom_point(shape = 21, size = 3.6, stroke = 0, fill = "white") +
+  geom_point(aes(color = Analysis),
+             shape = 21, size = 3.6, stroke = 1.0, fill = NA) +
+  geom_point(aes(fill = Analysis, alpha = Significance),
+             shape = 21, size = 2.8, stroke = 0) +
+  scale_color_manual(values = analysis_cols.metric, guide = "none") +
+  scale_fill_manual(values = analysis_cols.metric, guide = "none") +
+  scale_alpha_manual(
+    values = c("<0.05" = 1, "≥0.05" = 0),
+    name   = "Significance"
+  ) +
+  facet_grid(Metric ~ Analysis, scales = "free") +
+  labs(x = "Effect size", y = NULL) +
+  theme_bw(base_size = 11) +
+  theme(
+    legend.position  = "top",
+    legend.title     = element_text(face = "bold", color = "black"),
+    legend.text      = element_text(color = "black"),
+    axis.text.x      = element_text(color = "black"),
+    axis.text.y      = element_text(color = "black"),
+    axis.title.x     = element_text(color = "black"),
+    strip.background = element_blank(),
+    strip.text.x     = element_text(size = 12, color = "black"),
+    strip.text.y     = element_text(color = "black")
+  ) +
+  guides(
+    alpha = guide_legend(
+      override.aes = list(
+        shape = 21,
+        size  = 3.6,
+        color = "grey25",
+        fill  = c("grey60", NA),
+        alpha = 1
+      )
+    )
+  )
+
+print(p_methods_lollipop.metric)
+
+
+```
+
+```{r}
+# ------------------------------------------------------------------
+# Facet label: "Analysis (Method)" with correct stat per analysis (METRIC)
+# ------------------------------------------------------------------
+
+analysis_cols.metric <- c(
+  "Mantel"     = "#2A788EFF",
+  "PERMANOVA"  = "#d3436e",
+  "db-RDA"     = "#000004"
+)
+
+# Start from the metric lollipop df you just built (from the prior chunk)
+# viz_df.metric must already exist
+viz_df.metric <- viz_df.metric %>%
+  dplyr::mutate(
+    Method = dplyr::case_when(
+      Analysis == "Mantel"    ~ "Spearman r",
+      Analysis == "PERMANOVA" ~ "partial R\u00B2",
+      Analysis == "db-RDA"    ~ "partial adj. R\u00B2",
+      TRUE ~ as.character(Stat)
+    ),
+    FacetLabel = paste0(Analysis, " (", Method, ")")
+  )
+
+facet_levels.metric <- c(
+  "Mantel (Spearman r)",
+  "PERMANOVA (partial R\u00B2)",
+  "db-RDA (partial adj. R\u00B2)"
+)
+viz_df.metric$FacetLabel <- factor(viz_df.metric$FacetLabel, levels = facet_levels.metric)
+
+# ------------------------------------------------------------------
+# Lollipop plot (METRIC)
+# ------------------------------------------------------------------
+p_methods_lollipop.metric <- ggplot(viz_df.metric, aes(y = Variable, x = Effect)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black") +
+  geom_segment(aes(x = 0, xend = Effect, yend = Variable, color = Analysis),
+               linewidth = 0.6) +
+  # Base point (white), then colored outline, then significance fill on top
+  geom_point(shape = 21, size = 3.6, stroke = 0, fill = "white") +
+  geom_point(aes(color = Analysis),
+             shape = 21, size = 3.6, stroke = 1.0, fill = NA) +
+  geom_point(aes(fill = Analysis, alpha = Significance),
+             shape = 21, size = 3.6, stroke = 0) +
+  scale_color_manual(values = analysis_cols.metric, guide = "none") +
+  scale_fill_manual(values = analysis_cols.metric, guide = "none") +
+  scale_alpha_manual(
+    values = c("<0.05" = 1, "≥0.05" = 0),
+    limits = c("<0.05", "≥0.05"),
+    drop   = FALSE,
+    name   = "Significance"
+  ) +
+  facet_grid(Metric ~ FacetLabel, scales = "free") +
+  labs(x = NULL, y = NULL) +
+  theme_bw(base_size = 11) +
+  theme(
+    legend.position  = "top",
+    legend.title     = element_text(face = "bold", color = "black"),
+    legend.text      = element_text(color = "black"),
+    axis.text.x      = element_text(color = "black"),
+    axis.text.y      = element_text(color = "black"),
+    strip.background = element_blank(),
+    strip.text.x     = element_text(size = 12, color = "black"),
+    strip.text.y     = element_text(color = "black")
+  ) +
+  guides(
+    alpha = guide_legend(
+      override.aes = list(
+        shape  = 21,
+        size   = 5,
+        stroke = 1.0,
+        color  = "black",
+        fill   = c("<0.05" = "black", "≥0.05" = "white"),
+        alpha  = 1
+      )
+    )
+  )
+
+print(p_methods_lollipop.metric)
+
+ggsave(
+  "nutrient.lollipop.metric.png",
+  p_methods_lollipop.metric,
+  width = 7.5, height = 5, units = "in", dpi = 900
+)
+
+
+```
+
+```{r}
+##Calculate % changes for the manuscript (METRIC VERSION; do NOT overwrite dry objects)
+
+pct_change_treatment_df.metric <- Nutrient_long.metric2 %>%
+  # Keep only Baseline and Growout 2
+  dplyr::filter(Growout %in% c("Baseline", "2")) %>%
+  dplyr::group_by(Metric, Treatment, Growout) %>%
+  dplyr::summarise(mean_level = mean(Level, na.rm = TRUE), .groups = "drop") %>%
+  tidyr::pivot_wider(
+    names_from   = Growout,
+    values_from  = mean_level,
+    names_prefix = "Growout_"
+  ) %>%
+  dplyr::mutate(
+    pct_change_G2_vs_baseline = ((Growout_2 - Growout_Baseline) / Growout_Baseline) * 100
+  )
+
+pct_change_treatment_df.metric
+
+```
+
+```{r}
+##New heatmap with all values
+
+## Visualize results from: CPLM on CSS (ENV + COVARIATES) — METRIC
+## All values shown, significant associations marked with asterisks
+
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(stringr)
+library(ComplexHeatmap)
+library(circlize)
+library(grid)
+
+alpha_fdr.metric <- 0.05
+
+# Path to the MaAsLin2 output (metric)
+res_path.metric <- file.path("maaslin_env_covars_cplm_metric", "all_results.tsv")
+if (!file.exists(res_path.metric)) {
+  stop("File not found: ", res_path.metric,
+       "\nMake sure the 'maaslin_env_covars_cplm_metric' run completed successfully.")
+}
+
+# Read the table
+env_correlation.metric <- read.delim(
+  res_path.metric,
+  header = TRUE,
+  sep = "\t",
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+# Ensure numeric qval and coef
+env_correlation.metric <- env_correlation.metric %>%
+  dplyr::mutate(
+    qval = suppressWarnings(as.numeric(qval)),
+    coef = suppressWarnings(as.numeric(coef))
+  )
+
+# Metric environmental variables
+env_vars.metric <- c(
+  "Moisture",
+  "Nitrogen.dry",
+  "Phosphorus.dry",
+  "Potassium.dry",
+  "Ammonium.N.dry"
+)
+
+# Keep all metric environmental associations, not only significant ones
+env_correlation_env.metric <- env_correlation.metric %>%
+  dplyr::filter(
+    !is.na(metadata),
+    metadata %in% env_vars.metric,
+    !is.na(qval),
+    !is.na(coef)
+  ) %>%
+  dplyr::mutate(
+    feature_clean = stringr::str_squish(gsub("\\.", " ", feature)),
+    significance = -log(qval) * sign(coef),
+    sig_mark = dplyr::case_when(
+      qval < 0.001 ~ "***",
+      qval < 0.01  ~ "**",
+      qval <= 0.05 ~ "*",
+      TRUE ~ ""
+    ),
+    sig = qval <= alpha_fdr.metric
+  )
+
+cat(
+  "\nLoaded rows (metric):", nrow(env_correlation.metric),
+  "\nMetric env associations retained:", nrow(env_correlation_env.metric),
+  "\nSignificant metric env associations (q ≤ 0.05):",
+  sum(env_correlation_env.metric$sig, na.rm = TRUE), "\n\n"
+)
+
+# Keep features significant in at least one metric environmental association
+features_to_plot.metric <- env_correlation_env.metric %>%
+  dplyr::group_by(feature_clean) %>%
+  dplyr::summarise(any_sig = any(sig, na.rm = TRUE), .groups = "drop") %>%
+  dplyr::filter(any_sig)
+
+plot_df.metric <- env_correlation_env.metric %>%
+  dplyr::semi_join(features_to_plot.metric, by = "feature_clean")
+
+# Rename metadata to plotting-friendly labels
+rename_map.metric <- c(
+  "Potassium.dry"   = "K",
+  "Nitrogen.dry"    = "Total N",
+  "Ammonium.N.dry"  = "NH4+",
+  "Phosphorus.dry"  = "P",
+  "Moisture"        = "Moisture"
+)
+
+plot_df.metric <- plot_df.metric %>%
+  dplyr::mutate(
+    metadata_plot = dplyr::recode(metadata, !!!rename_map.metric)
+  )
+
+# Column order
+col_order.metric <- c("NH4+", "Total N", "P", "K", "Moisture")
+
+# Build significance/value matrix
+significance_mat_df.metric <- plot_df.metric %>%
+  dplyr::select(feature_clean, metadata_plot, significance) %>%
+  dplyr::group_by(feature_clean, metadata_plot) %>%
+  dplyr::summarise(
+    significance = mean(significance, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  tidyr::pivot_wider(
+    names_from = metadata_plot,
+    values_from = significance,
+    values_fill = NA_real_
+  )
+
+significance_mat.metric <- significance_mat_df.metric %>%
+  tibble::column_to_rownames("feature_clean") %>%
+  as.matrix()
+
+# Keep/reorder columns
+col_keep.metric <- intersect(col_order.metric, colnames(significance_mat.metric))
+significance_mat.metric <- significance_mat.metric[, col_keep.metric, drop = FALSE]
+
+# Build asterisk matrix
+sig_mark_mat_df.metric <- plot_df.metric %>%
+  dplyr::select(feature_clean, metadata_plot, sig_mark) %>%
+  dplyr::group_by(feature_clean, metadata_plot) %>%
+  dplyr::summarise(
+    sig_mark = dplyr::case_when(
+      any(sig_mark == "***", na.rm = TRUE) ~ "***",
+      any(sig_mark == "**",  na.rm = TRUE) ~ "**",
+      any(sig_mark == "*",   na.rm = TRUE) ~ "*",
+      TRUE ~ ""
+    ),
+    .groups = "drop"
+  ) %>%
+  tidyr::pivot_wider(
+    names_from = metadata_plot,
+    values_from = sig_mark,
+    values_fill = ""
+  )
+
+sig_mark_mat.metric <- sig_mark_mat_df.metric %>%
+  tibble::column_to_rownames("feature_clean") %>%
+  as.matrix()
+
+sig_mark_mat.metric <- sig_mark_mat.metric[
+  rownames(significance_mat.metric),
+  colnames(significance_mat.metric),
+  drop = FALSE
+]
+
+# Alphabetize rows and keep asterisks aligned
+row_order.metric <- sort(rownames(significance_mat.metric), method = "radix")
+
+significance_mat.metric <- significance_mat.metric[row_order.metric, , drop = FALSE]
+sig_mark_mat.metric     <- sig_mark_mat.metric[row_order.metric, , drop = FALSE]
+
+# Palette and legend
+pal.metric <- circlize::colorRamp2(
+  c(-10, 0, 10),
+  c("royalblue4", "white", "firebrick")
+)
+
+lgd_list.mas.metric <- list(
+  title = "FDR",
+  title_gp = grid::gpar(fontsize = 12, fontface = "bold"),
+  labels_gp = grid::gpar(fontsize = 10),
+  border = "black",
+  lwd = 1,
+  direction = "horizontal",
+  title_position = "topcenter",
+  at = c(-10.1, -5, -2.5, 0, 2.5, 5, 10.1),
+  labels = c("<-10", "-5", "-2.5", "0", "2.5", "5", ">10"),
+  legend_width  = grid::unit(5, "cm"),
+  legend_height = grid::unit(5, "cm"),
+  x = grid::unit(0.5, "cm"),
+  y = grid::unit(0.5, "cm"),
+  legend_gp = grid::gpar(col = "black", lwd = 2)
+)
+
+# Heatmap: all values, significant cells marked
+ht.env.metric <- ComplexHeatmap::Heatmap(
+  significance_mat.metric,
+  name = "FDR",
+  na_col = "gray99",
+  col = pal.metric,
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+  show_column_names = TRUE,
+  row_names_gp = grid::gpar(fontface = "italic", fontsize = 8),
+  rect_gp = grid::gpar(col = "gray", lwd = 1),
+  column_names_rot = 45,
+  border_gp = grid::gpar(col = "black", lwd = 1.5),
+  heatmap_legend_param = lgd_list.mas.metric,
+  layer_fun = function(j, i, x, y, width, height, fill) {
+    marks <- sig_mark_mat.metric[cbind(i, j)]
+    keep <- !is.na(marks) & marks != ""
+    if (any(keep)) {
+      grid::grid.text(
+        marks[keep],
+        x = x[keep],
+        y = y[keep] - height[keep] * 0.25,
+        gp = grid::gpar(
+          col = "white",
+          fontsize = 11,
+          fontface = "bold"
+        )
+      )
+    }
+  }
+)
+
+png(
+  "nutrient.heat.2.metric.all_values_with_asterisks.png",
+  width = 3.2,
+  height = 10,
+  units = "in",
+  res = 900,
+  bg = "transparent"
+)
+
+ComplexHeatmap::draw(
+  ht.env.metric,
+  heatmap_legend_side = "bottom",
+  padding = grid::unit(c(5, 7.5, 5, 0), "mm")
+)
+
+dev.off()
+
+```
+

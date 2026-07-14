@@ -1,0 +1,820 @@
+---
+title: "Alpha diversity"
+author: "BH"
+date: "2025-07-29"
+output: html_document
+---
+
+```{r}
+##will use physeq_decontam_no_neg_with_tree
+
+```
+
+```{r}
+##We will first trim growout 3 samples
+
+physeq_no_growout3 <- subset_samples(physeq_decontam_no_neg_with_tree, Growout != 3)
+
+```
+
+
+```{r}
+##Let's first select a valid rarefaction depth based on our data
+
+depths <- sample_sums(physeq_no_growout3)
+ggplot(data.frame(Depth = depths), aes(x = Depth)) +
+  geom_histogram(binwidth = 500) +
+  geom_vline(xintercept = 1000, linetype = "dashed", color = "red") +
+  labs(title = "Sequencing Depth Distribution", x = "Reads per Sample", y = "Number of Samples")
+
+# Choose a depth like:
+summary(depths)
+quantile(depths, probs = c(0.05, 0.10))
+```
+```{r}
+# Load required packages
+#library(phyloseq)
+#library(picante)
+#library(vegan)
+#library(tidyverse)
+
+# Set seed for reproducibility
+set.seed(123)
+
+# Function to estimate alpha diversity over 1,000 rarefactions
+estimate_alpha_diversity_iterative <- function(physeq_obj, depth = 14983, iter = 1000) {
+  # Check that depth is valid
+  min_lib_size <- min(sample_sums(physeq_obj))
+  if (depth > min_lib_size) {
+    stop("Rarefaction depth exceeds minimum library size.")
+  }
+
+  # Store metrics from each iteration
+  alpha_list <- vector("list", iter)
+
+  for (i in 1:iter) {
+    rarefied <- rarefy_even_depth(physeq_obj, sample.size = depth, verbose = FALSE, rngseed = 123 + i)
+
+    # Get OTU matrix (samples as rows)
+    otu <- as(otu_table(rarefied), "matrix")
+    if (taxa_are_rows(rarefied)) otu <- t(otu)
+    
+    tree <- phy_tree(rarefied)
+
+    richness <- estimate_richness(rarefied, measures = c("Observed", "Shannon", "InvSimpson"))
+    pd_vals  <- pd(otu, tree, include.root = FALSE)
+
+    metrics <- cbind(richness, Faith_PD = pd_vals$PD)
+    metrics$Sample <- rownames(metrics)
+    alpha_list[[i]] <- metrics
+  }
+
+  # Average across all iterations
+  alpha_combined <- bind_rows(alpha_list)
+  alpha_summary <- alpha_combined %>%
+    group_by(Sample) %>%
+    summarise(across(c(Observed, Shannon, InvSimpson, Faith_PD), mean, na.rm = TRUE))
+
+  return(alpha_summary)
+}
+
+# Run the function using physeq_no_growout3 and rarefaction depth of 14,983
+alpha_diversity_summary <- estimate_alpha_diversity_iterative(physeq_no_growout3, depth = 14983, iter = 1000)
+
+# View result
+head(alpha_diversity_summary)
+
+```
+```{r}
+##Integrate metadata for visualization
+# Extract metadata and convert to data frame
+metadata_df <- as.data.frame(sample_data(physeq_no_growout3))
+metadata_df$Sample <- rownames(metadata_df)
+
+# Join alpha diversity summary with metadata
+alpha_diversity_meta <- alpha_diversity_summary %>%
+  left_join(metadata_df, by = "Sample")
+
+```
+
+```{r}
+##Now to visualize
+#library(dplyr)
+#library(tidyr)
+#library(ggplot2)
+
+# 1. Pivot to long format and rename Faith_PD
+alpha_long <- alpha_diversity_meta %>%
+  pivot_longer(cols = c(Observed, Shannon, InvSimpson, Faith_PD),
+               names_to = "Metric", values_to = "Value") %>%
+  mutate(Metric = ifelse(Metric == "Faith_PD", "Faith's PD", Metric),
+         Metric = factor(Metric, levels = c("Observed", "Shannon", "InvSimpson", "Faith's PD")))
+
+# 2. Create ggplot
+ggplot(alpha_long, aes(x = Growout, y = Value)) +
+  geom_boxplot(
+    aes(fill = Treatment),
+    color = "black",
+    alpha = 0.9,
+    outlier.shape = NA,
+    #position = position_dodge(width = 0.75)
+  ) +
+  stat_summary(
+    aes(fill = Treatment),
+    fun = mean,
+    geom = "point",
+    shape = 23,
+    size = 3,
+    color = "white",
+    position = position_dodge(width = 0.75),
+    show.legend = FALSE
+  ) +
+  geom_jitter(
+    aes(color = Treatment),
+    shape = 21,
+    size = 1.25,
+    alpha = 0.9,
+    fill = "white",  # Point fill stays white
+    position = position_jitterdodge(
+      jitter.width = 0.1,
+      dodge.width = 0.75
+    ),
+    show.legend = FALSE
+  ) +
+  facet_wrap(~Metric, scales = 'free', nrow = 1) +
+  scale_fill_manual(values = c("Control" = "#f8765c", "IndigoLT" = "#221150")) +
+  scale_color_manual(values = c("Control" = "black", "IndigoLT" = "black")) +
+  theme_bw() +
+  theme(
+    axis.title.x = element_text(size = 14, face = "bold"),
+    axis.title.y = element_blank(),
+    axis.text = element_text(size = 12, color = "black"),
+    axis.ticks.x = element_blank(),
+    strip.text = element_text(size = 12, face = 'bold'),
+    strip.background = element_blank(),
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text = element_text(size = 14),
+    legend.position = "top",
+    panel.spacing = unit(1, "lines")
+  ) +
+  labs(fill = "Treatment", color = "Treatment", x = "Growout")
+
+ggsave("alpha.diversity.1.png", width = 6.5, height = 3.5, units = "in", dpi = 900)
+
+
+
+```
+
+```{r}
+##Now, for the statistics
+#library(dplyr)
+#library(tidyr)
+#library(ggplot2)
+#library(MASS)
+#library(glmmTMB)
+#library(DHARMa)
+
+##First, let's determine the best-fitting distribution
+
+# Alpha diversity metrics to test
+metrics <- c("Observed", "Shannon", "InvSimpson", "Faith_PD")
+
+# Initialize a list to store the results
+distribution_fits <- list()
+
+# Loop through each metric and growout
+for (metric in metrics) {
+  for (g in c("1", "2")) {
+    # Filter the data for the specific growout directly from alpha_diversity_meta
+    df_sub <- alpha_diversity_meta %>% 
+      filter(Growout == g)
+    
+    # Extract the vector of values for the current metric
+    y <- df_sub[[metric]]
+    
+    cat("\n----------------------------\n")
+    cat(paste("Metric:", metric, "| Growout:", g, "\n"))
+
+    # Shapiro-Wilk normality test
+    shapiro_result <- shapiro.test(y)
+    cat("Shapiro-Wilk p-value:", round(shapiro_result$p.value, 4), "\n")
+    
+    # Visual histogram
+    p <- ggplot(df_sub, aes_string(x = metric)) +
+      geom_histogram(bins = 20, fill = "steelblue", color = "black") +
+      ggtitle(paste(metric, "- Growout", g))
+    print(p)
+    
+    # Attempt to fit different statistical distributions
+    dist_fits <- list()
+    try(dist_fits$normal <- fitdistr(y, "normal"), silent = TRUE)
+    try(dist_fits$gamma  <- fitdistr(y, "gamma"), silent = TRUE)
+    try(dist_fits$lognorm <- fitdistr(y, "lognormal"), silent = TRUE)
+    
+    # Compare model fits using AIC (Akaike Information Criterion)
+    aics <- sapply(dist_fits, AIC)
+    best_fit <- names(which.min(aics))
+    cat("Best distribution (AIC):", best_fit, "\n")
+    
+    # Store the AICs and the name of the best-fitting distribution
+    distribution_fits[[paste(metric, g, sep = "_")]] <- list(
+      AICs = aics,
+      Best = best_fit
+    )
+  }
+}
+
+
+```
+```{r}
+##We will now construct models and generate diagnostics to ensure appropriate fit
+
+# 1. Specify best distributions per metric and growout based on AIC
+best_distributions <- list(
+  Observed    = c("1" = "gamma",   "2" = "normal"),
+  Shannon     = c("1" = "gamma",   "2" = "normal"),
+  InvSimpson  = c("1" = "lognorm", "2" = "gamma"),
+  Faith_PD    = c("1" = "gamma",   "2" = "gamma")
+)
+
+# 2. Helper to choose the appropriate family/link
+get_glmm_family <- function(dist_name) {
+  if (dist_name == "gamma") {
+    Gamma(link = "log")
+  } else if (dist_name == "normal") {
+    gaussian(link = "identity")
+  } else if (dist_name == "lognorm") {
+    # we'll log-transform the response instead
+    gaussian(link = "identity")
+  } else {
+    stop("Unsupported distribution: ", dist_name)
+  }
+}
+
+# 3. Smart GLMM fit with Position as fixed and only House as random
+fit_smart_glmm <- function(metric, growout, dist_name,
+                           var_thresh = 1e-6,
+                           n_dharma   = 1000) {
+  # Subset & factorize
+  df <- alpha_diversity_meta %>%
+    filter(Growout == growout) %>%
+    mutate(
+      Treatment = factor(Treatment),
+      House     = factor(House),
+      Position  = factor(Position)
+    )
+  
+  # Log-transform if lognormal
+  if (dist_name == "lognorm") {
+    df[[metric]] <- log(df[[metric]])
+  }
+  
+  # Full formula: Treatment + Position fixed, House random
+  form_full <- reformulate(
+    c("Treatment", "Position", "(1|House)"),
+    response = metric
+  )
+  fam <- get_glmm_family(dist_name)
+  
+  # Initial fit
+  model <- glmmTMB(form_full, family = fam, data = df)
+  
+  # Check House variance
+  vc       <- VarCorr(model)$cond
+  house_var <- if ("House" %in% names(vc)) vc$House[1,1] else 0
+  
+  # Decide whether to keep the House random effect
+  if (house_var <= var_thresh) {
+    # drop random effect if near zero
+    form_simp <- reformulate(
+      c("Treatment", "Position"),
+      response = metric
+    )
+    model <- glmmTMB(form_simp, family = fam, data = df)
+    cat("  Dropped (1|House); using fixed only\n")
+  }
+  
+  # DHARMa diagnostics
+  cat("\n--- DHARMa Diagnostics:", metric, "| Growout", growout, "---\n")
+  sim <- simulateResiduals(model, n = n_dharma)
+  print(testDispersion(sim))
+  print(testOutliers(sim))
+  print(testQuantiles(sim))
+  plot(sim, main = paste(metric, "(Growout", growout, ")"))
+  
+  return(model)
+}
+
+# 4. Loop over metrics and growouts, fit & store models
+models <- list()
+for (met in names(best_distributions)) {
+  for (go in c("1", "2")) {
+    dist <- best_distributions[[met]][[go]]
+    name <- paste0(met, "_G", go)
+    cat("\n============================\n",
+        "Fitting:", name, "| Distribution:", dist, "\n")
+    models[[name]] <- fit_smart_glmm(met, go, dist)
+  }
+}
+
+
+```
+
+```{r}
+##let's add p-values to the plot
+# 1. Extract p‑values for Treatment effect from each model
+#library(dplyr)
+#library(purrr)
+#library(broom.mixed)
+
+# 1) Harmonize alpha_long’s Metric
+alpha_long2 <- alpha_long %>%
+  mutate(
+    Metric = case_when(
+      Metric %in% c("Faith_PD", "Faith’s PD", "Faith's PD") ~ "Faith’s PD",
+      TRUE ~ Metric
+    ),
+    Growout = as.character(Growout)
+  )
+
+# 2) Extract p-values for Treatment only
+p_values_df <- imap_dfr(models, function(mod, name) {
+  parts   <- strsplit(name, "_G")[[1]]
+  metric  <- parts[1]
+  growout <- parts[2]
+
+  # get fixed-effects table, conditional model
+  fe_tbl <- tidy(mod, components = "cond", effects = "fixed")
+
+  # filter for Treatment effect only (e.g. "TreatmentIndigoLT")
+  pval <- fe_tbl %>%
+    filter(grepl("^Treatment", term)) %>%
+    # if you have exactly one Treatment term, pull it; otherwise it'll error
+    pull(p.value)
+
+  tibble(
+    Metric  = metric,
+    Growout = growout,
+    P_Value = pval
+  )
+}) %>%
+  mutate(
+    # recode Faith_PD label
+    Metric = case_when(
+      Metric %in% c("Faith_PD", "Faith’s PD", "Faith's PD") ~ "Faith’s PD",
+      TRUE ~ Metric
+    ),
+    Growout = as.character(Growout),
+    P_Value_Label = sprintf("italic(p) == %.3f", P_Value)
+  )
+
+# 3) Compute y-positions from alpha_long2
+y_pos_df <- alpha_long2 %>%
+  group_by(Metric, Growout) %>%
+  summarise(
+    y_pos = max(Value, na.rm = TRUE) * 1.02,
+    .groups = "drop"
+  )
+
+# 4) Join y_pos into p_values_df
+p_values_df <- left_join(p_values_df, y_pos_df, by = c("Metric", "Growout"))
+
+# 5) Plot
+ggplot(alpha_long2, aes(x = Growout, y = Value)) +
+  geom_boxplot(aes(fill = Treatment),
+               color     = "black", alpha = 0.9,
+               outlier.shape = NA,
+               position  = position_dodge(width = 0.9)) +
+  stat_summary(aes(fill = Treatment),
+               fun       = mean,
+               geom      = "point",
+               shape     = 23,
+               size      = 3,
+               color     = "white",
+               position  = position_dodge(width = 0.9),
+               show.legend = FALSE) +
+  geom_jitter(aes(color = Treatment),
+              shape     = 21,
+              size      = 1.25,
+              alpha     = 0.9,
+              fill      = "white",
+              position  = position_jitterdodge(
+                            jitter.width = 0.1,
+                            dodge.width  = 0.9),
+              show.legend = FALSE) +
+  geom_text(data       = p_values_df,
+            aes(x      = Growout,
+                y      = y_pos,
+                label  = P_Value_Label),
+            parse       = TRUE,
+            size = 3,
+            inherit.aes = FALSE,
+            vjust       = 0) +
+  facet_wrap(~ Metric, scales = "free", nrow = 1) +
+  scale_fill_manual(values = c("Control"  = "#f8765c",
+                               "IndigoLT" = "#221150")) +
+  scale_color_manual(values = c("Control"  = "black",
+                                "IndigoLT" = "black")) +
+  theme_bw() +
+  theme(
+    axis.title.x     = element_text(size = 14, face = "bold"),
+    axis.title.y     = element_blank(),
+    axis.text        = element_text(size = 12, color = "black"),
+    axis.ticks.x     = element_blank(),
+    strip.text       = element_text(size = 12),
+    strip.background = element_blank(),
+    legend.title     = element_text(size = 14, face = "bold"),
+    legend.text      = element_text(size = 14),
+    legend.position  = "top",
+    panel.spacing    = unit(1, "lines")
+  ) +
+  labs(fill  = "Treatment",
+       color = "Treatment",
+       x     = "Growout")
+
+ggsave("alpha.diversity.2.png", width = 6.5, height = 4, units = "in", dpi = 900)
+
+```
+
+```{r}
+##Stats for alpha diversity- one model
+# Metrics to evaluate
+metrics_joint <- c("Observed", "Shannon", "InvSimpson", "Faith_PD")
+
+# New container so we don't touch your prior 'distribution_fits'
+distribution_fits_joint <- list()
+
+for (metric in metrics_joint) {
+  for (g in c("1","2")) {
+    df_sub <- alpha_diversity_meta %>%
+      dplyr::filter(Growout == g)
+
+    y <- df_sub[[metric]]
+
+    cat("\n----------------------------\n")
+    cat(paste("Metric:", metric, "| Growout:", g, "\n"))
+
+    # Shapiro-Wilk
+    shapiro_result <- shapiro.test(y)
+    cat("Shapiro-Wilk p-value:", round(shapiro_result$p.value, 4), "\n")
+
+    # Quick histogram
+    print(
+      ggplot(df_sub, aes_string(x = metric)) +
+        geom_histogram(bins = 20, fill = "steelblue", color = "black") +
+        ggtitle(paste(metric, "- Growout", g))
+    )
+
+    # Fit candidate distributions
+    dist_fits <- list()
+    try(dist_fits$normal  <- MASS::fitdistr(y, "normal"),    silent = TRUE)
+    try(dist_fits$gamma   <- MASS::fitdistr(y, "gamma"),     silent = TRUE)
+    try(dist_fits$lognorm <- MASS::fitdistr(y, "lognormal"), silent = TRUE)
+
+    aics <- sapply(dist_fits, AIC)
+    best <- names(which.min(aics))
+    cat("Best distribution (AIC):", best, "\n")
+
+    distribution_fits_joint[[paste(metric, g, sep = "_")]] <- list(
+      AICs = aics, Best = best
+    )
+  }
+}
+
+```
+
+```{r}
+## ============================================================
+## Global α-diversity models across Growout 1 & 2
+## Fixed: Treatment * Growout + Position
+## Random: (1 | Growout:House)   [dropped if near-zero variance]
+## Families (from your AIC screen):
+##   Observed   -> normal
+##   Shannon    -> gamma
+##   InvSimpson -> lognormal (log-transform + Gaussian)
+##   Faith_PD   -> gamma
+## Outputs (no overwrite): 
+##   alpha_models_joint_new, alpha_pairs_joint_new, 
+##   alpha_anova_joint_new,  alpha_dharma_joint_new
+## ============================================================
+
+# ---- 0) Checks & setup ----
+.required_cols <- c("Sample","Growout","Treatment","House","Position",
+                    "Observed","Shannon","InvSimpson","Faith_PD")
+.missing <- setdiff(.required_cols, names(alpha_diversity_meta))
+if (length(.missing)) {
+  stop("alpha_diversity_meta is missing required columns: ", paste(.missing, collapse = ", "))
+}
+
+# Local copy (avoid mutating your original data frame)
+.alpha_df_joint <- alpha_diversity_meta
+.alpha_df_joint$Growout   <- as.factor(.alpha_df_joint$Growout)
+.alpha_df_joint$Treatment <- as.factor(.alpha_df_joint$Treatment)
+.alpha_df_joint$House     <- as.factor(.alpha_df_joint$House)
+.alpha_df_joint$Position  <- as.factor(.alpha_df_joint$Position)
+
+# Sum-to-zero contrasts for Type III
+.old_contr <- options(contrasts = c("contr.sum","contr.poly"))
+
+# Families you chose from the console results
+families_map <- c(
+  Observed   = "normal",
+  Shannon    = "gamma",
+  InvSimpson = "lognorm",  # log-transform + Gaussian
+  Faith_PD   = "gamma"
+)
+
+# ---- 1) Helpers ----
+.get_family <- function(fam_name) {
+  if (fam_name == "normal")   return(stats::gaussian(link = "identity"))
+  if (fam_name == "gamma")    return(stats::Gamma(link = "log"))
+  if (fam_name == "lognorm")  return(stats::gaussian(link = "identity"))  # via log-transform
+  stop("Unsupported family: ", fam_name)
+}
+
+.extract_rand_var <- function(model) {
+  vc <- try(glmmTMB::VarCorr(model), silent = TRUE)
+  if (inherits(vc, "try-error")) return(NA_real_)
+  vcdf <- try(as.data.frame(vc), silent = TRUE)
+  if (inherits(vcdf, "try-error") || !nrow(vcdf)) return(NA_real_)
+  row <- vcdf[vcdf$component == "cond" & grepl("Growout:House", vcdf$grp), , drop = FALSE]
+  if (!nrow(row)) return(NA_real_)
+  as.numeric(row$sdcor[1])^2  # SD^2 -> variance
+}
+
+.fit_one_metric_joint <- function(metric, fam_name, var_thresh = 1e-6, n_sims = 1000) {
+  df <- .alpha_df_joint
+
+  # Build response (log-transform if lognormal)
+  resp_var <- if (fam_name == "lognorm") paste0("log_", metric) else metric
+  if (fam_name == "lognorm") {
+    if (any(df[[metric]] <= 0, na.rm = TRUE)) {
+      stop("'", metric, "' contains non-positive values; cannot log-transform for lognormal.")
+    }
+    df[[resp_var]] <- log(df[[metric]])
+  } else {
+    df[[resp_var]] <- df[[metric]]
+  }
+
+  fam <- .get_family(fam_name)
+
+  # Full formula with random effect
+  form_full <- stats::as.formula(paste0(resp_var, " ~ Treatment * Growout + Position + (1 | Growout:House)"))
+  model_full <- glmmTMB::glmmTMB(form_full, family = fam, data = df)
+
+  # Drop random effect if essentially zero variance
+  kept_random <- TRUE
+  rv <- .extract_rand_var(model_full)
+  if (!is.na(rv) && rv <= var_thresh) {
+    kept_random <- FALSE
+    form_simpl <- stats::as.formula(paste0(resp_var, " ~ Treatment * Growout + Position"))
+    model_full <- glmmTMB::glmmTMB(form_simpl, family = fam, data = df)
+  }
+
+  # Type III Wald tests
+  a3 <- car::Anova(model_full, type = 3)
+
+  # emmeans: Treatment within Growout + BH-adjusted pairwise via contrast()
+  emm_by <- emmeans::emmeans(model_full, ~ Treatment | Growout)
+  pw     <- emmeans::contrast(emm_by, method = "pairwise", adjust = "BH")
+  pw_df  <- as.data.frame(summary(pw))
+  pw_df$Metric <- metric
+
+  # DHARMa diagnostics
+  simres <- DHARMa::simulateResiduals(fittedModel = model_full, n = n_sims)
+  disp   <- DHARMa::testDispersion(simres)
+  outs   <- DHARMa::testOutliers(simres)
+  quants <- DHARMa::testQuantiles(simres)
+
+  list(
+    metric       = metric,
+    family_used  = fam_name,
+    transform    = if (fam_name == "lognorm") "log" else "none",
+    kept_random  = kept_random,
+    model        = model_full,
+    anova3       = a3,
+    emmeans      = emm_by,
+    pairs_contr  = pw,
+    pairs_df     = pw_df,
+    dharma       = list(sim = simres, dispersion = disp, outliers = outs, quantiles = quants)
+  )
+}
+
+# ---- 2) Fit all four metrics (no overwrite; use *_new names) ----
+alpha_models_joint_new <- lapply(names(families_map), function(met) {
+  .fit_one_metric_joint(metric = met, fam_name = families_map[[met]])
+})
+names(alpha_models_joint_new) <- names(families_map)
+
+# ---- 3) Collect outputs ----
+alpha_pairs_joint_new <- do.call(rbind, lapply(alpha_models_joint_new, `[[`, "pairs_df"))
+row.names(alpha_pairs_joint_new) <- NULL
+
+alpha_anova_joint_new <- lapply(alpha_models_joint_new, function(x) {
+  out <- as.data.frame(x$anova3)
+  out$Term   <- rownames(out)
+  out$Metric <- x$metric
+  rownames(out) <- NULL
+  out[, c("Metric","Term", setdiff(names(out), c("Metric","Term")))]
+})
+
+alpha_dharma_joint_new <- lapply(alpha_models_joint_new, `[[`, "dharma")
+
+# ---- 4) Console summaries (optional) ----
+invisible(lapply(alpha_models_joint_new, function(x) {
+  cat("\n==============================\n",
+      "Metric: ", x$metric,
+      " | family=", x$family_used,
+      " | transform=", x$transform,
+      " | kept_random=", x$kept_random, "\n", sep = "")
+  print(x$anova3)
+  cat("\n-- Pairwise: Treatment within Growout (BH) --\n")
+  print(summary(x$pairs_contr))
+  cat("\n-- DHARMa --\n")
+  print(x$dharma$dispersion)
+  print(x$dharma$outliers)
+  print(x$dharma$quantiles)
+}))
+
+# Restore original contrasts
+options(.old_contr)
+
+```
+
+```{r}
+## ===============================
+## Pairwise p-value overlay plot
+## ===============================
+
+# -- helper to format p-values for plotmath --
+fmt_p_parse <- function(p) {
+  if (is.na(p)) return("italic(p)==NA")
+  if (p < 1e-3) sprintf("italic(p)==%s", formatC(p, format = "e", digits = 3))
+  else sprintf("italic(p)==%.3f", p)
+}
+
+# -------- 1) Build a long plotting frame (no overwrite) ----------
+alpha_long_plot <- tidyr::pivot_longer(
+  alpha_diversity_meta,
+  cols = c("Observed","Shannon","InvSimpson","Faith_PD"),
+  names_to = "Metric", values_to = "Value"
+) %>%
+  dplyr::mutate(
+    Metric  = dplyr::case_when(
+      Metric %in% c("Faith_PD","Faith’s PD","Faith's PD") ~ "Faith’s PD",
+      TRUE ~ Metric
+    ),
+    Growout = as.character(Growout),
+    Treatment = factor(Treatment)
+  )
+
+# -------- 2) Extract BH pairwise p-values (Control vs IndigoLT) from your joint models ----------
+# Use your fitted joint models object (the one you just ran)
+models_list_for_plot <- alpha_models_joint_new
+
+alpha_pairs_df <- purrr::imap_dfr(models_list_for_plot, function(one, metric_name) {
+  # each 'one' is a list with $pairs_df created earlier by emmeans::contrast(..., adjust="BH")
+  pwdf <- try(one$pairs_df, silent = TRUE)
+  if (inherits(pwdf, "try-error") || is.null(pwdf) || !nrow(pwdf)) {
+    return(tibble::tibble(Metric = metric_name, Growout = character(), P_Value = numeric()))
+  }
+
+  # Keep Control vs IndigoLT comparisons and carry Growout
+  keep <- grepl("Control\\s*-\\s*IndigoLT|IndigoLT\\s*-\\s*Control", pwdf$contrast)
+  pwdf <- pwdf[keep, , drop = FALSE]
+  if (!nrow(pwdf)) {
+    return(tibble::tibble(Metric = metric_name, Growout = character(), P_Value = numeric()))
+  }
+
+  tibble::tibble(
+    Metric  = metric_name,
+    Growout = as.character(pwdf$Growout),
+    P_Value = suppressWarnings(as.numeric(pwdf$p.value))
+  )
+}) %>%
+  dplyr::mutate(
+    Metric  = dplyr::case_when(
+      Metric %in% c("Faith_PD","Faith’s PD","Faith's PD") ~ "Faith’s PD",
+      TRUE ~ Metric
+    ),
+    Growout = as.character(Growout),
+    P_Label = vapply(P_Value, fmt_p_parse, character(1))
+  )
+
+# -------- 3) y-positions for the p-value text ----------
+p_ypos_df <- alpha_long_plot %>%
+  dplyr::group_by(Metric, Growout) %>%
+  dplyr::summarise(y_pos = max(Value, na.rm = TRUE) * 1.02, .groups = "drop")
+
+alpha_pairs_annot <- dplyr::left_join(alpha_pairs_df, p_ypos_df, by = c("Metric","Growout"))
+
+# -------- 4) Plot (faceted by Metric) with pairwise p-values overlaid ----------
+alpha_pair_plot_new <- ggplot(alpha_long_plot, aes(x = Growout, y = Value)) +
+  geom_boxplot(aes(fill = Treatment),
+               color = "black", alpha = 0.9,
+               outlier.shape = NA,
+               position = position_dodge(width = 0.9)) +
+  stat_summary(aes(fill = Treatment),
+               fun = mean, geom = "point",
+               shape = 23, size = 3, color = "white",
+               position = position_dodge(width = 0.9),
+               show.legend = FALSE) +
+  geom_jitter(aes(color = Treatment),
+              shape     = 21,
+              size      = 1.25,
+              alpha     = 0.9,
+              fill      = "white",
+              position  = position_jitterdodge(
+                            jitter.width = 0.1,
+                            dodge.width  = 0.9),
+              show.legend = FALSE) +
+  geom_text(data = alpha_pairs_annot,
+            aes(x = Growout, y = y_pos, label = P_Label),
+            parse = TRUE, size = 3, inherit.aes = FALSE, vjust = 0) +
+  facet_wrap(~ Metric, scales = "free", nrow = 1) +
+  scale_fill_manual(values = c("Control" = "#f8765c", "IndigoLT" = "#221150")) +
+  scale_color_manual(values = c("Control"  = "black",
+                                "IndigoLT" = "black")) +
+  theme_bw() +
+  theme(
+    axis.title.x     = element_text(size = 14, face = "bold"),
+    axis.title.y     = element_blank(),
+    axis.text        = element_text(size = 12, color = "black"),
+    axis.ticks.x     = element_blank(),
+    strip.text       = element_text(size = 12),
+    strip.background = element_blank(),
+    legend.title     = element_text(size = 14, face = "bold"),
+    legend.text      = element_text(size = 14),
+    legend.position  = "top",
+    panel.spacing    = unit(1, "lines")
+  ) +
+  labs(fill = "Treatment", x = "Growout")
+
+print(alpha_pair_plot_new)
+
+ ggsave("alpha_pairwise_BH_pvalues_joint.3.png", alpha_pair_plot_new,
+        width = 6.5, height = 3, units = "in", dpi = 900)
+
+
+```
+
+```{r}
+##Formatted
+
+# -------- 3) y-positions for the p-value text ----------
+p_ypos_df.2 <- alpha_long_plot %>%
+  dplyr::group_by(Metric, Growout) %>%
+  dplyr::summarise(y_pos = max(Value, na.rm = TRUE) * 1.1, .groups = "drop")
+
+alpha_pairs_annot.2 <- dplyr::left_join(alpha_pairs_df, p_ypos_df.2, by = c("Metric","Growout"))
+
+# -------- 4) Plot (faceted by Metric) with pairwise p-values overlaid ----------
+alpha_pair_plot_new <- ggplot(alpha_long_plot, aes(x = Growout, y = Value)) +
+  geom_boxplot(aes(fill = Treatment),
+               color = "black", alpha = 0.9,
+               outlier.shape = NA,
+               position = position_dodge(width = 0.9)) +
+  stat_summary(aes(fill = Treatment),
+               fun = mean, geom = "point",
+               shape = 23, size = 3, color = "white",
+               position = position_dodge(width = 0.9),
+               show.legend = FALSE) +
+  geom_jitter(aes(color = Treatment),
+              shape     = 21,
+              size      = 1.25,
+              alpha     = 0.9,
+              fill      = "white",
+              position  = position_jitterdodge(
+                            jitter.width = 0.1,
+                            dodge.width  = 0.9),
+              show.legend = FALSE) +
+  geom_text(data = alpha_pairs_annot.2,
+            aes(x = Growout, y = y_pos, label = P_Label),
+            parse = TRUE, size = 3, inherit.aes = FALSE, vjust = 0) +
+  facet_wrap(~ Metric, scales = "free", nrow = 1) +
+  scale_fill_manual(values = c("Control" = "#f8765c", "IndigoLT" = "#221150")) +
+  scale_color_manual(values = c("Control"  = "black",
+                                "IndigoLT" = "black")) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.15))) +
+  theme_bw() +
+  theme(
+    axis.title.x     = element_text(size = 14, face = "bold"),
+    axis.title.y     = element_blank(),
+    axis.text        = element_text(size = 12, color = "black"),
+    axis.ticks.x     = element_blank(),
+    strip.text       = element_text(size = 12),
+    strip.background = element_blank(),
+    legend.title     = element_text(size = 14, face = "bold"),
+    legend.text      = element_text(size = 14),
+    legend.position  = "top",
+    panel.spacing    = unit(1, "lines")
+  ) +
+  labs(fill = "Treatment", x = "Growout")
+
+
+print(alpha_pair_plot_new)
+
+ ggsave("alpha_pairwise_BH_pvalues_joint.3.png", alpha_pair_plot_new,
+        width = 7.5, height = 3, units = "in", dpi = 900)
+```
+

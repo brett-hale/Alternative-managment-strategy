@@ -1,0 +1,1804 @@
+---
+title: "Beta diversity"
+author: "BH"
+date: "2025-07-29"
+output: html_document
+---
+
+```{r}
+##will use physeq_no_growout3, but must normalize
+
+# 1. Convert the phyloseq object to a metagenomeSeq object
+physeq_no_growout3_mgSeq <- phyloseq_to_metagenomeSeq(physeq_no_growout3)
+
+# 2. Compute the CSS normalization factor
+p_css <- cumNormStat(physeq_no_growout3_mgSeq)
+
+# 3. Apply CSS normalization
+physeq_no_growout3_biom <- cumNorm(physeq_no_growout3_mgSeq, p = p_css)
+
+# (Optional) Inspect normalization factors
+normFactors(physeq_no_growout3_biom)
+
+# 4. Extract normalized counts (samples in columns, taxa in rows)
+normalized_counts <- MRcounts(physeq_no_growout3_biom, norm = TRUE)
+
+# 5. Rebuild the phyloseq components
+OTU_css    <- otu_table(normalized_counts, taxa_are_rows = TRUE)
+TAX_css    <- tax_table(as.matrix(tax_table(physeq_no_growout3)))
+SAMP_css   <- sample_data(as.data.frame(sample_data(physeq_no_growout3)))
+
+# 6. Create the CSS-normalized phyloseq object
+physeq_no_growout3_css <- phyloseq(OTU_css, TAX_css, SAMP_css)
+
+```
+
+```{r}
+##We will start with the collective ordination
+#library(phyloseq)
+#library(ggplot2)
+#library(ggside)
+
+# 1) PCoA on Bray–Curtis using the CSS-normalized phyloseq
+pcoa <- ordinate(physeq_no_growout3_css, method = "PCoA", distance = "bray")
+
+# 2) Extract scores
+scores_df         <- as.data.frame(pcoa$vectors)
+scores_df$SampleID <- rownames(scores_df)
+
+# 3) Extract metadata as a plain data.frame
+meta_df           <- as(sample_data(physeq_no_growout3_css), "data.frame")
+meta_df$SampleID   <- rownames(meta_df)
+
+# 4) Merge by SampleID
+merged_df <- merge(scores_df, meta_df, by = "SampleID")
+
+# 5) % variance explained
+eig     <- pcoa$values$Eigenvalues
+var_exp <- eig / sum(eig) * 100
+xlab    <- sprintf("PCoA 1 (%.1f%%)", var_exp[1])
+ylab    <- sprintf("PCoA 2 (%.1f%%)", var_exp[2])
+
+# 6) Define palette & shapes
+pal  <- c("Control"  = "#f8765c",
+          "IndigoLT" = "#221150")
+shps <- c("1" = 21, "2" = 22)
+
+# 7) Build the plot
+ord_plot <- ggplot(merged_df, aes(x = Axis.1, y = Axis.2)) +
+  theme_bw() +
+  labs(x = xlab, y = ylab) +
+  scale_fill_manual(values = pal, name = "Treatment") +
+  scale_shape_manual(values = shps, name = "Growout") +
+
+  # dashed border ellipses
+  stat_ellipse(
+    aes(fill = Treatment, group = Treatment),
+    geom     = "polygon",
+    type     = "norm",
+    alpha    = 0.2,
+    color    = "black",
+    linetype = "dashed",
+    show.legend = FALSE
+  ) +
+
+  # main points
+  geom_point(
+    aes(fill = Treatment, shape = factor(Growout)),
+    color = "black",
+    size  = 5,
+    alpha = 0.9
+  ) +
+
+  # side densities
+  ggside::geom_xsidedensity(
+    aes(fill = Treatment),
+    alpha = 0.8,
+    color = "black",
+    show.legend = FALSE
+  ) +
+  ggside::geom_ysidedensity(
+    aes(fill = Treatment),
+    alpha = 0.8,
+    color = "black",
+    show.legend = FALSE
+  ) +
+
+  ggside::theme_ggside_void() +
+  theme(
+    axis.text       = element_text(size = 12, color = "black"),
+    axis.title      = element_text(size = 14, face = "bold"),
+    legend.position = "none"
+  )
+
+print(ord_plot)
+
+# 8) Save
+ggsave(
+  filename = "ordination_no_growout3_css.png",
+  plot     = ord_plot,
+  width    = 3,
+  height   = 3,
+  units    = "in",
+  dpi      = 900
+)
+
+```
+
+```{r}
+##Let's create a legend
+
+# 1) Prepare axis labels (reuse from earlier)
+eig     <- pcoa$values$Eigenvalues
+var_exp <- eig / sum(eig) * 100
+xlab    <- sprintf("PCoA 1 (%.1f%%)", var_exp[1])
+ylab    <- sprintf("PCoA 2 (%.1f%%)", var_exp[2])
+
+# 2) Build the ordination plot with top legend
+ord_plot_top_legend <- ggplot(merged_df,
+                              aes(x = Axis.1,
+                                  y = Axis.2,
+                                  fill = Treatment,        # global fill mapping
+                                  shape = factor(Growout)  # global shape mapping
+                              )) +
+  theme_bw() +
+  labs(x = xlab, y = ylab) +
+
+  # Fill legend: use filled shape for Treatment
+  scale_fill_manual(
+    values = c("Control"  = "#f8765c",
+               "IndigoLT" = "#221150"),
+    name   = "Treatment",
+    guide  = guide_legend(override.aes = list(shape = 21))
+  ) +
+
+  # Shape legend: filled shapes 21 & 22
+  scale_shape_manual(
+    values = c(21, 22),
+    name   = "Growout"
+  ) +
+
+  # Dashed border ellipses, no legend entry
+  stat_ellipse(
+    aes(group = Treatment),
+    geom     = "polygon",
+    type     = "norm",
+    alpha    = 0.2,
+    color    = "black",
+    linetype = "dashed",
+    show.legend = FALSE
+  ) +
+
+  # Main points: black border, filled by Treatment, shaped by Growout
+  geom_point(
+    color     = "black",
+    size      = 4,
+    alpha     = 0.9,
+    key_glyph = "point"
+  ) +
+
+  # Side densities (no legend)
+  ggside::geom_xsidedensity(
+    aes(fill = Treatment),
+    show.legend = FALSE,
+    alpha       = 0.8,
+    color       = "black"
+  ) +
+  ggside::geom_ysidedensity(
+    aes(fill = Treatment),
+    show.legend = FALSE,
+    alpha       = 0.8,
+    color       = "black"
+  ) +
+
+  ggside::theme_ggside_void() +
+  theme(
+    axis.text       = element_text(size = 12, color = "black"),
+    axis.title      = element_text(size = 14, face = "bold"),
+    legend.position = "top",
+    legend.title    = element_text(face = "bold")
+  )
+
+# 3) Render and save
+print(ord_plot_top_legend)
+
+ggsave(
+  filename = "ordination_no_growout3_css_top_legend.png",
+  plot     = ord_plot_top_legend,
+  width    = 6,
+  height   = 3,
+  units    = "in",
+  dpi      = 900
+)
+
+
+```
+
+```{r}
+##Now for growout-specific Bray-Curtis ordinations
+
+# 1) Growout 1 ---------------------------------------------------------
+
+# a) Subset
+physeq_g1 <- subset_samples(physeq_no_growout3_css, Growout == "1")
+
+# b) Ordinate
+pcoa_g1 <- ordinate(physeq_g1, method = "PCoA", distance = "bray")
+
+# c) Scores & metadata
+scores_g1 <- as.data.frame(pcoa_g1$vectors)
+meta_g1   <- as.data.frame(sample_data(physeq_g1))
+rownames(meta_g1) <- meta_g1$Sample.ID
+
+# d) Merge
+md_g1 <- merge(scores_g1, meta_g1, by = "row.names", sort = FALSE)
+rownames(md_g1) <- md_g1$Row.names
+md_g1$Row.names <- NULL
+
+# e) % var
+eig_g1 <- pcoa_g1$values$Eigenvalues
+var_g1 <- eig_g1 / sum(eig_g1) * 100
+xv1    <- round(var_g1[1], 1)
+yv1    <- round(var_g1[2], 1)
+
+# f) Plot
+p1 <- ggplot(md_g1, aes(Axis.1, Axis.2)) +
+  theme_bw() +
+  labs(x = paste0("PCoA 1 (", xv1, "%)"), y = paste0("PCoA 2 (", yv1, "%)")) +
+  scale_fill_manual(values = c("Control"  = "#f8765c",
+                               "IndigoLT" = "#221150"),
+                    name = "Treatment") +
+  scale_shape_manual(values = c(21), name = "Growout") +
+  theme(axis.text       = element_text(size = 12, color = "black"),
+        axis.title      = element_text(size = 14, face = "bold"),
+        legend.title    = element_text(size = 12, face = "bold"),
+        legend.text     = element_text(size = 10),
+        legend.position = "none")
+
+# g) Dashed ellipses
+for(tr in unique(md_g1$Treatment)){
+  p1 <- p1 +
+    stat_ellipse(data     = subset(md_g1, Treatment == tr),
+                 aes(group = Treatment, fill = Treatment),
+                 geom     = "polygon",
+                 type     = "norm",
+                 alpha    = 0.2,
+                 color    = "black",
+                 linetype = "dashed",
+                 show.legend = FALSE)
+}
+
+# h) Points + side densities
+p1 <- p1 +
+  geom_point(aes(fill = Treatment, shape = Growout),
+             color = "black", size = 5, alpha = 0.9) +
+  ggside::geom_xsidedensity(aes(fill = Treatment),
+                            alpha = 0.8, color = "black", show.legend = FALSE) +
+  ggside::geom_ysidedensity(aes(fill = Treatment),
+                            alpha = 0.8, color = "black", show.legend = FALSE) +
+  ggside::theme_ggside_void()
+
+# i) Save
+print(p1)
+ggsave("ordination_growout1_css.png", p1,
+       width = 3, height = 3, units = "in", dpi = 900)
+
+
+# 2) Growout 2 ---------------------------------------------------------
+
+physeq_g2 <- subset_samples(physeq_no_growout3_css, Growout == "2")
+pcoa_g2   <- ordinate(physeq_g2, method = "PCoA", distance = "bray")
+
+scores_g2 <- as.data.frame(pcoa_g2$vectors)
+meta_g2   <- as.data.frame(sample_data(physeq_g2))
+rownames(meta_g2) <- meta_g2$Sample.ID
+
+md_g2 <- merge(scores_g2, meta_g2, by = "row.names", sort = FALSE)
+rownames(md_g2) <- md_g2$Row.names
+md_g2$Row.names <- NULL
+
+eig_g2 <- pcoa_g2$values$Eigenvalues
+var_g2 <- eig_g2 / sum(eig_g2) * 100
+xv2    <- round(var_g2[1], 1)
+yv2    <- round(var_g2[2], 1)
+
+p2 <- ggplot(md_g2, aes(Axis.1, Axis.2)) +
+  theme_bw() +
+  labs(x = paste0("PCoA 1 (", xv2, "%)"), y = paste0("PCoA 2 (", yv2, "%)")) +
+  scale_fill_manual(values = c("Control"  = "#f8765c",
+                               "IndigoLT" = "#221150"),
+                    name = "Treatment") +
+  scale_shape_manual(values = c(22), name = "Growout") +
+  theme(axis.text       = element_text(size = 12, color = "black"),
+        axis.title      = element_text(size = 14, face = "bold"),
+        legend.title    = element_text(size = 12, face = "bold"),
+        legend.text     = element_text(size = 10),
+        legend.position = "none")
+
+for(tr in unique(md_g2$Treatment)){
+  p2 <- p2 +
+    stat_ellipse(data     = subset(md_g2, Treatment == tr),
+                 aes(group = Treatment, fill = Treatment),
+                 geom     = "polygon",
+                 type     = "norm",
+                 alpha    = 0.2,
+                 color    = "black",
+                 linetype = "dashed",
+                 show.legend = FALSE)
+}
+
+p2 <- p2 +
+  geom_point(aes(fill = Treatment, shape = Growout),
+             color = "black", size = 5, alpha = 0.9) +
+  ggside::geom_xsidedensity(aes(fill = Treatment),
+                            alpha = 0.8, color = "black", show.legend = FALSE) +
+  ggside::geom_ysidedensity(aes(fill = Treatment),
+                            alpha = 0.8, color = "black", show.legend = FALSE) +
+  ggside::theme_ggside_void()
+
+print(p2)
+ggsave("ordination_growout2_css.png", p2,
+       width = 3, height = 3, units = "in", dpi = 900)
+
+
+```
+```{r}
+
+## Now for the collective UniFrac ordinations
+
+# Re-attach the phylogenetic tree to the CSS-normalized object
+ps <- merge_phyloseq(
+  physeq_no_growout3_css,
+  phy_tree(physeq_no_growout3)
+)
+
+# 1) Compute UniFrac distances -----------------------------------------
+
+# a) Unweighted
+uw_dist <- UniFrac(ps, weighted = FALSE, normalized = TRUE, parallel = FALSE)
+
+# b) Weighted
+w_dist  <- UniFrac(ps, weighted = TRUE,  normalized = TRUE, parallel = FALSE)
+
+# 2) PCoA ordinations --------------------------------------------------
+
+# a) Unweighted PCoA
+pcoa_uw <- ordinate(ps, method = "PCoA", distance = uw_dist)
+
+# b) Weighted PCoA
+pcoa_w  <- ordinate(ps, method = "PCoA", distance = w_dist)
+
+# 3) Extract scores & metadata -----------------------------------------
+
+extract_df <- function(pcoa, ps) {
+  scores <- as.data.frame(pcoa$vectors)
+  meta   <- as.data.frame(sample_data(ps))
+  rownames(meta) <- meta$Sample.ID
+  df <- merge(scores, meta, by = "row.names", sort = FALSE)
+  rownames(df) <- df$Row.names
+  df$Row.names <- NULL
+  return(df)
+}
+
+df_uw <- extract_df(pcoa_uw, ps)
+df_w  <- extract_df(pcoa_w,  ps)
+
+# 4) Variance explained ------------------------------------------------
+
+var_percent <- function(pcoa) {
+  e <- pcoa$values$Eigenvalues
+  e / sum(e) * 100
+}
+
+var_uw <- var_percent(pcoa_uw)
+var_w  <- var_percent(pcoa_w)
+
+xuw <- round(var_uw[1], 1); yuw <- round(var_uw[2], 1)
+xw  <- round(var_w[1], 1);  yw  <- round(var_w[2], 1)
+
+# 5) Plotting function -------------------------------------------------
+
+plot_unifrac_pcoa <- function(df, xlab, ylab, shapes) {
+  p <- ggplot(df, aes(Axis.1, Axis.2)) +
+    theme_bw() +
+    labs(x = xlab, y = ylab) +
+    scale_fill_manual(values = c("Control"  = "#f8765c",
+                                 "IndigoLT" = "#221150"),
+                      name = "Treatment") +
+    scale_shape_manual(values = shapes,
+                       name = "Growout") +
+    theme(axis.text       = element_text(size = 12, color = "black"),
+          axis.title      = element_text(size = 14, face = "bold"),
+          legend.title    = element_text(size = 12, face = "bold"),
+          legend.text     = element_text(size = 10),
+          legend.position = "none")
+  
+  # dashed ellipses by Treatment
+  for (tr in unique(df$Treatment)) {
+    p <- p +
+      stat_ellipse(data     = subset(df, Treatment == tr),
+                   aes(group = Treatment, fill = Treatment),
+                   geom     = "polygon",
+                   type     = "norm",
+                   alpha    = 0.2,
+                   color    = "black",
+                   linetype = "dashed",
+                   show.legend = FALSE)
+  }
+  
+  p <- p +
+    geom_point(aes(fill = Treatment, shape = Growout),
+               color = "black", size = 5, alpha = 0.9) +
+    ggside::geom_xsidedensity(aes(fill = Treatment),
+                              alpha = 0.8, color = "black", show.legend = FALSE) +
+    ggside::geom_ysidedensity(aes(fill = Treatment),
+                              alpha = 0.8, color = "black", show.legend = FALSE) +
+    ggside::theme_ggside_void()
+  
+  return(p)
+}
+
+# 6) Create & save plots -----------------------------------------------
+
+# Unweighted
+p_uw <- plot_unifrac_pcoa(
+  df     = df_uw,
+  xlab   = paste0("PCoA 1 (", xuw, "%)"),
+  ylab   = paste0("PCoA 2 (", yuw, "%)"),
+  shapes = c(21, 22)
+)
+print(p_uw)
+ggsave("unweighted_unifrac_pcoa_css.png", p_uw,
+       width = 3, height = 3, units = "in", dpi = 900)
+
+# Weighted
+p_w <- plot_unifrac_pcoa(
+  df     = df_w,
+  xlab   = paste0("PCoA 1 (", xw, "%)"),
+  ylab   = paste0("PCoA 2 (", yw, "%)"),
+  shapes = c(21, 22)
+)
+print(p_w)
+ggsave("weighted_unifrac_pcoa_css.png", p_w,
+       width = 3, height = 3, units = "in", dpi = 900)
+
+
+```
+```{r}
+##Growout 1 weighted and unweighted unifrac
+
+# 1. Filter ps for Growout 1
+ps_g1 <- subset_samples(ps, Growout == "1")
+
+# 2. Compute UniFrac distances
+uw_g1_dist <- UniFrac(ps_g1, weighted = FALSE, normalized = TRUE, parallel = FALSE)
+w_g1_dist  <- UniFrac(ps_g1, weighted = TRUE,  normalized = TRUE, parallel = FALSE)
+
+# 3. Perform PCoA
+pcoa_uw_g1 <- ordinate(ps_g1, method = "PCoA", distance = uw_g1_dist)
+pcoa_w_g1  <- ordinate(ps_g1, method = "PCoA", distance = w_g1_dist)
+
+# 4. Helper to extract scores + metadata
+extract_df <- function(pcoa, ps){
+  df_scores <- as.data.frame(pcoa$vectors)
+  df_meta   <- as.data.frame(sample_data(ps))
+  rownames(df_meta) <- df_meta$Sample.ID
+  df <- merge(df_scores, df_meta, by = "row.names", sort = FALSE)
+  df$Row.names <- NULL
+  df
+}
+
+df_uw_g1 <- extract_df(pcoa_uw_g1, ps_g1)
+df_w_g1  <- extract_df(pcoa_w_g1,  ps_g1)
+
+# 5. Compute % variance explained
+var_pct <- function(pcoa){
+  e <- pcoa$values$Eigenvalues
+  e / sum(e) * 100
+}
+uv_pct_g1 <- var_pct(pcoa_uw_g1); xuw1 <- round(uv_pct_g1[1], 1);  yuw1 <- round(uv_pct_g1[2], 1)
+w_pct_g1  <- var_pct(pcoa_w_g1);  xw1  <- round(w_pct_g1[1], 1);   yw1  <- round(w_pct_g1[2], 1)
+
+# 6. Plotting function
+plot_g1_unifrac <- function(df, xlab, ylab){
+  ggplot(df, aes(x = Axis.1, y = Axis.2)) +
+    theme_bw() +
+    labs(x = xlab, y = ylab) +
+    scale_fill_manual(values = c("Control"  = "#f8765c",
+                                 "IndigoLT" = "#221150"),
+                      name = "Treatment") +
+    scale_shape_manual(values = 21, name = "Growout") +
+    theme(axis.text       = element_text(size = 12, color = "black"),
+          axis.title      = element_text(size = 14, face = "bold"),
+          legend.position = "none") +
+    stat_ellipse(aes(group = Treatment, fill = Treatment),
+                 geom     = "polygon",
+                 type     = "norm",
+                 alpha    = 0.2,
+                 color    = "black",
+                 linetype = "dashed",
+                 show.legend = FALSE) +
+    geom_point(aes(fill = Treatment, shape = Growout),
+               color = "black", size = 5, alpha = 0.9) +
+    ggside::geom_xsidedensity(aes(fill = Treatment),
+                              alpha = 0.8, color = "black", show.legend = FALSE) +
+    ggside::geom_ysidedensity(aes(fill = Treatment),
+                              alpha = 0.8, color = "black", show.legend = FALSE) +
+    ggside::theme_ggside_void()
+}
+
+# 7. Make & save plots
+
+# Unweighted UniFrac (Growout 1)
+p_uw1 <- plot_g1_unifrac(
+  df   = df_uw_g1,
+  xlab = paste0("PCoA 1 (", xuw1, "%)"),
+  ylab = paste0("PCoA 2 (", yuw1, "%)")
+)
+print(p_uw1)
+ggsave("ordination_growout1_unweighted_unifrac_css.png", p_uw1,
+       width = 3, height = 3, units = "in", dpi = 900)
+
+# Weighted UniFrac (Growout 1)
+p_w1 <- plot_g1_unifrac(
+  df   = df_w_g1,
+  xlab = paste0("PCoA 1 (", xw1, "%)"),
+  ylab = paste0("PCoA 2 (", yw1, "%)")
+)
+print(p_w1)
+ggsave("ordination_growout1_weighted_unifrac_css.png", p_w1,
+       width = 3, height = 3, units = "in", dpi = 900)
+
+```
+```{r}
+##Growout 2 weighted and unweighted unifrac
+# ————————————————————————————————————————————————
+# 1. Filter ps for Growout 2
+ps_g2 <- subset_samples(ps, Growout == "2")
+
+# 2. Compute UniFrac distances
+uw_g2_dist <- UniFrac(ps_g2, weighted = FALSE, normalized = TRUE, parallel = FALSE)
+w_g2_dist  <- UniFrac(ps_g2, weighted = TRUE,  normalized = TRUE, parallel = FALSE)
+
+# 3. Perform PCoA
+pcoa_uw_g2 <- ordinate(ps_g2, method = "PCoA", distance = uw_g2_dist)
+pcoa_w_g2  <- ordinate(ps_g2, method = "PCoA", distance = w_g2_dist)
+
+# 4. Helper to extract scores + metadata
+extract_df <- function(pcoa, ps){
+  df_scores <- as.data.frame(pcoa$vectors)
+  df_meta   <- as.data.frame(sample_data(ps))
+  rownames(df_meta) <- df_meta$Sample.ID
+  df <- merge(df_scores, df_meta, by = "row.names", sort = FALSE)
+  df$Row.names <- NULL
+  df
+}
+
+df_uw_g2 <- extract_df(pcoa_uw_g2, ps_g2)
+df_w_g2  <- extract_df(pcoa_w_g2,  ps_g2)
+
+# 5. Compute % variance explained
+var_pct <- function(pcoa){
+  e <- pcoa$values$Eigenvalues
+  e / sum(e) * 100
+}
+uv_pct_g2 <- var_pct(pcoa_uw_g2); xuw2 <- round(uv_pct_g2[1], 1);  yuw2 <- round(uv_pct_g2[2], 1)
+w_pct_g2  <- var_pct(pcoa_w_g2);  xw2  <- round(w_pct_g2[1], 1);   yw2  <- round(w_pct_g2[2], 1)
+
+# 6. Plotting function for Growout 2 (shape = 22)
+plot_g2_unifrac <- function(df, xlab, ylab){
+  ggplot(df, aes(x = Axis.1, y = Axis.2)) +
+    theme_bw() +
+    labs(x = xlab, y = ylab) +
+    scale_fill_manual(values = c("Control"  = "#f8765c",
+                                 "IndigoLT" = "#221150"),
+                      name = "Treatment") +
+    scale_shape_manual(values = 22, name = "Growout") +
+    theme(axis.text       = element_text(size = 12, color = "black"),
+          axis.title      = element_text(size = 14, face = "bold"),
+          legend.position = "none") +
+    stat_ellipse(aes(group = Treatment, fill = Treatment),
+                 geom     = "polygon",
+                 type     = "norm",
+                 alpha    = 0.2,
+                 color    = "black",
+                 linetype = "dashed",
+                 show.legend = FALSE) +
+    geom_point(aes(fill = Treatment, shape = Growout),
+               color = "black", size = 5, alpha = 0.9) +
+    ggside::geom_xsidedensity(aes(fill = Treatment),
+                              alpha = 0.8, color = "black",
+                              show.legend = FALSE) +
+    ggside::geom_ysidedensity(aes(fill = Treatment),
+                              alpha = 0.8, color = "black",
+                              show.legend = FALSE) +
+    ggside::theme_ggside_void()
+}
+
+# 7. Generate & save the two plots
+
+# Unweighted UniFrac (Growout 2)
+p_uw2 <- plot_g2_unifrac(
+  df   = df_uw_g2,
+  xlab = paste0("PCoA 1 (", xuw2, "%)"),
+  ylab = paste0("PCoA 2 (", yuw2, "%)")
+)
+print(p_uw2)
+ggsave("ordination_growout2_unweighted_unifrac_css.png", p_uw2,
+       width = 3, height = 3, units = "in", dpi = 900)
+
+# Weighted UniFrac (Growout 2)
+p_w2 <- plot_g2_unifrac(
+  df   = df_w_g2,
+  xlab = paste0("PCoA 1 (", xw2, "%)"),
+  ylab = paste0("PCoA 2 (", yw2, "%)")
+)
+print(p_w2)
+ggsave("ordination_growout2_weighted_unifrac_css.png", p_w2,
+       width = 3, height = 3, units = "in", dpi = 900)
+
+```
+```{r}
+# Load necessary R libraries
+#library(phyloseq)
+#library(vegan)
+
+# 0. Re-attach the phylogenetic tree to the CSS-normalized object
+ps_full <- merge_phyloseq(
+  physeq_no_growout3_css,
+  phy_tree(physeq_no_growout3)
+)
+
+# 1. Prepare sample_data data.frames
+sample_data_df_no_growout3 <- data.frame(phyloseq::sample_data(ps_full))
+physeq_growout1           <- subset_samples(ps_full, Growout == "1")
+sample_data_growout1      <- data.frame(phyloseq::sample_data(physeq_growout1))
+physeq_growout2           <- subset_samples(ps_full, Growout == "2")
+sample_data_growout2      <- data.frame(phyloseq::sample_data(physeq_growout2))
+
+# Add interaction column
+sample_data_df_no_growout3$trt_growout <-
+  paste(sample_data_df_no_growout3$Treatment, sample_data_df_no_growout3$Growout)
+
+# Ensure Position is a factor
+sample_data_df_no_growout3$Position <- factor(sample_data_df_no_growout3$Position)
+sample_data_growout1$Position       <- factor(sample_data_growout1$Position)
+sample_data_growout2$Position       <- factor(sample_data_growout2$Position)
+
+
+# --- Collective dataset: Bray–Curtis -----------------------------------
+
+cat("\n\nCollective Dataset: Bray-Curtis\n\n")
+sample_bray <- phyloseq::distance(ps_full, method = "bray")
+formula_bray <- sample_bray ~ (Treatment + Growout)^2
+
+permanova_bray <- adonis2(
+  formula_bray,
+  data        = sample_data_df_no_growout3,
+  permutations = 9999,
+  strata      = sample_data_df_no_growout3$Position
+)
+permanova_bray$qval <- p.adjust(permanova_bray$`Pr(>F)`, "fdr")
+print(permanova_bray)
+
+# Dispersion tests
+beta_trt_bray      <- betadisper(sample_bray, sample_data_df_no_growout3$Treatment)
+beta_grow_bray     <- betadisper(sample_bray, sample_data_df_no_growout3$Growout)
+beta_tg_bray       <- betadisper(sample_bray, sample_data_df_no_growout3$trt_growout)
+
+anova(beta_trt_bray, permutations = 9999)
+permutest(beta_trt_bray, permutations = 9999, pairwise = TRUE, strata = sample_data_df_no_growout3$Position)
+
+anova(beta_grow_bray, permutations = 9999)
+permutest(beta_grow_bray, permutations = 9999, pairwise = TRUE, strata = sample_data_df_no_growout3$Position)
+
+anova(beta_tg_bray, permutations = 9999)
+permutest(beta_tg_bray, permutations = 9999, pairwise = TRUE, strata = sample_data_df_no_growout3$Position)
+
+
+# --- Collective dataset: Unweighted UniFrac ----------------------------
+
+cat("\n\nCollective Dataset: Unweighted UniFrac\n\n")
+sample_uw <- UniFrac(ps_full, weighted = FALSE, normalized = TRUE, parallel = FALSE)
+formula_uw <- sample_uw ~ (Treatment + Growout)^2
+
+permanova_uw <- adonis2(
+  formula_uw,
+  data        = sample_data_df_no_growout3,
+  permutations = 9999,
+  strata      = sample_data_df_no_growout3$Position
+)
+permanova_uw$qval <- p.adjust(permanova_uw$`Pr(>F)`, "fdr")
+print(permanova_uw)
+
+beta_trt_uw  <- betadisper(sample_uw,  sample_data_df_no_growout3$Treatment)
+beta_grow_uw <- betadisper(sample_uw,  sample_data_df_no_growout3$Growout)
+beta_tg_uw   <- betadisper(sample_uw,  sample_data_df_no_growout3$trt_growout)
+
+anova(beta_trt_uw, permutations = 9999)
+permutest(beta_trt_uw, permutations = 9999, pairwise = TRUE, strata = sample_data_df_no_growout3$Position)
+
+anova(beta_grow_uw, permutations = 9999)
+permutest(beta_grow_uw, permutations = 9999, pairwise = TRUE, strata = sample_data_df_no_growout3$Position)
+
+anova(beta_tg_uw, permutations = 9999)
+permutest(beta_tg_uw, permutations = 9999, pairwise = TRUE, strata = sample_data_df_no_growout3$Position)
+
+
+# --- Collective dataset: Weighted UniFrac ------------------------------
+
+cat("\n\nCollective Dataset: Weighted UniFrac\n\n")
+sample_w  <- UniFrac(ps_full, weighted = TRUE, normalized = TRUE, parallel = FALSE)
+formula_w <- sample_w ~ (Treatment + Growout)^2
+
+permanova_w <- adonis2(
+  formula_w,
+  data        = sample_data_df_no_growout3,
+  permutations = 9999,
+  strata      = sample_data_df_no_growout3$Position
+)
+permanova_w$qval <- p.adjust(permanova_w$`Pr(>F)`, "fdr")
+print(permanova_w)
+
+beta_trt_w  <- betadisper(sample_w, sample_data_df_no_growout3$Treatment)
+beta_grow_w <- betadisper(sample_w, sample_data_df_no_growout3$Growout)
+beta_tg_w   <- betadisper(sample_w, sample_data_df_no_growout3$trt_growout)
+
+anova(beta_trt_w, permutations = 9999)
+permutest(beta_trt_w, permutations = 9999, pairwise = TRUE, strata = sample_data_df_no_growout3$Position)
+
+anova(beta_grow_w, permutations = 9999)
+permutest(beta_grow_w, permutations = 9999, pairwise = TRUE, strata = sample_data_df_no_growout3$Position)
+
+anova(beta_tg_w, permutations = 9999)
+permutest(beta_tg_w, permutations = 9999, pairwise = TRUE, strata = sample_data_df_no_growout3$Position)
+
+
+# --- Growout 1: Bray–Curtis ---------------------------------------------
+
+cat("\n\nGrowout 1 Dataset: Bray-Curtis\n\n")
+sample_bray_g1 <- phyloseq::distance(physeq_growout1, method = "bray")
+permanova_bray_g1 <- adonis2(
+  sample_bray_g1 ~ Treatment,
+  data        = sample_data_growout1,
+  permutations = 9999,
+  strata      = sample_data_growout1$Position
+)
+permanova_bray_g1$qval <- p.adjust(permanova_bray_g1$`Pr(>F)`, "fdr")
+print(permanova_bray_g1)
+
+beta_trt_bray_g1 <- betadisper(sample_bray_g1, sample_data_growout1$Treatment)
+anova(beta_trt_bray_g1, permutations = 9999)
+permutest(beta_trt_bray_g1, permutations = 9999, pairwise = TRUE, strata = sample_data_growout1$Position)
+
+
+# --- Growout 1: Unweighted UniFrac -------------------------------------
+
+cat("\n\nGrowout 1 Dataset: Unweighted UniFrac\n\n")
+sample_uw_g1 <- UniFrac(physeq_growout1, weighted = FALSE, normalized = TRUE, parallel = FALSE)
+permanova_uw_g1 <- adonis2(
+  sample_uw_g1 ~ Treatment,
+  data        = sample_data_growout1,
+  permutations = 9999,
+  strata      = sample_data_growout1$Position
+)
+permanova_uw_g1$qval <- p.adjust(permanova_uw_g1$`Pr(>F)`, "fdr")
+print(permanova_uw_g1)
+
+beta_trt_uw_g1 <- betadisper(sample_uw_g1, sample_data_growout1$Treatment)
+anova(beta_trt_uw_g1, permutations = 9999)
+permutest(beta_trt_uw_g1, permutations = 9999, pairwise = TRUE, strata = sample_data_growout1$Position)
+
+
+# --- Growout 1: Weighted UniFrac ---------------------------------------
+
+cat("\n\nGrowout 1 Dataset: Weighted UniFrac\n\n")
+sample_w_g1 <- UniFrac(physeq_growout1, weighted = TRUE, normalized = TRUE, parallel = FALSE)
+permanova_w_g1 <- adonis2(
+  sample_w_g1 ~ Treatment,
+  data        = sample_data_growout1,
+  permutations = 9999,
+  strata      = sample_data_growout1$Position
+)
+permanova_w_g1$qval <- p.adjust(permanova_w_g1$`Pr(>F)`, "fdr")
+print(permanova_w_g1)
+
+beta_trt_w_g1 <- betadisper(sample_w_g1, sample_data_growout1$Treatment)
+anova(beta_trt_w_g1, permutations = 9999)
+permutest(beta_trt_w_g1, permutations = 9999, pairwise = TRUE, strata = sample_data_growout1$Position)
+
+
+# --- Growout 2: Bray–Curtis ---------------------------------------------
+
+cat("\n\nGrowout 2 Dataset: Bray-Curtis\n\n")
+sample_bray_g2 <- phyloseq::distance(physeq_growout2, method = "bray")
+permanova_bray_g2 <- adonis2(
+  sample_bray_g2 ~ Treatment,
+  data        = sample_data_growout2,
+  permutations = 9999,
+  strata      = sample_data_growout2$Position
+)
+permanova_bray_g2$qval <- p.adjust(permanova_bray_g2$`Pr(>F)`, "fdr")
+print(permanova_bray_g2)
+
+beta_trt_bray_g2 <- betadisper(sample_bray_g2, sample_data_growout2$Treatment)
+anova(beta_trt_bray_g2, permutations = 9999)
+permutest(beta_trt_bray_g2, permutations = 9999, pairwise = TRUE, strata = sample_data_growout2$Position)
+
+
+# --- Growout 2: Unweighted UniFrac -------------------------------------
+
+cat("\n\nGrowout 2 Dataset: Unweighted UniFrac\n\n")
+sample_uw_g2 <- UniFrac(physeq_growout2, weighted = FALSE, normalized = TRUE, parallel = FALSE)
+permanova_uw_g2 <- adonis2(
+  sample_uw_g2 ~ Treatment,
+  data        = sample_data_growout2,
+  permutations = 9999,
+  strata      = sample_data_growout2$Position
+)
+permanova_uw_g2$qval <- p.adjust(permanova_uw_g2$`Pr(>F)`, "fdr")
+print(permanova_uw_g2)
+
+beta_trt_uw_g2 <- betadisper(sample_uw_g2, sample_data_growout2$Treatment)
+anova(beta_trt_uw_g2, permutations = 9999)
+permutest(beta_trt_uw_g2, permutations = 9999, pairwise = TRUE, strata = sample_data_growout2$Position)
+
+
+# --- Growout 2: Weighted UniFrac ---------------------------------------
+
+cat("\n\nGrowout 2 Dataset: Weighted UniFrac\n\n")
+sample_w_g2 <- UniFrac(physeq_growout2, weighted = TRUE, normalized = TRUE, parallel = FALSE)
+permanova_w_g2 <- adonis2(
+  sample_w_g2 ~ Treatment,
+  data        = sample_data_growout2,
+  permutations = 9999,
+  strata      = sample_data_growout2$Position
+)
+permanova_w_g2$qval <- p.adjust(permanova_w_g2$`Pr(>F)`, "fdr")
+print(permanova_w_g2)
+
+beta_trt_w_g2 <- betadisper(sample_w_g2, sample_data_growout2$Treatment)
+anova(beta_trt_w_g2, permutations = 9999)
+permutest(beta_trt_w_g2, permutations = 9999, pairwise = TRUE, strata = sample_data_growout2$Position)
+
+```
+
+
+```{r}
+##Let's pull the R2 and p-values to create a heatmap
+
+## Helper to tidy an adonis2 table into a long data.frame
+tidy_permanova <- function(fit, metric, growout) {
+  df <- as.data.frame(fit)
+  df$Term <- rownames(df)
+  # grab p-value column (usually named "Pr(>F)")
+  pcol <- grep("^Pr\\(>F\\)$", names(df), value = TRUE)
+  if (length(pcol) != 1) stop("Couldn't find p-value column in adonis2 table.")
+  out <- df[, c("Term", "R2", pcol, intersect("qval", names(df))), drop = FALSE]
+  names(out)[names(out) == pcol] <- "pval"
+  # drop residual/total rows
+  out <- subset(out, !(Term %in% c("Residual", "Total")) & !is.na(R2))
+  out$Metric  <- metric
+  out$Growout <- growout
+  rownames(out) <- NULL
+  out
+}
+
+## Build the results table
+permanova_summary <- do.call(
+  rbind,
+  list(
+    tidy_permanova(permanova_bray,     "Bray-Curtis",        "Collective"),
+    tidy_permanova(permanova_uw,       "Unweighted UniFrac", "Collective"),
+    tidy_permanova(permanova_w,        "Weighted UniFrac",   "Collective"),
+    tidy_permanova(permanova_bray_g1,  "Bray-Curtis",        "1"),
+    tidy_permanova(permanova_uw_g1,    "Unweighted UniFrac", "1"),
+    tidy_permanova(permanova_w_g1,     "Weighted UniFrac",   "1"),
+    tidy_permanova(permanova_bray_g2,  "Bray-Curtis",        "2"),
+    tidy_permanova(permanova_uw_g2,    "Unweighted UniFrac", "2"),
+    tidy_permanova(permanova_w_g2,     "Weighted UniFrac",   "2")
+  )
+)
+
+
+permanova_summary
+
+```
+
+```{r}
+##Create p-value and R2 value matrices
+
+## Make/confirm the "Col" label
+if (!"Col" %in% names(permanova_summary)) {
+  permanova_summary <- permanova_summary |>
+    dplyr::mutate(Col = paste(Growout, Metric, sep = " | "))
+}
+
+all_terms <- sort(unique(permanova_summary$Term))
+all_cols  <- with(permanova_summary, sort(unique(Col)))
+
+## R² matrix: Term x (Growout | Metric)
+r2_mat <- permanova_summary |>
+  dplyr::select(Term, Col, R2) |>
+  dplyr::distinct() |>
+  tidyr::complete(Term = all_terms, Col = all_cols) |>
+  tidyr::pivot_wider(names_from = Col, values_from = R2) |>
+  dplyr::arrange(Term)
+
+rnames <- r2_mat$Term
+r2_mat <- as.matrix(r2_mat[, -1, drop = FALSE])
+rownames(r2_mat) <- rnames
+
+## p-value matrix
+p_mat <- permanova_summary |>
+  dplyr::select(Term, Col, pval) |>
+  dplyr::distinct() |>
+  tidyr::complete(Term = all_terms, Col = all_cols) |>
+  tidyr::pivot_wider(names_from = Col, values_from = pval) |>
+  dplyr::arrange(Term)
+
+rnames <- p_mat$Term
+p_mat <- as.matrix(p_mat[, -1, drop = FALSE])
+rownames(p_mat) <- rnames
+
+## q-value matrix (if present)
+if ("qval" %in% names(permanova_summary)) {
+  q_mat <- permanova_summary |>
+    dplyr::select(Term, Col, qval) |>
+    dplyr::distinct() |>
+    tidyr::complete(Term = all_terms, Col = all_cols) |>
+    tidyr::pivot_wider(names_from = Col, values_from = qval) |>
+    dplyr::arrange(Term)
+
+  rnames <- q_mat$Term
+  q_mat <- as.matrix(q_mat[, -1, drop = FALSE])
+  rownames(q_mat) <- rnames
+}
+
+## Peek
+r2_mat[1:min(5, nrow(r2_mat)), , drop = FALSE]
+p_mat[1:min(5, nrow(p_mat)), , drop = FALSE]
+if (exists("q_mat")) q_mat[1:min(5, nrow(q_mat)), , drop = FALSE]
+
+
+```
+
+```{r}
+##Create heatmap
+
+## Inputs expected: r2_mat (Terms x Cols), p_mat (Terms x Cols)
+stopifnot(exists("r2_mat"), exists("p_mat"))
+stopifnot(identical(colnames(r2_mat), colnames(p_mat)),
+          identical(rownames(r2_mat), rownames(p_mat)))
+
+## Transpose so rows = "Growout | Metric", cols = Terms
+r2_t <- t(r2_mat)
+p_t  <- t(p_mat)
+
+## Row annotations parsed from rownames like "Collective | Bray-Curtis"
+parse_row <- function(lbl) {
+  parts <- strsplit(lbl, "\\s*\\|\\s*")[[1]]
+  data.frame(Growout = parts[1], Metric = parts[2], row.names = lbl, check.rows = FALSE)
+}
+row_meta <- do.call(rbind, lapply(rownames(r2_t), parse_row))
+
+# make sure grDevices is available (it’s loaded by default)
+anno_cols <- list(
+  Growout = c("Collective" = "green4", "1" = "#31688e", "2" = "orange3"),#"#35b779"
+  Metric  = c("Bray-Curtis" = "#fcffa4", "Unweighted UniFrac" = "#bc3754", "Weighted UniFrac" = "#440154")
+)
+
+row_anno <- rowAnnotation(
+  df = row_meta,
+  col = anno_cols,
+  show_annotation_name = FALSE,
+  annotation_legend_param = list(border = TRUE),
+  gp = gpar(col = "black"),
+  simple_anno_size = unit(0.25, "cm")
+)
+
+## White → hot pink palette
+pal_r2 <- circlize::colorRamp2(c(0, 0.5), c("cornsilk", "pink4")) #"#d3436e"
+
+## Precompute asterisks matrix aligned to r2_t / p_t
+stars <- matrix("", nrow = nrow(p_t), ncol = ncol(p_t), dimnames = dimnames(p_t))
+stars[p_t < 0.05 & !is.na(p_t)]  <- "*"
+stars[p_t < 0.01 & !is.na(p_t)]  <- "**"
+stars[p_t < 0.001 & !is.na(p_t)] <- "***"
+
+## Legend for R²
+lgd_r2 <- list(
+  title = expression(R^2),
+  title_gp = gpar(fontsize = 12, fontface = "bold"),
+  labels_gp = gpar(fontsize = 10),
+  border = "black",lwd = 0.5,
+  direction = "vertical",
+  title_position = "topcenter",
+  at = c(0, 0.1, 0.2, 0.3, 0.4, 0.5),
+  labels = c("0", "0.1", "0.2", "0.3", "0.4", "0.5"),
+  legend_width = unit(3, "cm"),
+  legend_height = unit(3, "cm"),
+  x = unit(0.5, "cm"), y = unit(0.5, "cm"),
+  legend_gp = gpar(col = "black", lwd = 1)
+)
+
+## Heatmap with corrected cell_fun signature: (j, i, ...)
+ht_r2 <- Heatmap(
+  r2_t,
+  name = "R2",
+  col = pal_r2,
+  na_col = "gray",
+  left_annotation = row_anno,
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+  show_row_names = FALSE,
+  #row_names_gp = gpar(fontsize = 9),
+  show_column_names = TRUE,
+  column_names_gp = gpar(fontsize = 9, col = 'black'),
+  column_names_rot = 45,
+  rect_gp = gpar(col = "black", lwd = 2),
+  border_gp = gpar(col = "black", lwd = 2),
+  heatmap_legend_param = lgd_r2,
+  cell_fun = function(j, i, x, y, width, height, fill) {
+    lab <- stars[i, j]  # note: row i, column j
+    if (nzchar(lab)) {
+      grid.text(lab, x = x, y = y, gp = gpar(col = "black", fontsize = 16, fontface = "bold"))
+    }
+  }
+)
+
+png("beta.heat.2.png", width = 3.80, height = 5, units = "in", res = 900, bg = "transparent")
+draw(ht_r2, heatmap_legend_side = "right", annotation_legend_side = "right", padding = unit(c(5, 10, 5, 10), "mm"))
+dev.off()
+
+```
+
+```{r}
+##Polished heatmap
+
+# -----------------------------
+# 1) Collect PERMANOVA results
+# -----------------------------
+grab_adonis2 <- function(obj, growout_lab, metric_lab) {
+  df <- as.data.frame(obj)
+  df$Term <- rownames(df)
+  df <- df %>%
+    filter(!Term %in% c("Residual", "Total")) %>%
+    transmute(
+      Term,
+      R2   = if ("R2" %in% names(.)) R2 else NA_real_,
+      pval = if ("Pr(>F)" %in% names(.)) `Pr(>F)` else NA_real_,
+      Growout = growout_lab,
+      Metric  = metric_lab
+    )
+  df
+}
+
+perm_tbl <- bind_rows(
+  grab_adonis2(permanova_bray, "Collective", "Bray-Curtis"),
+  grab_adonis2(permanova_uw,   "Collective", "Unweighted UniFrac"),
+  grab_adonis2(permanova_w,    "Collective", "Weighted UniFrac"),
+  grab_adonis2(permanova_bray_g1, "1", "Bray-Curtis"),
+  grab_adonis2(permanova_uw_g1,   "1", "Unweighted UniFrac"),
+  grab_adonis2(permanova_w_g1,    "1", "Weighted UniFrac"),
+  grab_adonis2(permanova_bray_g2, "2", "Bray-Curtis"),
+  grab_adonis2(permanova_uw_g2,   "2", "Unweighted UniFrac"),
+  grab_adonis2(permanova_w_g2,    "2", "Weighted UniFrac")
+)
+
+# Columns label
+perm_tbl <- perm_tbl %>% mutate(Col = paste(Growout, "|", Metric))
+
+# -----------------------------
+# 2) Collect DISPERSION results
+# -----------------------------
+grab_disp <- function(beta_obj, term_lab, growout_lab, metric_lab) {
+  a <- anova(beta_obj, permutations = 9999)
+  df <- as.data.frame(a)
+  df$Row <- rownames(df)
+  grp <- df %>% filter(Row == "Groups") %>%
+    transmute(
+      Term = term_lab,
+      MeanSq = `Mean Sq`,
+      pval   = if ("Pr(>F)" %in% names(.)) `Pr(>F)` else NA_real_,
+      Growout = growout_lab,
+      Metric  = metric_lab
+    )
+  grp
+}
+
+disp_tbl <- bind_rows(
+  # Collective (Treatment, Growout, and Treatment×Growout)
+  grab_disp(beta_trt_bray,  "Treatment",           "Collective", "Bray-Curtis"),
+  grab_disp(beta_grow_bray, "Growout",             "Collective", "Bray-Curtis"),
+  grab_disp(beta_tg_bray,   "Treatment:Growout",   "Collective", "Bray-Curtis"),
+
+  grab_disp(beta_trt_uw,    "Treatment",           "Collective", "Unweighted UniFrac"),
+  grab_disp(beta_grow_uw,   "Growout",             "Collective", "Unweighted UniFrac"),
+  grab_disp(beta_tg_uw,     "Treatment:Growout",   "Collective", "Unweighted UniFrac"),
+
+  grab_disp(beta_trt_w,     "Treatment",           "Collective", "Weighted UniFrac"),
+  grab_disp(beta_grow_w,    "Growout",             "Collective", "Weighted UniFrac"),
+  grab_disp(beta_tg_w,      "Treatment:Growout",   "Collective", "Weighted UniFrac"),
+
+  # Growout 1 (Treatment only)
+  grab_disp(beta_trt_bray_g1, "Treatment", "1", "Bray-Curtis"),
+  grab_disp(beta_trt_uw_g1,   "Treatment", "1", "Unweighted UniFrac"),
+  grab_disp(beta_trt_w_g1,    "Treatment", "1", "Weighted UniFrac"),
+
+  # Growout 2 (Treatment only)
+  grab_disp(beta_trt_bray_g2, "Treatment", "2", "Bray-Curtis"),
+  grab_disp(beta_trt_uw_g2,   "Treatment", "2", "Unweighted UniFrac"),
+  grab_disp(beta_trt_w_g2,    "Treatment", "2", "Weighted UniFrac")
+)
+
+disp_tbl <- disp_tbl %>% mutate(Col = paste(Growout, "|", Metric))
+
+# -----------------------------
+# 3) Wide matrices (rows = Terms, cols = Growout|Metric)
+# -----------------------------
+# Ensure same column order across both matrices
+all_cols <- perm_tbl$Col %>% unique()
+# Keep logical order: Collective, 1, 2 within each metric
+metric_order <- c("Bray-Curtis", "Unweighted UniFrac", "Weighted UniFrac")
+grow_order   <- c("Collective", "1", "2")
+all_cols <- expand.grid(Growout = grow_order, Metric = metric_order, stringsAsFactors = FALSE) %>%
+  mutate(Col = paste(Growout, "|", Metric)) %>%
+  pull(Col)
+
+# PERMANOVA R2 + p
+perm_r2_mat <- perm_tbl %>%
+  select(Term, Col, R2) %>%
+  pivot_wider(names_from = Col, values_from = R2) %>%
+  as.data.frame()
+rownames(perm_r2_mat) <- perm_r2_mat$Term; perm_r2_mat$Term <- NULL
+perm_r2_mat <- perm_r2_mat[, intersect(all_cols, colnames(perm_r2_mat)), drop = FALSE]
+
+perm_p_mat <- perm_tbl %>%
+  select(Term, Col, pval) %>%
+  pivot_wider(names_from = Col, values_from = pval) %>%
+  as.data.frame()
+rownames(perm_p_mat) <- perm_p_mat$Term; perm_p_mat$Term <- NULL
+perm_p_mat <- perm_p_mat[, intersect(all_cols, colnames(perm_p_mat)), drop = FALSE]
+
+# DISPERSION MeanSq + p
+disp_ms_mat <- disp_tbl %>%
+  select(Term, Col, MeanSq) %>%
+  pivot_wider(names_from = Col, values_from = MeanSq) %>%
+  as.data.frame()
+rownames(disp_ms_mat) <- disp_ms_mat$Term; disp_ms_mat$Term <- NULL
+disp_ms_mat <- disp_ms_mat[, intersect(all_cols, colnames(disp_ms_mat)), drop = FALSE]
+
+disp_p_mat <- disp_tbl %>%
+  select(Term, Col, pval) %>%
+  pivot_wider(names_from = Col, values_from = pval) %>%
+  as.data.frame()
+rownames(disp_p_mat) <- disp_p_mat$Term; disp_p_mat$Term <- NULL
+disp_p_mat <- disp_p_mat[, intersect(all_cols, colnames(disp_p_mat)), drop = FALSE]
+
+# -----------------------------
+# 4) Row annotations from rownames of the transposed R2
+#    (we annotate rows = "Growout | Metric", so transpose)
+# -----------------------------
+perm_r2_t <- t(perm_r2_mat)
+disp_ms_t <- t(disp_ms_mat)
+
+# Build row metadata
+parse_row <- function(lbl) {
+  parts <- strsplit(lbl, "\\s*\\|\\s*")[[1]]
+  data.frame(Growout = parts[1], Metric = parts[2], row.names = lbl, check.rows = FALSE)
+}
+row_meta <- do.call(rbind, lapply(rownames(perm_r2_t), parse_row))
+
+anno_cols <- list(
+  Growout = c("Collective" = "#35b779", "1" = "#31688e", "2" = "orange2"),
+  Metric  = c("Bray-Curtis" = "#fcffa4", "Unweighted UniFrac" = "#bc3754", "Weighted UniFrac" = "#440154")
+)
+row_anno <- rowAnnotation(
+  df = row_meta,
+  col = anno_cols,
+  show_annotation_name = FALSE,
+  annotation_legend_param = list(border = TRUE),
+  gp = gpar(col = "black"),
+  simple_anno_size = unit(0.25, "cm")
+)
+
+# -----------------------------
+# 5) Stars matrices (aligned to transposed matrices)
+# -----------------------------
+perm_p_t <- t(perm_p_mat)
+disp_p_t <- t(disp_p_mat)
+
+mk_stars <- function(pmat_t) {
+  s <- matrix("", nrow = nrow(pmat_t), ncol = ncol(pmat_t), dimnames = dimnames(pmat_t))
+  s[pmat_t < 0.05 & !is.na(pmat_t)]  <- "*"
+  s[pmat_t < 0.01 & !is.na(pmat_t)]  <- "**"
+  s[pmat_t < 0.001 & !is.na(pmat_t)] <- "***"
+  s
+}
+stars_perm <- mk_stars(perm_p_t)
+stars_disp <- mk_stars(disp_p_t)
+
+# -----------------------------
+# 6) Palettes & legends
+# -----------------------------
+pal_r2 <- circlize::colorRamp2(c(0, 0.5), c("white", "royalblue4")) 
+# Use a robust upper bound for MeanSq
+ms_max <- quantile(as.numeric(disp_ms_t), probs = 0.95, na.rm = TRUE)
+if (!is.finite(ms_max) || ms_max <= 0) ms_max <- max(disp_ms_t, na.rm = TRUE)
+pal_ms <- circlize::colorRamp2(c(0, ms_max), c("white", "firebrick"))
+
+lgd_r2 <- list(
+  title = expression(R^2),
+  title_gp = gpar(fontsize = 12, fontface = "bold"),
+  labels_gp = gpar(fontsize = 10),
+  border = "black", lwd = 0.5,
+  direction = "horizontal",
+  title_position = "topcenter",
+  at = c(0, 0.1, 0.2, 0.3, 0.4, 0.5),
+  labels = c("0", "0.1", "0.2", "0.3", "0.4", "0.5"),
+  legend_width = unit(3, "cm"),
+  legend_height = unit(3, "cm")
+)
+
+lgd_ms <- list(
+  title = expression(Mean^2),
+  title_gp = gpar(fontsize = 12, fontface = "bold"),
+  labels_gp = gpar(fontsize = 10),
+  border = "black", lwd = 0.5,
+  direction = "horizontal",
+  title_position = "topcenter"
+)
+
+# -----------------------------
+# 7) Heatmaps with asterisks
+# -----------------------------
+ht_perm <- Heatmap(
+  perm_r2_t,
+  name = "R2",
+  col = pal_r2,
+  na_col = "gray75",
+  left_annotation = row_anno,
+  cluster_rows = TRUE,
+  cluster_columns = FALSE,
+  show_row_names = FALSE,
+  show_column_names = TRUE,
+  column_names_gp = gpar(fontsize = 9),
+  column_names_rot = 45,
+  rect_gp = gpar(col = "black", lwd = 0.6),
+  border_gp = gpar(col = "black", lwd = 1),
+  heatmap_legend_param = lgd_r2,
+  cell_fun = function(j, i, x, y, width, height, fill) {
+    lab <- stars_perm[i, j]
+    if (nzchar(lab)) grid.text(lab, x = x, y = y, gp = gpar(col = "black", fontsize = 12, fontface = "bold"))
+  }
+)
+
+ht_disp <- Heatmap(
+  disp_ms_t,
+  name = "Mean2",
+  col = pal_ms,
+  na_col = "gray75",
+  # share the same row order as ht_perm:
+  row_order = row_order(ht_perm),
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+  show_row_names = FALSE,
+  show_column_names = TRUE,
+  column_names_gp = gpar(fontsize = 9),
+  column_names_rot = 45,
+  rect_gp = gpar(col = "black", lwd = 0.6),
+  border_gp = gpar(col = "black", lwd = 1),
+  heatmap_legend_param = lgd_ms,
+  cell_fun = function(j, i, x, y, width, height, fill) {
+    lab <- stars_disp[i, j]
+    if (nzchar(lab)) grid.text(lab, x = x, y = y, gp = gpar(col = "black", fontsize = 12, fontface = "bold"))
+  }
+)
+
+# -----------------------------
+# 8) Draw side-by-side
+# -----------------------------
+png("beta_permanova_dispersion_side_by_side.png", width = 5, height = 3.5, units = "in", res = 900)
+draw(ht_perm + ht_disp, heatmap_legend_side = "bottom", annotation_legend_side = "bottom")
+#dev.off()
+
+
+
+```
+
+```{r}
+##Updated permanova using invariant ordering
+
+## ===== PERMANOVA & DISPERSION ANALYSIS (marginal tests) =====
+## Goal: estimate (i) collective main effects (Treatment, Growout),
+##       (ii) collective interaction (Treatment:Growout),
+##       (iii) Treatment within each Growout,
+##       plus dispersion checks; then build tidy summaries and matrices.
+
+## --- Prep & data slices ------------------------------------------------
+# Re-attach phylogenetic tree to CSS-normalized object
+ps_full <- merge_phyloseq(
+  physeq_no_growout3_css,
+  phy_tree(physeq_no_growout3)
+)
+
+# Sample data (collective and per-growout)
+sample_data_df_no_growout3 <- data.frame(phyloseq::sample_data(ps_full))
+physeq_growout1            <- subset_samples(ps_full, Growout == "1")
+sample_data_growout1       <- data.frame(phyloseq::sample_data(physeq_growout1))
+physeq_growout2            <- subset_samples(ps_full, Growout == "2")
+sample_data_growout2       <- data.frame(phyloseq::sample_data(physeq_growout2))
+
+# Interaction label for dispersion checks (collective)
+sample_data_df_no_growout3$trt_growout <-
+  paste(sample_data_df_no_growout3$Treatment, sample_data_df_no_growout3$Growout)
+
+# Ensure Position is a factor
+sample_data_df_no_growout3$Position <- factor(sample_data_df_no_growout3$Position)
+sample_data_growout1$Position       <- factor(sample_data_growout1$Position)
+sample_data_growout2$Position       <- factor(sample_data_growout2$Position)
+
+## --- Distances (collective & per-growout) ------------------------------
+cat("\n\nCollective Dataset: Bray-Curtis\n\n")
+sample_bray <- phyloseq::distance(ps_full, method = "bray")
+formula_bray <- sample_bray ~ (Treatment + Growout)^2  # keep interaction model
+
+cat("\n\nCollective Dataset: Unweighted UniFrac\n\n")
+sample_uw <- UniFrac(ps_full, weighted = FALSE, normalized = TRUE, parallel = FALSE)
+formula_uw <- sample_uw ~ (Treatment + Growout)^2
+
+cat("\n\nCollective Dataset: Weighted UniFrac\n\n")
+sample_w  <- UniFrac(ps_full, weighted = TRUE, normalized = TRUE, parallel = FALSE)
+formula_w <- sample_w ~ (Treatment + Growout)^2
+
+cat("\n\nGrowout 1 Dataset: distances\n\n")
+sample_bray_g1 <- phyloseq::distance(physeq_growout1, method = "bray")
+sample_uw_g1   <- UniFrac(physeq_growout1, weighted = FALSE, normalized = TRUE, parallel = FALSE)
+sample_w_g1    <- UniFrac(physeq_growout1, weighted = TRUE,  normalized = TRUE, parallel = FALSE)
+
+cat("\n\nGrowout 2 Dataset: distances\n\n")
+sample_bray_g2 <- phyloseq::distance(physeq_growout2, method = "bray")
+sample_uw_g2   <- UniFrac(physeq_growout2, weighted = FALSE, normalized = TRUE, parallel = FALSE)
+sample_w_g2    <- UniFrac(physeq_growout2, weighted = TRUE,  normalized = TRUE, parallel = FALSE)
+
+## --- PERMANOVA: collective (interaction model; by = "margin") ----------
+# These overwrite the original objects by design
+permanova_bray <- adonis2(
+  formula_bray,
+  data         = sample_data_df_no_growout3,
+  permutations = 9999,
+  strata       = sample_data_df_no_growout3$Position,
+  by           = "margin"
+)
+permanova_bray$qval <- p.adjust(permanova_bray$`Pr(>F)`, "fdr")
+print(permanova_bray)
+
+permanova_uw <- adonis2(
+  formula_uw,
+  data         = sample_data_df_no_growout3,
+  permutations = 9999,
+  strata       = sample_data_df_no_growout3$Position,
+  by           = "margin"
+)
+permanova_uw$qval <- p.adjust(permanova_uw$`Pr(>F)`, "fdr")
+print(permanova_uw)
+
+permanova_w <- adonis2(
+  formula_w,
+  data         = sample_data_df_no_growout3,
+  permutations = 9999,
+  strata       = sample_data_df_no_growout3$Position,
+  by           = "margin"
+)
+permanova_w$qval <- p.adjust(permanova_w$`Pr(>F)`, "fdr")
+print(permanova_w)
+
+## --- Dispersion checks (collective; unchanged pattern) -----------------
+beta_trt_bray  <- betadisper(sample_bray, sample_data_df_no_growout3$Treatment)
+beta_grow_bray <- betadisper(sample_bray, sample_data_df_no_growout3$Growout)
+beta_tg_bray   <- betadisper(sample_bray, sample_data_df_no_growout3$trt_growout)
+anova(beta_trt_bray, permutations = 9999)
+permutest(beta_trt_bray, permutations = 9999, pairwise = TRUE, strata = sample_data_df_no_growout3$Position)
+anova(beta_grow_bray, permutations = 9999)
+permutest(beta_grow_bray, permutations = 9999, pairwise = TRUE, strata = sample_data_df_no_growout3$Position)
+anova(beta_tg_bray, permutations = 9999)
+permutest(beta_tg_bray, permutations = 9999, pairwise = TRUE, strata = sample_data_df_no_growout3$Position)
+
+beta_trt_uw  <- betadisper(sample_uw, sample_data_df_no_growout3$Treatment)
+beta_grow_uw <- betadisper(sample_uw, sample_data_df_no_growout3$Growout)
+beta_tg_uw   <- betadisper(sample_uw, sample_data_df_no_growout3$trt_growout)
+anova(beta_trt_uw, permutations = 9999)
+permutest(beta_trt_uw, permutations = 9999, pairwise = TRUE, strata = sample_data_df_no_growout3$Position)
+anova(beta_grow_uw, permutations = 9999)
+permutest(beta_grow_uw, permutations = 9999, pairwise = TRUE, strata = sample_data_df_no_growout3$Position)
+anova(beta_tg_uw, permutations = 9999)
+permutest(beta_tg_uw, permutations = 9999, pairwise = TRUE, strata = sample_data_df_no_growout3$Position)
+
+beta_trt_w  <- betadisper(sample_w, sample_data_df_no_growout3$Treatment)
+beta_grow_w <- betadisper(sample_w, sample_data_df_no_growout3$Growout)
+beta_tg_w   <- betadisper(sample_w, sample_data_df_no_growout3$trt_growout)
+anova(beta_trt_w, permutations = 9999)
+permutest(beta_trt_w, permutations = 9999, pairwise = TRUE, strata = sample_data_df_no_growout3$Position)
+anova(beta_grow_w, permutations = 9999)
+permutest(beta_grow_w, permutations = 9999, pairwise = TRUE, strata = sample_data_df_no_growout3$Position)
+anova(beta_tg_w, permutations = 9999)
+permutest(beta_tg_w, permutations = 9999, pairwise = TRUE, strata = sample_data_df_no_growout3$Position)
+
+## --- PERMANOVA: collective MAIN EFFECTS ONLY (by = "margin") -----------
+# New objects to estimate order-invariant main effects (Treatment, Growout)
+permanova_bray_main <- adonis2(
+  sample_bray ~ Treatment + Growout,
+  data         = sample_data_df_no_growout3,
+  permutations = 9999,
+  strata       = sample_data_df_no_growout3$Position,
+  by           = "margin"
+)
+permanova_bray_main$qval <- p.adjust(permanova_bray_main$`Pr(>F)`, "fdr")
+
+permanova_uw_main <- adonis2(
+  sample_uw ~ Treatment + Growout,
+  data         = sample_data_df_no_growout3,
+  permutations = 9999,
+  strata       = sample_data_df_no_growout3$Position,
+  by           = "margin"
+)
+permanova_uw_main$qval <- p.adjust(permanova_uw_main$`Pr(>F)`, "fdr")
+
+permanova_w_main <- adonis2(
+  sample_w ~ Treatment + Growout,
+  data         = sample_data_df_no_growout3,
+  permutations = 9999,
+  strata       = sample_data_df_no_growout3$Position,
+  by           = "margin"
+)
+permanova_w_main$qval <- p.adjust(permanova_w_main$`Pr(>F)`, "fdr")
+
+## --- PERMANOVA: per-growout Treatment effects (by = "margin") ----------
+cat("\n\nGrowout 1 Dataset: Bray-Curtis\n\n")
+permanova_bray_g1 <- adonis2(
+  sample_bray_g1 ~ Treatment,
+  data         = sample_data_growout1,
+  permutations = 9999,
+  strata       = sample_data_growout1$Position,
+  by           = "margin"
+)
+permanova_bray_g1$qval <- p.adjust(permanova_bray_g1$`Pr(>F)`, "fdr")
+print(permanova_bray_g1)
+
+cat("\n\nGrowout 1 Dataset: Unweighted UniFrac\n\n")
+permanova_uw_g1 <- adonis2(
+  sample_uw_g1 ~ Treatment,
+  data         = sample_data_growout1,
+  permutations = 9999,
+  strata       = sample_data_growout1$Position,
+  by           = "margin"
+)
+permanova_uw_g1$qval <- p.adjust(permanova_uw_g1$`Pr(>F)`, "fdr")
+print(permanova_uw_g1)
+
+cat("\n\nGrowout 1 Dataset: Weighted UniFrac\n\n")
+permanova_w_g1 <- adonis2(
+  sample_w_g1 ~ Treatment,
+  data         = sample_data_growout1,
+  permutations = 9999,
+  strata       = sample_data_growout1$Position,
+  by           = "margin"
+)
+permanova_w_g1$qval <- p.adjust(permanova_w_g1$`Pr(>F)`, "fdr")
+print(permanova_w_g1)
+
+cat("\n\nGrowout 2 Dataset: Bray-Curtis\n\n")
+permanova_bray_g2 <- adonis2(
+  sample_bray_g2 ~ Treatment,
+  data         = sample_data_growout2,
+  permutations = 9999,
+  strata       = sample_data_growout2$Position,
+  by           = "margin"
+)
+permanova_bray_g2$qval <- p.adjust(permanova_bray_g2$`Pr(>F)`, "fdr")
+print(permanova_bray_g2)
+
+cat("\n\nGrowout 2 Dataset: Unweighted UniFrac\n\n")
+permanova_uw_g2 <- adonis2(
+  sample_uw_g2 ~ Treatment,
+  data         = sample_data_growout2,
+  permutations = 9999,
+  strata       = sample_data_growout2$Position,
+  by           = "margin"
+)
+permanova_uw_g2$qval <- p.adjust(permanova_uw_g2$`Pr(>F)`, "fdr")
+print(permanova_uw_g2)
+
+cat("\n\nGrowout 2 Dataset: Weighted UniFrac\n\n")
+permanova_w_g2 <- adonis2(
+  sample_w_g2 ~ Treatment,
+  data         = sample_data_growout2,
+  permutations = 9999,
+  strata       = sample_data_growout2$Position,
+  by           = "margin"
+)
+permanova_w_g2$qval <- p.adjust(permanova_w_g2$`Pr(>F)`, "fdr")
+print(permanova_w_g2)
+
+## --- Tidy helper & unified summary ------------------------------------
+tidy_permanova <- function(fit, metric, growout) {
+  df <- as.data.frame(fit)
+  df$Term <- rownames(df)
+  pcol <- grep("^Pr\\(>F\\)$", names(df), value = TRUE)
+  if (length(pcol) != 1) stop("Couldn't find p-value column in adonis2 table.")
+  out <- df[, c("Term", "R2", pcol, intersect("qval", names(df))), drop = FALSE]
+  names(out)[names(out) == pcol] <- "pval"
+  out <- subset(out, !(Term %in% c("Residual", "Total", "Model")) & !is.na(R2))
+  out$Metric  <- metric
+  out$Growout <- growout
+  rownames(out) <- NULL
+  out
+}
+
+# Build unified summary: interaction model (collective),
+# main-effects model (collective), and per-growout Treatment models
+permanova_summary <- do.call(
+  rbind,
+  list(
+    # Collective (interaction model; by = "margin")
+    tidy_permanova(permanova_bray, "Bray-Curtis",        "Collective"),
+    tidy_permanova(permanova_uw,   "Unweighted UniFrac", "Collective"),
+    tidy_permanova(permanova_w,    "Weighted UniFrac",   "Collective"),
+
+    # Collective MAIN EFFECTS ONLY (by = "margin")
+    tidy_permanova(permanova_bray_main, "Bray-Curtis",        "Collective"),
+    tidy_permanova(permanova_uw_main,   "Unweighted UniFrac", "Collective"),
+    tidy_permanova(permanova_w_main,    "Weighted UniFrac",   "Collective"),
+
+    # Growout-specific Treatment effects (by = "margin")
+    tidy_permanova(permanova_bray_g1, "Bray-Curtis",        "1"),
+    tidy_permanova(permanova_uw_g1,   "Unweighted UniFrac", "1"),
+    tidy_permanova(permanova_w_g1,    "Weighted UniFrac",   "1"),
+    tidy_permanova(permanova_bray_g2, "Bray-Curtis",        "2"),
+    tidy_permanova(permanova_uw_g2,   "Unweighted UniFrac", "2"),
+    tidy_permanova(permanova_w_g2,    "Weighted UniFrac",   "2")
+  )
+)
+
+# Ensure a column label for matrix construction
+if (!"Col" %in% names(permanova_summary)) {
+  permanova_summary <- permanova_summary |>
+    dplyr::mutate(Col = paste(Growout, Metric, sep = " | "))
+}
+
+## --- Matrices: R2, p, (q if present) -----------------------------------
+all_terms <- sort(unique(permanova_summary$Term))
+all_cols  <- with(permanova_summary, sort(unique(Col)))
+
+# R2 matrix
+r2_mat <- permanova_summary |>
+  dplyr::select(Term, Col, R2) |>
+  dplyr::distinct() |>
+  tidyr::complete(Term = all_terms, Col = all_cols) |>
+  tidyr::pivot_wider(names_from = Col, values_from = R2) |>
+  dplyr::arrange(Term)
+rnames <- r2_mat$Term
+r2_mat <- as.matrix(r2_mat[, -1, drop = FALSE])
+rownames(r2_mat) <- rnames
+
+# p-value matrix
+p_mat <- permanova_summary |>
+  dplyr::select(Term, Col, pval) |>
+  dplyr::distinct() |>
+  tidyr::complete(Term = all_terms, Col = all_cols) |>
+  tidyr::pivot_wider(names_from = Col, values_from = pval) |>
+  dplyr::arrange(Term)
+rnames <- p_mat$Term
+p_mat <- as.matrix(p_mat[, -1, drop = FALSE])
+rownames(p_mat) <- rnames
+
+# q-value matrix (if present)
+if ("qval" %in% names(permanova_summary)) {
+  q_mat <- permanova_summary |>
+    dplyr::select(Term, Col, qval) |>
+    dplyr::distinct() |>
+    tidyr::complete(Term = all_terms, Col = all_cols) |>
+    tidyr::pivot_wider(names_from = Col, values_from = qval) |>
+    dplyr::arrange(Term)
+  rnames <- q_mat$Term
+  q_mat <- as.matrix(q_mat[, -1, drop = FALSE])
+  rownames(q_mat) <- rnames
+}
+
+## --- Peek (optional) ---------------------------------------------------
+cat("\n--- R2 (head) ---\n"); print(r2_mat[1:min(5, nrow(r2_mat)), , drop = FALSE])
+cat("\n--- p-values (head) ---\n"); print(p_mat[1:min(5, nrow(p_mat)), , drop = FALSE])
+if (exists("q_mat")) { cat("\n--- q-values (head) ---\n"); print(q_mat[1:min(5, nrow(q_mat)), , drop = FALSE]) }
+
+```
+
+```{r}
+##Updated heatmap
+
+## Transpose so rows = "Growout | Metric", cols = Terms
+r2_t <- t(r2_mat)
+p_t  <- t(p_mat)
+
+## Row annotations parsed from rownames like "Collective | Bray-Curtis"
+parse_row <- function(lbl) {
+  parts <- strsplit(lbl, "\\s*\\|\\s*")[[1]]
+  if (length(parts) != 2) parts <- c(lbl, "")
+  data.frame(Growout = parts[1], Metric = parts[2], row.names = lbl, check.rows = FALSE)
+}
+row_meta <- do.call(rbind, lapply(rownames(r2_t), parse_row))
+
+## Annotation colors (unchanged palette)
+anno_cols <- list(
+  Growout = c("1" = "#dbe9ff", "2" = "#ffe8d5", "Collective" = "#000004"),
+  Metric  = c("Bray-Curtis" = "#fcffa4", "Unweighted UniFrac" = "#bc3754", "Weighted UniFrac" = "#440154")
+)
+
+row_anno <- rowAnnotation(
+  df = row_meta,
+  col = anno_cols,
+  show_annotation_name = FALSE,
+  annotation_legend_param = list(border = TRUE),
+  gp = gpar(col = "black"),
+  simple_anno_size = unit(0.25, "cm")
+)
+
+## R² color scale (keep your white -> hot pink; cap at 0.5 like before)
+# Optionally adapt the upper bound to observed max (clamped to 0.5 to keep comparability):
+r2_max_obs <- suppressWarnings(max(r2_t, na.rm = TRUE))
+r2_upper <- min(0.5, ifelse(is.finite(r2_max_obs), max(0.3, r2_max_obs), 0.5))
+pal_r2 <- circlize::colorRamp2(c(0, r2_upper), c("cornsilk", "pink4"))
+
+## Precompute asterisks matrix aligned to r2_t / p_t
+stars <- matrix("", nrow = nrow(p_t), ncol = ncol(p_t), dimnames = dimnames(p_t))
+stars[p_t < 0.05 & !is.na(p_t)]  <- "*"
+stars[p_t < 0.01 & !is.na(p_t)]  <- "**"
+stars[p_t < 0.001 & !is.na(p_t)] <- "***"
+
+## Legend for R²
+lgd_r2 <- list(
+  title = expression(R^2),
+  title_gp = gpar(fontsize = 12, fontface = "bold"),
+  labels_gp = gpar(fontsize = 10),
+  border = "black", lwd = 0.5,
+  direction = "vertical",
+  title_position = "topcenter",
+  at = seq(0, r2_upper, length.out = 6),
+  labels = format(seq(0, r2_upper, length.out = 6), digits = 2),
+  legend_width = unit(3, "cm"),
+  legend_height = unit(3, "cm"),
+  x = unit(0.5, "cm"), y = unit(0.5, "cm"),
+  legend_gp = gpar(col = "black", lwd = 1)
+)
+
+## Heatmap (cell_fun uses (j, i, ...): j=column index, i=row index)
+ht_r2 <- Heatmap(
+  r2_t,
+  name = "R2",
+  col = pal_r2,
+  na_col = "gray",
+  left_annotation = row_anno,
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+  show_row_names = FALSE,
+  show_column_names = TRUE,
+  column_names_gp = gpar(fontsize = 9, col = "black"),
+  column_names_rot = 45,
+  rect_gp = gpar(col = "black", lwd = 2),
+  border_gp = gpar(col = "black", lwd = 2),
+  heatmap_legend_param = lgd_r2,
+  cell_fun = function(j, i, x, y, width, height, fill) {
+    lab <- stars[i, j]  # row = i, col = j
+    if (nzchar(lab)) {
+      grid.text(lab, x = x, y = y, gp = gpar(col = "black", fontsize = 16, fontface = "bold"))
+    }
+  }
+)
+
+png("beta.heat.2.png", width = 3.80, height = 5, units = "in", res = 900, bg = "transparent")
+draw(ht_r2, heatmap_legend_side = "right", annotation_legend_side = "right",
+     padding = unit(c(5, 10, 5, 10), "mm"))
+dev.off()
+
+```
+
+```{r}
+##PCOA legend specifying alternative management
+
+## Let's create a legend
+## IndigoLT renamed to Alternative, with order Control -> Alternative
+
+# 1) Prepare axis labels (reuse from earlier)
+eig     <- pcoa$values$Eigenvalues
+var_exp <- eig / sum(eig) * 100
+xlab    <- sprintf("PCoA 1 (%.1f%%)", var_exp[1])
+ylab    <- sprintf("PCoA 2 (%.1f%%)", var_exp[2])
+
+# 2) Rename Treatment for plotting and enforce order
+merged_df_legend <- merged_df %>%
+  dplyr::mutate(
+    Treatment = dplyr::recode(Treatment, "IndigoLT" = "Alternative"),
+    Treatment = factor(Treatment, levels = c("Control", "Alternative")),
+    Growout   = factor(Growout)
+  )
+
+# 3) Build the ordination plot with top legend
+ord_plot_top_legend <- ggplot(
+  merged_df_legend,
+  aes(
+    x = Axis.1,
+    y = Axis.2,
+    fill = Treatment,
+    shape = Growout
+  )
+) +
+  theme_bw() +
+  labs(x = xlab, y = ylab) +
+
+  scale_fill_manual(
+    values = c(
+      "Control"     = "#f8765c",
+      "Alternative" = "#221150"
+    ),
+    breaks = c("Control", "Alternative"),
+    name   = "Treatment",
+    guide  = guide_legend(override.aes = list(shape = 21))
+  ) +
+
+  scale_shape_manual(
+    values = c("1" = 21, "2" = 22),
+    name   = "Growout"
+  ) +
+
+  stat_ellipse(
+    aes(group = Treatment),
+    geom     = "polygon",
+    type     = "norm",
+    alpha    = 0.2,
+    color    = "black",
+    linetype = "dashed",
+    show.legend = FALSE
+  ) +
+
+  geom_point(
+    color     = "black",
+    size      = 4,
+    alpha     = 0.9,
+    key_glyph = "point"
+  ) +
+
+  ggside::geom_xsidedensity(
+    aes(fill = Treatment),
+    show.legend = FALSE,
+    alpha       = 0.8,
+    color       = "black"
+  ) +
+  ggside::geom_ysidedensity(
+    aes(fill = Treatment),
+    show.legend = FALSE,
+    alpha       = 0.8,
+    color       = "black"
+  ) +
+
+  ggside::theme_ggside_void() +
+  theme(
+    axis.text       = element_text(size = 12, color = "black"),
+    axis.title      = element_text(size = 14, face = "bold"),
+    legend.position = "top",
+    legend.title    = element_text(face = "bold")
+  )
+
+# 4) Render and save
+print(ord_plot_top_legend)
+
+ggsave(
+  filename = "ordination_no_growout3_css_top_legend_alternative.png",
+  plot     = ord_plot_top_legend,
+  width    = 6,
+  height   = 3,
+  units    = "in",
+  dpi      = 900
+)
+
+```
+

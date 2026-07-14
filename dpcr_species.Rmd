@@ -1,0 +1,2256 @@
+---
+title: "dPCR_species"
+author: "BH"
+date: "2026-05-07"
+output: html_document
+---
+
+```{r}
+##Will use metadata and qubit values listed in "dPCR" markdown file
+
+##Import species-level data
+entero.species.dpcr <- read.csv("~/Documents/DeQueen_Litter/entero.species.dpcr.csv")
+
+```
+
+```{r}
+# ==============================================================
+# Species-level Enterococcus dPCR — merge with metadata
+# Process technical replicates per Target (cecorum vs hirae)
+# ==============================================================
+
+library(dplyr)
+
+# ==============================================================
+# 1. Add metadata and filter to biological samples (1-60)
+# ==============================================================
+
+entero_species_filtered <- entero.species.dpcr %>%
+  dplyr::filter(Sample.NTC.Control %in% as.character(1:60)) %>%
+  dplyr::mutate(sample_key = paste0("Sample_", Sample.NTC.Control)) %>%
+  dplyr::left_join(meta, by = c("sample_key" = "Sample.ID")) %>%
+  dplyr::select(-sample_key)
+
+cat("Species-level filtered samples:", nrow(entero_species_filtered), "\n")
+
+# ==============================================================
+# 2. Collapse technical duplicates per Sample × Target
+# ==============================================================
+
+entero_species_summary <- entero_species_filtered %>%
+  dplyr::mutate(
+    Conc.dpcr      = as.numeric(`Conc...cp.µL...dPCR.reaction.`),
+    Conc.undiluted = as.numeric(`Conc...cp.µL...undiluted.sample.`)
+  ) %>%
+  dplyr::group_by(Sample.NTC.Control, Target..Name.) %>%
+  dplyr::summarise(
+    Conc.dpcr.mean      = mean(Conc.dpcr,      na.rm = TRUE),
+    Conc.undiluted.mean = mean(Conc.undiluted, na.rm = TRUE),
+    Growout             = first(Growout),
+    Position            = first(Position),
+    Treatment           = first(Treatment),
+    House               = first(House),
+    .groups = "drop"
+  )
+
+cat("Species summary rows (Sample × Target combinations):", 
+    nrow(entero_species_summary), "\n")
+
+# Check Target distribution
+cat("\nTarget species distribution:\n")
+print(table(entero_species_summary$Target..Name.))
+
+# Check samples per target
+cat("\nSamples per target:\n")
+entero_species_summary %>%
+  dplyr::group_by(Target..Name.) %>%
+  dplyr::summarise(n_samples = dplyr::n_distinct(Sample.NTC.Control),
+                   .groups = "drop") %>%
+  print()
+
+print(head(entero_species_summary))
+
+```
+
+```{r}
+# ==============================================================
+# Add Qubit concentrations and calculate copies per gram litter
+# Species-level Enterococcus dPCR
+# ==============================================================
+
+# ==============================================================
+# 1. Merge with Qubit data
+# ==============================================================
+
+entero_species_merged <- entero_species_summary %>%
+  dplyr::mutate(Sample.NTC.Control = as.character(Sample.NTC.Control)) %>%
+  dplyr::inner_join(
+    entero.qubit.clean %>%
+      dplyr::select(Sample, X260.230, X260.280, ng.uL..nanodrop., ng.uL..qubit.),
+    by = c("Sample.NTC.Control" = "Sample")
+  )
+
+cat("Species-level samples after Qubit merge:", nrow(entero_species_merged), "\n")
+
+# ==============================================================
+# 2. Back-calculate to copies per gram litter
+# ==============================================================
+
+elution_vol <- 100
+
+entero_species_merged <- entero_species_merged %>%
+  dplyr::mutate(
+    copies_per_reaction = Conc.dpcr.mean * 15,
+    copies_per_ng       = copies_per_reaction / 10,  # Corrected from /4 to /10
+    total_ng_extracted  = ng.uL..qubit. * elution_vol,
+    copies_per_g_litter = copies_per_ng * total_ng_extracted / 0.25
+  )
+
+cat("Species-level calculation complete.\n")
+cat("Samples per target after calculations:\n")
+entero_species_merged %>%
+  dplyr::group_by(Target..Name.) %>%
+  dplyr::summarise(n = dplyr::n(), .groups = "drop") %>%
+  print()
+
+print(head(entero_species_merged %>%
+             dplyr::select(Sample.NTC.Control, Target..Name., 
+                           Conc.dpcr.mean, ng.uL..qubit.,
+                           copies_per_reaction, copies_per_ng,
+                           total_ng_extracted, copies_per_g_litter)))
+
+```
+
+```{r}
+# ==============================================================
+# Visualize species-level Enterococcus dPCR results
+# Faceted by Target..Name. (cecorum vs hirae)
+# ==============================================================
+
+library(ggplot2)
+
+p_species <- ggplot(entero_species_merged, 
+                    aes(x = Growout, y = copies_per_g_litter)) +
+
+  geom_boxplot(
+    aes(fill = Treatment),
+    color = "black",
+    alpha = 0.9,
+    outlier.shape = NA
+  ) +
+
+  stat_summary(
+    aes(fill = Treatment),
+    fun = mean,
+    geom = "point",
+    shape = 23,
+    size = 3,
+    color = "white",
+    position = position_dodge(width = 0.75),
+    show.legend = FALSE
+  ) +
+
+  geom_jitter(
+    aes(color = Treatment),
+    shape = 21,
+    size = 1.25,
+    alpha = 0.9,
+    fill = "white",
+    position = position_jitterdodge(
+      jitter.width = 0.1,
+      dodge.width = 0.75
+    ),
+    show.legend = FALSE
+  ) +
+
+  facet_wrap(~ Target..Name., scales = "free_y") +
+
+  scale_fill_manual(values = c("Control" = "#f8765c", "IndigoLT" = "#221150")) +
+  scale_color_manual(values = c("Control" = "black", "IndigoLT" = "black")) +
+
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.15))) +
+
+  labs(fill = "Treatment", 
+       color = "Treatment", 
+       x = "Growout",
+       y = "Copies per gram litter") +
+
+  theme_bw() +
+  theme(
+    axis.title.x = element_text(size = 14, face = "bold"),
+    axis.title.y = element_text(size = 14, face = "bold"),
+    axis.text = element_text(size = 12, color = "black"),
+    axis.ticks.x = element_blank(),
+    strip.text = element_text(size = 12, face = "bold"),
+    strip.background = element_blank(),
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text = element_text(size = 14),
+    legend.position = "top",
+    panel.spacing = unit(1, "lines")
+  )
+
+print(p_species)
+```
+
+```{r}
+# ==============================================================
+# Distribution screening for species-level copies_per_g_litter
+# Separate analysis for each Target species (cecorum vs hirae)
+# ==============================================================
+
+library(MASS)
+library(dplyr)
+library(ggplot2)
+
+# Add log10 transformation
+entero_species_merged <- entero_species_merged %>%
+  dplyr::mutate(
+    log10_copies_per_g_litter = log10(copies_per_g_litter)
+  )
+
+target_species <- unique(entero_species_merged$Target..Name.)
+growouts <- c("1", "2")
+vars <- c("copies_per_g_litter", "log10_copies_per_g_litter")
+
+for (target in target_species) {
+  
+  cat("\n==============================================\n")
+  cat("TARGET SPECIES:", target, "\n")
+  cat("==============================================\n")
+  
+  for (g in growouts) {
+    
+    df_sub <- entero_species_merged %>%
+      dplyr::filter(Growout == g, Target..Name. == target)
+    
+    cat("\n============================\n")
+    cat(paste("Target:", target, "| Growout:", g, "\n"))
+    
+    for (v in vars) {
+      
+      y <- df_sub[[v]]
+      y <- y[!is.na(y) & is.finite(y)]
+      
+      if (length(y) < 3) {
+        cat(paste("Skipping", v, "- too few samples\n"))
+        next
+      }
+      
+      cat("\n----------------------------\n")
+      cat(paste("Variable:", v, "\n"))
+      
+      shapiro_result <- shapiro.test(y)
+      cat("Shapiro-Wilk p-value:", round(shapiro_result$p.value, 4), "\n")
+      
+      # Plot histogram
+      p <- ggplot(df_sub, aes(x = .data[[v]])) +
+        geom_histogram(bins = 15, fill = "steelblue", color = "black") +
+        ggtitle(paste(target, "-", v, "- Growout", g)) +
+        theme_bw()
+      print(p)
+      
+      # Distribution fitting
+      dist_fits <- list()
+      try(dist_fits$normal  <- MASS::fitdistr(y, "normal"), silent = TRUE)
+      try(dist_fits$gamma   <- MASS::fitdistr(y[y > 0], "gamma"), silent = TRUE)
+      try(dist_fits$lognorm <- MASS::fitdistr(y[y > 0], "lognormal"), silent = TRUE)
+      
+      if (length(dist_fits) > 0) {
+        aics <- sapply(dist_fits, AIC)
+        cat("AICs:\n")
+        print(round(aics, 2))
+        cat("Best distribution (AIC):", names(which.min(aics)), "\n")
+      } else {
+        cat("No successful distribution fits\n")
+      }
+    }
+  }
+}
+
+```
+
+```{r}
+# ==============================================================
+# Species-level Enterococcus GLMM — Raw counts with appropriate distribution
+# Updated to preserve zeros and use raw copy numbers
+# ==============================================================
+
+library(glmmTMB)
+library(car)
+library(emmeans)
+library(DHARMa)
+library(dplyr)
+
+# ==============================================================
+# Helper functions
+# ==============================================================
+
+.extract_rand_var <- function(model) {
+  vc <- try(VarCorr(model), silent = TRUE)
+  if (inherits(vc, "try-error")) return(NA_real_)
+  vcdf <- try(as.data.frame(vc), silent = TRUE)
+  if (inherits(vcdf, "try-error") || !nrow(vcdf)) return(NA_real_)
+  row <- vcdf[vcdf$component == "cond" & grepl("Growout:House", vcdf$grp), , drop = FALSE]
+  if (!nrow(row)) return(NA_real_)
+  as.numeric(row$sdcor[1])^2  # SD^2 -> variance
+}
+
+.fit_one_species_raw <- function(target_species, var_thresh = 1e-6, n_sims = 1000) {
+  
+  # Prepare data - keep all samples including zeros
+  df <- entero_species_merged %>%
+    dplyr::filter(Target..Name. == target_species) %>%
+    dplyr::mutate(
+      Growout   = as.factor(Growout),
+      Treatment = as.factor(Treatment),
+      House     = as.factor(House),
+      Position  = as.factor(Position),
+      copies_raw = copies_per_g_litter
+    )
+  
+  cat("\n==============================\n")
+  cat("Species:", target_species, "| n =", nrow(df), "\n")
+  cat("Zeros:", sum(df$copies_raw == 0), "| Non-zeros:", sum(df$copies_raw > 0), "\n")
+  
+  # Set contrasts for Type III
+  .old_contr <- options(contrasts = c("contr.sum", "contr.poly"))
+  
+  # Try Tweedie family first (handles zeros naturally)
+  model_full <- tryCatch({
+    glmmTMB(
+      copies_raw ~ Treatment * Growout + Position + (1 | Growout:House),
+      family = tweedie(link = "log"),
+      data = df
+    )
+  }, error = function(e) {
+    cat("Tweedie failed, trying gamma with small constant\n")
+    # Fallback: Add small constant for gamma family
+    df$copies_adj <- df$copies_raw + 0.1
+    glmmTMB(
+      copies_adj ~ Treatment * Growout + Position + (1 | Growout:House),
+      family = Gamma(link = "log"),
+      data = df
+    )
+  })
+  
+  # Check if we used adjusted values
+  used_adjustment <- "copies_adj" %in% names(df) && 
+                     "copies_adj" %in% all.vars(formula(model_full))
+  
+  if (used_adjustment) {
+    cat("Used gamma family with +0.1 adjustment\n")
+  } else {
+    cat("Used Tweedie family (natural zero handling)\n")
+  }
+  
+  # Check random effect variance
+  kept_random <- TRUE
+  rv <- .extract_rand_var(model_full)
+  if (!is.na(rv) && rv <= var_thresh) {
+    kept_random <- FALSE
+    cat("Random effect dropped (variance ≤", var_thresh, ")\n")
+    
+    # Refit without random effect
+    if (used_adjustment) {
+      model_full <- glmmTMB(
+        copies_adj ~ Treatment * Growout + Position,
+        family = Gamma(link = "log"),
+        data = df
+      )
+    } else {
+      model_full <- glmmTMB(
+        copies_raw ~ Treatment * Growout + Position,
+        family = tweedie(link = "log"),
+        data = df
+      )
+    }
+  } else {
+    cat("Random effect retained\n")
+  }
+  
+  # Type III Wald tests
+  anova_result <- car::Anova(model_full, type = 3)
+  print(anova_result)
+  
+  # Global treatment effect (marginal means)
+  cat("\n--- Global Treatment Effect ---\n")
+  global_emm <- emmeans(model_full, ~ Treatment)
+  global_pairs <- contrast(global_emm, method = "pairwise", adjust = "BH")
+  global_df <- as.data.frame(summary(global_pairs))
+  global_df$Species <- target_species
+  global_df$Comparison <- "Global"
+  global_df$Growout <- NA
+  print(summary(global_pairs))
+  
+  # Per-growout treatment effects
+  cat("\n--- Per-Growout Treatment Effects ---\n")
+  pergrowout_emm <- emmeans(model_full, ~ Treatment | Growout)
+  pergrowout_pairs <- contrast(pergrowout_emm, method = "pairwise", adjust = "BH")
+  pergrowout_df <- as.data.frame(summary(pergrowout_pairs))
+  pergrowout_df$Species <- target_species
+  pergrowout_df$Comparison <- paste("Growout", pergrowout_df$Growout)
+  print(summary(pergrowout_pairs))
+  
+  # DHARMa diagnostics
+  cat("\n--- DHARMa Diagnostics ---\n")
+  simres <- simulateResiduals(model_full, n = n_sims)
+  disp_test <- testDispersion(simres)
+  out_test <- testOutliers(simres)
+  quant_test <- testQuantiles(simres)
+  
+  cat("Dispersion p =", round(disp_test$p.value, 4), "\n")
+  cat("Outliers p =", round(out_test$p.value, 4), "\n")
+  cat("Quantiles p =", round(quant_test$p.value, 4), "\n")
+  
+  # Restore contrasts
+  options(.old_contr)
+  
+  # Combine results
+  common_cols <- intersect(names(global_df), names(pergrowout_df))
+  all_pairs_df <- rbind(
+    global_df[, common_cols],
+    pergrowout_df[, common_cols]
+  )
+  
+  return(list(
+    species = target_species,
+    kept_random = kept_random,
+    used_adjustment = used_adjustment,
+    model = model_full,
+    anova = anova_result,
+    global_emmeans = global_emm,
+    pergrowout_emmeans = pergrowout_emm,
+    global_pairs = global_pairs,
+    pergrowout_pairs = pergrowout_pairs,
+    all_pairs_df = all_pairs_df,
+    dharma = list(sim = simres, dispersion = disp_test, 
+                  outliers = out_test, quantiles = quant_test)
+  ))
+}
+
+# ==============================================================
+# Fit models for both species using raw counts
+# ==============================================================
+
+target_species <- c("Cecorum", "Hirae")
+
+species_models_raw <- lapply(target_species, .fit_one_species_raw)
+names(species_models_raw) <- target_species
+
+# ==============================================================
+# Collect results
+# ==============================================================
+
+species_pairs_raw <- do.call(rbind, lapply(species_models_raw, `[[`, "all_pairs_df"))
+rownames(species_pairs_raw) <- NULL
+
+species_anova_raw <- lapply(species_models_raw, function(x) {
+  out <- as.data.frame(x$anova)
+  out$Term <- rownames(out)
+  out$Species <- x$species
+  rownames(out) <- NULL
+  out[, c("Species", "Term", setdiff(names(out), c("Species", "Term")))]
+})
+
+# ==============================================================
+# Summary
+# ==============================================================
+
+cat("\n==============================================\n")
+cat("SPECIES-LEVEL RAW COUNT RESULTS SUMMARY\n")
+cat("==============================================\n")
+
+for (species in target_species) {
+  cat("\n---", species, "---\n")
+  cat("Used adjustment:", species_models_raw[[species]]$used_adjustment, "\n")
+  cat("Kept random effect:", species_models_raw[[species]]$kept_random, "\n")
+}
+
+sig_effects_raw <- species_pairs_raw %>%
+  dplyr::filter(p.value < 0.05) %>%
+  dplyr::arrange(Species, p.value)
+
+if (nrow(sig_effects_raw) > 0) {
+  cat("\nSignificant contrasts:\n")
+  print(sig_effects_raw %>% 
+          dplyr::select(Species, Comparison, estimate, SE, z.ratio, p.value))
+} else {
+  cat("\nNo significant treatment effects at p < 0.05\n")
+}
+
+# Main treatment effects from ANOVA
+cat("\n--- Main Treatment Effects (ANOVA) ---\n")
+treatment_effects_raw <- do.call(rbind, species_anova_raw) %>%
+  dplyr::filter(Term == "Treatment") %>%
+  dplyr::select(Species, Chisq, Df, `Pr(>Chisq)`) %>%
+  dplyr::mutate(Significant = ifelse(`Pr(>Chisq)` < 0.05, "Yes", "No"))
+
+print(treatment_effects_raw)
+
+```
+```{r}
+##Pull model results for manuscript
+
+# ==============================================================
+# Species-level Enterococcus GLMM p-value extraction
+# Correct reporting structure:
+#   1. Global fixed effects: car::Anova(type = 3)
+#   2. Per-growout treatment effects: emmeans pairwise contrasts
+#   3. Per-growout position effects: refit within-growout models + car::Anova
+# ==============================================================
+
+library(glmmTMB)
+library(car)
+library(emmeans)
+library(dplyr)
+library(purrr)
+library(tibble)
+
+old_contr_species_pvals <- options(contrasts = c("contr.sum", "contr.poly"))
+
+# --------------------------------------------------------------
+# Helper: extract House random-effect variance
+# --------------------------------------------------------------
+
+.extract_house_rand_var <- function(model) {
+  vc <- try(glmmTMB::VarCorr(model), silent = TRUE)
+  if (inherits(vc, "try-error")) return(NA_real_)
+
+  vcdf <- try(as.data.frame(vc), silent = TRUE)
+  if (inherits(vcdf, "try-error") || !nrow(vcdf)) return(NA_real_)
+
+  row <- vcdf[
+    vcdf$component == "cond" &
+      vcdf$grp == "House",
+    ,
+    drop = FALSE
+  ]
+
+  if (!nrow(row)) return(NA_real_)
+
+  as.numeric(row$sdcor[1])^2
+}
+
+# ==============================================================
+# 1. Global fixed-effect p-values
+# ==============================================================
+
+species_global_fixed_pvals <- purrr::map_dfr(
+  names(species_models_raw),
+  function(species_i) {
+
+    model_i <- species_models_raw[[species_i]]$model
+
+    car::Anova(model_i, type = 3) %>%
+      as.data.frame() %>%
+      tibble::rownames_to_column("Fixed_Effect") %>%
+      dplyr::rename(
+        Chi_square = Chisq,
+        df = Df,
+        p_value = `Pr(>Chisq)`
+      ) %>%
+      dplyr::mutate(
+        Species = species_i,
+        Scope = "Global",
+        Growout = NA_character_,
+        Inference = "Type III Wald test",
+        contrast = NA_character_,
+        estimate = NA_real_,
+        SE = NA_real_,
+        test_statistic = Chi_square,
+        test_statistic_type = "Chi-square",
+        kept_random = species_models_raw[[species_i]]$kept_random,
+        used_adjustment = species_models_raw[[species_i]]$used_adjustment
+      ) %>%
+      dplyr::select(
+        Species,
+        Scope,
+        Growout,
+        Fixed_Effect,
+        Inference,
+        contrast,
+        estimate,
+        SE,
+        df,
+        test_statistic_type,
+        test_statistic,
+        p_value,
+        kept_random,
+        used_adjustment
+      )
+  }
+)
+
+# ==============================================================
+# 2. Per-growout treatment effects from emmeans
+# ==============================================================
+
+species_pergrowout_treatment_emmeans_pvals <- purrr::map_dfr(
+  names(species_models_raw),
+  function(species_i) {
+
+    out <- species_models_raw[[species_i]]$pergrowout_pairs %>%
+      summary() %>%
+      as.data.frame()
+
+    stat_col <- dplyr::case_when(
+      "t.ratio" %in% names(out) ~ "t.ratio",
+      "z.ratio" %in% names(out) ~ "z.ratio",
+      TRUE ~ NA_character_
+    )
+
+    if (is.na(stat_col)) {
+      out$test_statistic <- NA_real_
+      out$test_statistic_type <- NA_character_
+    } else {
+      out$test_statistic <- out[[stat_col]]
+      out$test_statistic_type <- stat_col
+    }
+
+    out %>%
+      dplyr::mutate(
+        Species = species_i,
+        Scope = "Within growout",
+        Fixed_Effect = "Treatment",
+        Inference = "emmeans pairwise contrast",
+        Chi_square = NA_real_,
+        kept_random = species_models_raw[[species_i]]$kept_random,
+        used_adjustment = species_models_raw[[species_i]]$used_adjustment
+      ) %>%
+      dplyr::rename(
+        p_value = p.value
+      ) %>%
+      dplyr::select(
+        Species,
+        Scope,
+        Growout,
+        Fixed_Effect,
+        Inference,
+        contrast,
+        estimate,
+        SE,
+        df,
+        test_statistic_type,
+        test_statistic,
+        p_value,
+        kept_random,
+        used_adjustment
+      )
+  }
+)
+
+# ==============================================================
+# 3. Per-growout position effects from within-growout models
+# ==============================================================
+
+species_pergrowout_position_pvals <- purrr::map_dfr(
+  names(species_models_raw),
+  function(species_i) {
+
+    df_species <- entero_species_merged %>%
+      dplyr::filter(Target..Name. == species_i) %>%
+      dplyr::mutate(
+        Growout = as.factor(Growout),
+        Treatment = as.factor(Treatment),
+        House = as.factor(House),
+        Position = as.factor(Position),
+        copies_raw = copies_per_g_litter
+      )
+
+    purrr::map_dfr(
+      levels(df_species$Growout),
+      function(growout_i) {
+
+        df_i <- df_species %>%
+          dplyr::filter(Growout == growout_i) %>%
+          base::droplevels()
+
+        used_adjustment_i <- FALSE
+
+        model_i <- tryCatch(
+          {
+            glmmTMB::glmmTMB(
+              copies_raw ~ Treatment + Position + (1 | House),
+              family = tweedie(link = "log"),
+              data = df_i
+            )
+          },
+          error = function(e) {
+            used_adjustment_i <<- TRUE
+            df_i$copies_adj <<- df_i$copies_raw + 0.1
+
+            glmmTMB::glmmTMB(
+              copies_adj ~ Treatment + Position + (1 | House),
+              family = Gamma(link = "log"),
+              data = df_i
+            )
+          }
+        )
+
+        rv_i <- .extract_house_rand_var(model_i)
+        kept_random_i <- TRUE
+
+        if (is.na(rv_i) || rv_i <= 1e-6) {
+          kept_random_i <- FALSE
+
+          if (used_adjustment_i) {
+            model_i <- glmmTMB::glmmTMB(
+              copies_adj ~ Treatment + Position,
+              family = Gamma(link = "log"),
+              data = df_i
+            )
+          } else {
+            model_i <- glmmTMB::glmmTMB(
+              copies_raw ~ Treatment + Position,
+              family = tweedie(link = "log"),
+              data = df_i
+            )
+          }
+        }
+
+        car::Anova(model_i, type = 3) %>%
+          as.data.frame() %>%
+          tibble::rownames_to_column("Fixed_Effect") %>%
+          dplyr::filter(Fixed_Effect == "Position") %>%
+          dplyr::rename(
+            Chi_square = Chisq,
+            df = Df,
+            p_value = `Pr(>Chisq)`
+          ) %>%
+          dplyr::mutate(
+            Species = species_i,
+            Scope = "Within growout",
+            Growout = as.character(growout_i),
+            Inference = "Type III Wald test",
+            contrast = NA_character_,
+            estimate = NA_real_,
+            SE = NA_real_,
+            test_statistic_type = "Chi-square",
+            test_statistic = Chi_square,
+            kept_random = kept_random_i,
+            used_adjustment = used_adjustment_i
+          ) %>%
+          dplyr::select(
+            Species,
+            Scope,
+            Growout,
+            Fixed_Effect,
+            Inference,
+            contrast,
+            estimate,
+            SE,
+            df,
+            test_statistic_type,
+            test_statistic,
+            p_value,
+            kept_random,
+            used_adjustment
+          )
+      }
+    )
+  }
+)
+
+# ==============================================================
+# 4. Combined reporting table
+# ==============================================================
+
+species_fixed_effect_pvals_all <- dplyr::bind_rows(
+  species_global_fixed_pvals,
+  species_pergrowout_treatment_emmeans_pvals,
+  species_pergrowout_position_pvals
+)
+
+print(species_global_fixed_pvals)
+print(species_pergrowout_treatment_emmeans_pvals)
+print(species_pergrowout_position_pvals)
+print(species_fixed_effect_pvals_all)
+
+options(old_contr_species_pvals)
+
+```
+
+
+```{r}
+##Combine and visualize all data + statistical output (genus and species)
+
+# ==============================================================
+# Combined Enterococcus visualization — Updated p-value sources
+# ==============================================================
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+# ==============================================================
+# Helper function to format p-values for plotmath
+# ==============================================================
+
+fmt_p_parse <- function(p) {
+  if (is.na(p)) return("italic(p)==NA")
+  if (p < 1e-3) sprintf("italic(p)==%s", formatC(p, format = "e", digits = 3))
+  else sprintf("italic(p)==%.3f", p)
+}
+
+# ==============================================================
+# 1. Combine genus and species data into long format
+# ==============================================================
+
+# Genus data
+genus_data <- entero.merged %>%
+  dplyr::mutate(
+    Target = "Enterococcus",
+    copies_per_g_litter = copies_per_gram,
+    log10_copies = log10(copies_per_gram),
+    Sample.NTC.Control = as.character(Sample.NTC.Control)
+  ) %>%
+  dplyr::select(Sample.NTC.Control, Growout, Treatment, House, Position,
+                copies_per_g_litter, log10_copies, Target)
+
+# Species data
+species_data <- entero_species_merged %>%
+  dplyr::mutate(
+    Target = paste("E.", tolower(Target..Name.)),
+    log10_copies = log10(copies_per_g_litter),
+    Sample.NTC.Control = as.character(Sample.NTC.Control)
+  ) %>%
+  dplyr::select(Sample.NTC.Control, Growout, Treatment, House, Position,
+                copies_per_g_litter, log10_copies, Target)
+
+# Combine and relabel
+entero_combined_plot <- rbind(genus_data, species_data) %>%
+  dplyr::mutate(
+    Growout = as.character(Growout),
+    Treatment = factor(
+      ifelse(Treatment == "IndigoLT", "Alternative", as.character(Treatment)),
+      levels = c("Control", "Alternative")
+    ),
+    Target = factor(Target, levels = c("Enterococcus", "E. cecorum", "E. hirae"))
+  )
+
+cat("Combined plotting data:", nrow(entero_combined_plot), "rows\n")
+cat("Targets:", levels(entero_combined_plot$Target), "\n")
+cat("Treatments:", levels(entero_combined_plot$Treatment), "\n")
+
+# ==============================================================
+# 2. Extract p-values from updated statistical models
+# ==============================================================
+
+entero_pairs_df <- data.frame()
+
+# Genus p-values (from raw count log-transformed model)
+genus_pairs <- entero_genus_pairs_all_raw %>%
+  dplyr::filter(Comparison %in% c("Growout 1", "Growout 2")) %>%
+  dplyr::mutate(
+    Target = "Enterococcus",
+    Growout = gsub("Growout ", "", Comparison),
+    P_Value = p.value
+  ) %>%
+  dplyr::select(Target, Growout, P_Value)
+
+# Species p-values (from raw count Tweedie models)
+species_pairs <- species_pairs_raw %>%
+  dplyr::filter(Comparison %in% c("Growout 1", "Growout 2")) %>%
+  dplyr::mutate(
+    Target = paste("E.", tolower(Species)),
+    Growout = gsub("Growout ", "", Comparison),
+    P_Value = p.value
+  ) %>%
+  dplyr::select(Target, Growout, P_Value)
+
+# Combine p-values
+entero_pairs_df <- rbind(genus_pairs, species_pairs) %>%
+  dplyr::mutate(
+    Target = factor(Target, levels = c("Enterococcus", "E. cecorum", "E. hirae")),
+    Growout = as.character(Growout),
+    P_Label = vapply(P_Value, fmt_p_parse, character(1))
+  )
+
+# ==============================================================
+# 3. Calculate y-positions for p-value annotations (log10 scale)
+# ==============================================================
+
+p_ypos_entero <- entero_combined_plot %>%
+  dplyr::group_by(Target, Growout) %>%
+  dplyr::summarise(y_pos = max(log10_copies, na.rm = TRUE) * 1.02, 
+                   .groups = "drop")
+
+entero_pairs_annot <- dplyr::left_join(entero_pairs_df, p_ypos_entero, 
+                                       by = c("Target", "Growout"))
+
+# ==============================================================
+# 4. Create combined plot with log10 scale
+# ==============================================================
+
+entero_combined_boxplot <- ggplot(entero_combined_plot, 
+                                  aes(x = Growout, y = log10_copies)) +
+  
+  geom_boxplot(
+    aes(fill = Treatment),
+    color = "black",
+    alpha = 0.9,
+    outlier.shape = NA,
+    position = position_dodge(width = 0.9)
+  ) +
+  
+  stat_summary(
+    aes(fill = Treatment),
+    fun = mean,
+    geom = "point",
+    shape = 23,
+    size = 3,
+    color = "white",
+    position = position_dodge(width = 0.9),
+    show.legend = FALSE
+  ) +
+  
+  geom_jitter(
+    aes(color = Treatment),
+    shape = 21,
+    size = 1.25,
+    alpha = 0.9,
+    fill = "white",
+    position = position_jitterdodge(
+      jitter.width = 0.1,
+      dodge.width = 0.9
+    ),
+    show.legend = FALSE
+  ) +
+  
+  geom_text(
+    data = entero_pairs_annot,
+    aes(x = Growout, y = y_pos, label = P_Label),
+    parse = TRUE,
+    size = 3,
+    inherit.aes = FALSE,
+    vjust = 0
+  ) +
+  
+  facet_wrap(~ Target, scales = "free_y", nrow = 1) +
+  
+  scale_fill_manual(values = c("Control" = "#f8765c", "Alternative" = "#221150")) +
+  scale_color_manual(values = c("Control" = "black", "Alternative" = "black")) +
+  
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.15))) +
+  
+  labs(
+    fill = "Treatment",
+    x = "Growout",
+    y = expression(Log[10]~"copies per gram litter")
+  ) +
+  
+  theme_bw() +
+  theme(
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    axis.text = element_text(size = 12, color = "black"),
+    axis.ticks.x = element_blank(),
+    strip.text = element_text(size = 12, face = "italic"),
+    strip.background = element_blank(),
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text = element_text(size = 14),
+    legend.position = "top",
+    panel.spacing = unit(1, "lines")
+  )
+
+print(entero_combined_boxplot)
+
+# ==============================================================
+# 5. Summary of significant effects
+# ==============================================================
+
+cat("\n==============================================\n")
+cat("SUMMARY OF SIGNIFICANT TREATMENT EFFECTS\n")
+cat("==============================================\n")
+
+sig_entero_effects <- entero_pairs_annot %>%
+  dplyr::filter(P_Value < 0.05) %>%
+  dplyr::arrange(Target, Growout)
+
+if (nrow(sig_entero_effects) > 0) {
+  print(sig_entero_effects %>% 
+          dplyr::select(Target, Growout, P_Value))
+} else {
+  cat("No significant treatment effects at p < 0.05\n")
+}
+
+ggsave("entero.boxplot.combined.png", entero_combined_boxplot,
+       width = 8, height = 3.5, units = "in", dpi = 900)
+ 
+```
+
+```{r}
+# ==============================================================
+# Correlation between dPCR counts and 16S abundance
+# Genus Enterococcus (from genus phyloseq) + Species (from species phyloseq)
+# ==============================================================
+
+library(dplyr)
+library(ggplot2)
+library(phyloseq)
+
+# ==============================================================
+# 1. Extract genus-level Enterococcus abundance (from genus phyloseq)
+# ==============================================================
+
+entero_genus_corr <- phy_genus %>%
+  subset_taxa(Genus == "Enterococcus") %>%
+  psmelt() %>%
+  dplyr::select(Sample, Abundance, Growout, Treatment, House, Position) %>%
+  dplyr::mutate(
+    Target = "Enterococcus",
+    Sample.NTC.Control = gsub("Sample_", "", Sample),
+    CSS_abundance = Abundance
+  ) %>%
+  dplyr::select(Sample.NTC.Control, Growout, Treatment, House, Position, 
+                CSS_abundance, Target)
+
+# ==============================================================
+# 2. Extract species-level E. cecorum and E. hirae abundance (from species phyloseq)
+# ==============================================================
+
+# E. cecorum
+cecorum_corr <- physeq_no_growout3_css %>%
+  subset_taxa(Species == "Enterococcus cecorum") %>%
+  psmelt() %>%
+  dplyr::select(Sample, Abundance, Growout, Treatment, House, Position) %>%
+  dplyr::mutate(
+    Target = "E. cecorum",
+    Sample.NTC.Control = gsub("Sample_", "", Sample),
+    CSS_abundance = Abundance
+  ) %>%
+  dplyr::select(Sample.NTC.Control, Growout, Treatment, House, Position, 
+                CSS_abundance, Target)
+
+# E. hirae
+hirae_corr <- physeq_no_growout3_css %>%
+  subset_taxa(Species == "Enterococcus hirae") %>%
+  psmelt() %>%
+  dplyr::select(Sample, Abundance, Growout, Treatment, House, Position) %>%
+  dplyr::mutate(
+    Target = "E. hirae",
+    Sample.NTC.Control = gsub("Sample_", "", Sample),
+    CSS_abundance = Abundance
+  ) %>%
+  dplyr::select(Sample.NTC.Control, Growout, Treatment, House, Position, 
+                CSS_abundance, Target)
+
+# ==============================================================
+# 3. Combine all microbiome data
+# ==============================================================
+
+microbiome_combined <- rbind(entero_genus_corr, cecorum_corr, hirae_corr) %>%
+  dplyr::mutate(
+    Target = factor(Target, levels = c("Enterococcus", "E. cecorum", "E. hirae"))
+  )
+
+cat("Microbiome data rows:", nrow(microbiome_combined), "\n")
+cat("Samples per target:\n")
+print(table(microbiome_combined$Target))
+
+# ==============================================================
+# 4. Merge with dPCR data and create log10 copies
+# ==============================================================
+
+# Genus dPCR data
+genus_dpcr <- entero.merged %>%
+  dplyr::mutate(
+    Target = "Enterococcus",
+    Sample.NTC.Control = as.character(Sample.NTC.Control),
+    copies_per_g = copies_per_gram,
+    log10_copies = log10(copies_per_gram)
+  ) %>%
+  dplyr::select(Sample.NTC.Control, Target, copies_per_g, log10_copies)
+
+# Species dPCR data
+species_dpcr <- entero_species_merged %>%
+  dplyr::mutate(
+    Target = paste("E.", tolower(Target..Name.)),
+    Sample.NTC.Control = as.character(Sample.NTC.Control),
+    copies_per_g = copies_per_g_litter,
+    log10_copies = log10(copies_per_g_litter)
+  ) %>%
+  dplyr::select(Sample.NTC.Control, Target, copies_per_g, log10_copies)
+
+# Combine dPCR data
+dpcr_combined <- rbind(genus_dpcr, species_dpcr) %>%
+  dplyr::mutate(
+    Target = factor(Target, levels = c("Enterococcus", "E. cecorum", "E. hirae"))
+  )
+
+# Merge microbiome and dPCR data
+correlation_data <- microbiome_combined %>%
+  dplyr::left_join(dpcr_combined, by = c("Sample.NTC.Control", "Target")) %>%
+  dplyr::filter(!is.na(CSS_abundance), !is.na(log10_copies), is.finite(log10_copies))
+
+cat("Final correlation data:", nrow(correlation_data), "rows\n")
+cat("Samples per target for correlation:\n")
+print(table(correlation_data$Target))
+
+# ==============================================================
+# 5. Calculate correlations per target
+# ==============================================================
+
+correlation_stats <- correlation_data %>%
+  dplyr::group_by(Target) %>%
+  dplyr::summarise(
+    n = dplyr::n(),
+    rho = cor(CSS_abundance, log10_copies, method = "spearman", use = "complete.obs"),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    # Calculate p-values manually
+    t_stat = rho * sqrt((n - 2) / (1 - rho^2)),
+    p_value = 2 * pt(-abs(t_stat), df = n - 2),
+    # Format correlation label
+    cor_label = paste0(
+      "rho == ", round(rho, 2),
+      "*','~~italic(p) == ", formatC(p_value, format = "e", digits = 2)
+    )
+  )
+
+print(correlation_stats)
+
+# ==============================================================
+# 6. Create faceted correlation plot
+# ==============================================================
+
+# Define colors for each target
+target_colors <- c(
+  "Enterococcus" = "royalblue4",
+  "E. cecorum" = "darkred", 
+  "E. hirae" = "forestgreen"
+)
+
+# Add correlation labels to plotting data
+correlation_plot_data <- correlation_data %>%
+  dplyr::left_join(correlation_stats %>% dplyr::select(Target, cor_label), 
+                   by = "Target")
+
+entero_correlation_plot <- ggplot(correlation_plot_data, 
+                                  aes(x = CSS_abundance, y = log10_copies)) +
+  
+  geom_point(
+    aes(fill = Target),
+    shape = 21,
+    color = "black",
+    size = 3,
+    alpha = 0.7
+  ) +
+  
+  geom_smooth(
+    method = "lm", 
+    se = TRUE, 
+    color = "black", 
+    alpha = 0.3,
+    linewidth = 0.8
+  ) +
+  
+  geom_text(
+    data = correlation_stats,
+    aes(label = cor_label),
+    x = -Inf, y = Inf,
+    parse = TRUE,
+    hjust = -0.1, vjust = 2,
+    size = 3.5,
+    inherit.aes = FALSE
+  ) +
+  
+  facet_wrap(~ Target, scales = "free", nrow = 1) +
+  
+  scale_fill_manual(values = target_colors) +
+  
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.15))) +
+  scale_x_continuous(expand = expansion(mult = c(0.05, 0.15))) +
+  
+  labs(
+    x = "CSS-normalized 16S abundance",
+    y = expression(Log[10]~"copies per gram litter (dPCR)"),
+    fill = "Target"
+  ) +
+  
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 11, color = "black"),
+    axis.title = element_text(size = 12),
+    strip.text = element_text(size = 11, face = "italic"),
+    strip.background = element_blank(),
+    legend.position = "none",  # Remove legend since colors match facet labels
+    panel.spacing = unit(0.8, "lines")
+  )
+
+print(entero_correlation_plot)
+
+# ==============================================================
+# 7. Save plot
+# ==============================================================
+
+ggsave("entero.correlation.combined.png", entero_correlation_plot,
+       width = 8, height = 3, units = "in", dpi = 900)
+
+# ==============================================================
+# 8. Summary of correlation results
+# ==============================================================
+
+cat("\n==============================================\n")
+cat("CORRELATION SUMMARY\n")
+cat("==============================================\n")
+
+correlation_stats %>%
+  dplyr::select(Target, n, rho, p_value) %>%
+  dplyr::mutate(
+    Significant = ifelse(p_value < 0.05, "Yes", "No"),
+    rho = round(rho, 3),
+    p_value = formatC(p_value, format = "e", digits = 2)
+  ) %>%
+  print()
+
+```
+
+```{r}
+# ==============================================================
+# E. hirae correlation analysis — Non-zero 16S abundance only
+# Restricted to samples where hirae is detected in both methods
+# ==============================================================
+
+library(dplyr)
+library(ggplot2)
+library(phyloseq)
+
+# ==============================================================
+# Extract E. hirae abundance and filter to non-zero 16S
+# ==============================================================
+
+hirae_nonzero_corr <- physeq_no_growout3_css %>%
+  subset_taxa(Species == "Enterococcus hirae") %>%
+  psmelt() %>%
+  dplyr::select(Sample, Abundance, Growout, Treatment, House, Position) %>%
+  dplyr::filter(Abundance > 0) %>%  # Remove zeros from 16S data
+  dplyr::mutate(
+    Sample.NTC.Control = gsub("Sample_", "", Sample),
+    CSS_abundance = Abundance
+  ) %>%
+  dplyr::select(Sample.NTC.Control, Growout, Treatment, House, Position, CSS_abundance)
+
+cat("E. hirae samples with non-zero 16S abundance:", nrow(hirae_nonzero_corr), "\n")
+
+# ==============================================================
+# Merge with E. hirae dPCR data
+# ==============================================================
+
+hirae_dpcr_subset <- entero_species_merged %>%
+  dplyr::filter(Target..Name. == "Hirae") %>%
+  dplyr::mutate(
+    Sample.NTC.Control = as.character(Sample.NTC.Control),
+    copies_per_g = copies_per_g_litter,
+    log10_copies = log10(copies_per_g_litter)
+  ) %>%
+  dplyr::select(Sample.NTC.Control, copies_per_g, log10_copies)
+
+hirae_correlation_nonzero <- hirae_nonzero_corr %>%
+  dplyr::left_join(hirae_dpcr_subset, by = "Sample.NTC.Control") %>%
+  dplyr::filter(!is.na(CSS_abundance), !is.na(log10_copies), is.finite(log10_copies))
+
+cat("Final E. hirae non-zero correlation data:", nrow(hirae_correlation_nonzero), "rows\n")
+
+# ==============================================================
+# Calculate correlation for non-zero samples
+# ==============================================================
+
+hirae_cor_nonzero <- cor.test(
+  hirae_correlation_nonzero$CSS_abundance,
+  hirae_correlation_nonzero$log10_copies,
+  method = "spearman"
+)
+
+hirae_rho_nonzero <- hirae_cor_nonzero$estimate
+hirae_n_nonzero   <- sum(complete.cases(hirae_correlation_nonzero$CSS_abundance,
+                                        hirae_correlation_nonzero$log10_copies))
+
+# Recalculate p-value
+hirae_t_stat_nonzero <- as.numeric(hirae_rho_nonzero) * sqrt((hirae_n_nonzero - 2) / (1 - hirae_rho_nonzero^2))
+hirae_p_val_nonzero <- 2 * pt(-abs(hirae_t_stat_nonzero), df = hirae_n_nonzero - 2)
+
+cat("\nE. hirae correlation (non-zero 16S only):\n")
+cat("  rho =", round(hirae_rho_nonzero, 3), "\n")
+cat("  n =", hirae_n_nonzero, "\n")
+cat("  p-value =", formatC(hirae_p_val_nonzero, format = "e", digits = 2), "\n")
+
+# Format label for plot
+hirae_cor_label_nonzero <- paste0(
+  "rho == ", round(hirae_rho_nonzero, 2),
+  "*','~~italic(p) == ", formatC(hirae_p_val_nonzero, format = "e", digits = 2)
+)
+
+# ==============================================================
+# Create E. hirae non-zero correlation plot
+# ==============================================================
+
+hirae_correlation_plot_nonzero <- ggplot(hirae_correlation_nonzero, 
+                                         aes(x = CSS_abundance, y = log10_copies)) +
+  
+  geom_point(
+    shape = 21,
+    fill = "forestgreen",
+    color = "black",
+    size = 3,
+    alpha = 0.7
+  ) +
+  
+  geom_smooth(
+    method = "lm", 
+    se = TRUE, 
+    color = "black", 
+    alpha = 0.3,
+    linewidth = 0.8
+  ) +
+  
+  annotate(
+    "text",
+    x = -Inf, y = Inf,
+    label = hirae_cor_label_nonzero,
+    parse = TRUE,
+    hjust = -0.1, vjust = 2,
+    size = 4
+  ) +
+  
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.15))) +
+  scale_x_continuous(expand = expansion(mult = c(0.05, 0.15))) +
+  
+  labs(
+    x = "CSS-normalized E. hirae 16S abundance (>0 only)",
+    y = expression(Log[10]~"copies per gram litter (dPCR)"),
+    title = "E. hirae correlation — Non-zero 16S samples only"
+  ) +
+  
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 11, color = "black"),
+    axis.title = element_text(size = 12, face = "bold"),
+    plot.title = element_text(size = 13, face = "bold", hjust = 0.5),
+    panel.grid.minor = element_blank()
+  )
+
+print(hirae_correlation_plot_nonzero)
+
+# ==============================================================
+# Save plot and compare with all-samples result
+# ==============================================================
+
+ggsave("hirae.correlation.nonzero.png", hirae_correlation_plot_nonzero,
+       width = 5, height = 4, units = "in", dpi = 900)
+
+# Compare with all-samples correlation (from previous analysis)
+hirae_all_samples <- correlation_stats %>% 
+  dplyr::filter(Target == "E. hirae")
+
+cat("\n==============================================\n")
+cat("E. HIRAE CORRELATION COMPARISON\n")
+cat("==============================================\n")
+cat("All samples:     rho =", round(hirae_all_samples$rho, 3), 
+    "| n =", hirae_all_samples$n, 
+    "| p =", formatC(hirae_all_samples$p_value, format = "e", digits = 2), "\n")
+cat("Non-zero 16S:    rho =", round(hirae_rho_nonzero, 3), 
+    "| n =", hirae_n_nonzero, 
+    "| p =", formatC(hirae_p_val_nonzero, format = "e", digits = 2), "\n")
+cat("Improvement:     Δrho =", round(hirae_rho_nonzero - hirae_all_samples$rho, 3), "\n")
+
+```
+
+```{r}
+library(phyloseq)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggh4x)
+
+# ==============================================================
+# Combined Enterococcus 16S + dPCR visualization
+# CSS counts are plotted as log10(CSS + 1).
+# Relative abundance is plotted as percent relative abundance.
+# ==============================================================
+
+.clean_treatment <- function(x) {
+  dplyr::recode(as.character(x), "IndigoLT" = "Alternative")
+}
+
+# -------------------------------
+# 1. Genus-level Enterococcus from phy_genus
+# -------------------------------
+
+entero_genus_css <- psmelt(phy_genus) %>%
+  dplyr::filter(Genus == "Enterococcus") %>%
+  dplyr::mutate(
+    Treatment = factor(.clean_treatment(Treatment), levels = c("Control", "Alternative")),
+    Growout   = factor(Growout),
+    Target    = "italic('Enterococcus')",
+    Measure   = "log[10]~CSS~counts~'(16S)'",
+    value     = log10(Abundance + 1)
+  ) %>%
+  dplyr::select(Sample, Growout, Treatment, Target, Measure, value)
+
+phy_genus_rel <- transform_sample_counts(phy_genus, function(x) x / sum(x))
+
+entero_genus_ra <- psmelt(phy_genus_rel) %>%
+  dplyr::filter(Genus == "Enterococcus") %>%
+  dplyr::mutate(
+    Treatment = factor(.clean_treatment(Treatment), levels = c("Control", "Alternative")),
+    Growout   = factor(Growout),
+    Target    = "italic('Enterococcus')",
+    Measure   = "'%'~relative~abundance~'(16S)'",
+    value     = Abundance * 100
+  ) %>%
+  dplyr::select(Sample, Growout, Treatment, Target, Measure, value)
+
+# -------------------------------
+# 2. Species-level E. cecorum and E. hirae from physeq_no_growout3_css
+# -------------------------------
+
+species_css_long <- psmelt(physeq_no_growout3_css) %>%
+  dplyr::filter(Genus == "Enterococcus") %>%
+  dplyr::mutate(
+    Species_clean = tolower(gsub("^Enterococcus\\s+", "", Species)),
+    Target = dplyr::case_when(
+      Species_clean %in% c("cecorum", "e. cecorum", "enterococcus cecorum") ~ "italic('E. cecorum')",
+      Species_clean %in% c("hirae", "e. hirae", "enterococcus hirae")       ~ "italic('E. hirae')",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  dplyr::filter(!is.na(Target)) %>%
+  dplyr::mutate(
+    Treatment = factor(.clean_treatment(Treatment), levels = c("Control", "Alternative")),
+    Growout   = factor(Growout),
+    Measure   = "log[10]~CSS~counts~'(16S)'",
+    value     = log10(Abundance + 1)
+  ) %>%
+  dplyr::select(Sample, Growout, Treatment, Target, Measure, value)
+
+phy_species_rel <- transform_sample_counts(physeq_no_growout3_css, function(x) x / sum(x))
+
+species_ra_long <- psmelt(phy_species_rel) %>%
+  dplyr::filter(Genus == "Enterococcus") %>%
+  dplyr::mutate(
+    Species_clean = tolower(gsub("^Enterococcus\\s+", "", Species)),
+    Target = dplyr::case_when(
+      Species_clean %in% c("cecorum", "e. cecorum", "enterococcus cecorum") ~ "italic('E. cecorum')",
+      Species_clean %in% c("hirae", "e. hirae", "enterococcus hirae")       ~ "italic('E. hirae')",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  dplyr::filter(!is.na(Target)) %>%
+  dplyr::mutate(
+    Treatment = factor(.clean_treatment(Treatment), levels = c("Control", "Alternative")),
+    Growout   = factor(Growout),
+    Measure   = "'%'~relative~abundance~'(16S)'",
+    value     = Abundance * 100
+  ) %>%
+  dplyr::select(Sample, Growout, Treatment, Target, Measure, value)
+
+# -------------------------------
+# 3. dPCR data from existing entero_combined_plot
+# -------------------------------
+
+dpcr_long <- entero_combined_plot %>%
+  dplyr::mutate(
+    Treatment = factor(.clean_treatment(Treatment), levels = c("Control", "Alternative")),
+    Growout   = factor(Growout),
+    Target = dplyr::case_when(
+      Target %in% c("Enterococcus", "Genus", "Total Enterococcus") ~ "italic('Enterococcus')",
+      Target %in% c("Cecorum", "E. cecorum", "Enterococcus cecorum") ~ "italic('E. cecorum')",
+      Target %in% c("Hirae", "E. hirae", "Enterococcus hirae") ~ "italic('E. hirae')",
+      TRUE ~ as.character(Target)
+    ),
+    Measure = "log[10]~counts~'(dPCR)'",
+    value   = log10_copies
+  ) %>%
+  dplyr::select(Growout, Treatment, Target, Measure, value)
+
+# -------------------------------
+# 4. Combine all plotting data
+# -------------------------------
+
+entero_all_plot <- dplyr::bind_rows(
+  entero_genus_css,
+  species_css_long,
+  entero_genus_ra,
+  species_ra_long,
+  dpcr_long
+) %>%
+  dplyr::mutate(
+    Target = factor(
+      Target,
+      levels = c("italic('Enterococcus')", "italic('E. cecorum')", "italic('E. hirae')")
+    ),
+    Measure = factor(
+      Measure,
+      levels = c(
+        "log[10]~CSS~counts~'(16S)'",
+        "'%'~relative~abundance~'(16S)'",
+        "log[10]~counts~'(dPCR)'"
+      )
+    )
+  )
+
+# -------------------------------
+# 5. Prepare dPCR-only stats annotations
+# -------------------------------
+
+entero_pairs_annot_combined <- entero_pairs_annot %>%
+  dplyr::mutate(
+    Growout = factor(Growout),
+    Target = dplyr::case_when(
+      Target %in% c("Enterococcus", "Genus", "Total Enterococcus") ~ "italic('Enterococcus')",
+      Target %in% c("Cecorum", "E. cecorum", "Enterococcus cecorum") ~ "italic('E. cecorum')",
+      Target %in% c("Hirae", "E. hirae", "Enterococcus hirae") ~ "italic('E. hirae')",
+      TRUE ~ as.character(Target)
+    ),
+    Target = factor(
+      Target,
+      levels = c("italic('Enterococcus')", "italic('E. cecorum')", "italic('E. hirae')")
+    ),
+    Measure = factor(
+      "log[10]~counts~'(dPCR)'",
+      levels = c(
+        "log[10]~CSS~counts~'(16S)'",
+        "'%'~relative~abundance~'(16S)'",
+        "log[10]~counts~'(dPCR)'"
+      )
+    )
+  )
+
+# -------------------------------
+# 6. Combined plot
+# ==============================================================
+
+entero_16s_dpcr_boxplot <- ggplot(
+  entero_all_plot,
+  aes(x = Growout, y = value)
+) +
+  
+  geom_boxplot(
+    aes(fill = Treatment),
+    color = "black",
+    alpha = 0.9,
+    outlier.shape = NA,
+    position = position_dodge(width = 0.9)
+  ) +
+  
+  stat_summary(
+    aes(fill = Treatment),
+    fun = mean,
+    geom = "point",
+    shape = 23,
+    size = 3,
+    color = "white",
+    position = position_dodge(width = 0.9),
+    show.legend = FALSE
+  ) +
+  
+  geom_jitter(
+    aes(color = Treatment),
+    shape = 21,
+    size = 1.25,
+    alpha = 0.9,
+    fill = "white",
+    position = position_jitterdodge(
+      jitter.width = 0.1,
+      dodge.width = 0.9
+    ),
+    show.legend = FALSE
+  ) +
+  
+  geom_text(
+    data = entero_pairs_annot_combined,
+    aes(x = Growout, y = y_pos, label = P_Label),
+    parse = TRUE,
+    size = 3,
+    inherit.aes = FALSE,
+    vjust = 0
+  ) +
+  
+  ggh4x::facet_grid2(
+    rows = vars(Measure),
+    cols = vars(Target),
+    scales = "free",
+    independent = "y",
+    labeller = labeller(
+      Measure = label_parsed,
+      Target = label_parsed
+    )
+  ) +
+  
+  scale_fill_manual(values = c("Control" = "#f8765c", "Alternative" = "#221150")) +
+  scale_color_manual(values = c("Control" = "black", "Alternative" = "black")) +
+  
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.15))) +
+  
+  labs(
+    fill = "Treatment",
+    x = "Growout",
+    y = NULL
+  ) +
+  
+  theme_bw() +
+  theme(
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    axis.text = element_text(size = 12, color = "black"),
+    axis.ticks.x = element_blank(),
+    strip.text.x = element_text(size = 12),
+    strip.text.y = element_text(size = 9),
+    strip.background = element_blank(),
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text = element_text(size = 14),
+    legend.position = "top"
+  )
+
+print(entero_16s_dpcr_boxplot)
+
+ggsave(
+  "entero_16s_dpcr_boxplot.png",
+  entero_16s_dpcr_boxplot,
+  width = 6,
+  height = 6.5,
+  units = "in",
+  dpi = 900
+)
+
+```
+
+```{r}
+# ==============================================================
+# Correlation between dPCR counts and log10 CSS 16S abundance
+# Genus Enterococcus + Species E. cecorum / E. hirae
+# Does NOT overwrite existing objects
+# Zero values are retained as 0 after log10 transformation
+# ==============================================================
+
+library(dplyr)
+library(ggplot2)
+library(phyloseq)
+
+# ==============================================================
+# 1. Extract genus-level Enterococcus abundance
+# ==============================================================
+
+entero_genus_corr_logcss <- phy_genus %>%
+  subset_taxa(Genus == "Enterococcus") %>%
+  psmelt() %>%
+  dplyr::select(Sample, Abundance, Growout, Treatment, House, Position) %>%
+  dplyr::mutate(
+    Target = "Enterococcus",
+    Sample.NTC.Control = gsub("Sample_", "", Sample),
+    CSS_abundance = Abundance,
+    log10_CSS_abundance = dplyr::case_when(
+      CSS_abundance == 0 ~ 0,
+      CSS_abundance > 0  ~ log10(CSS_abundance),
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  dplyr::select(
+    Sample.NTC.Control, Growout, Treatment, House, Position,
+    CSS_abundance, log10_CSS_abundance, Target
+  )
+
+# ==============================================================
+# 2. Extract species-level E. cecorum and E. hirae abundance
+# ==============================================================
+
+cecorum_corr_logcss <- physeq_no_growout3_css %>%
+  subset_taxa(Species == "Enterococcus cecorum") %>%
+  psmelt() %>%
+  dplyr::select(Sample, Abundance, Growout, Treatment, House, Position) %>%
+  dplyr::mutate(
+    Target = "E. cecorum",
+    Sample.NTC.Control = gsub("Sample_", "", Sample),
+    CSS_abundance = Abundance,
+    log10_CSS_abundance = dplyr::case_when(
+      CSS_abundance == 0 ~ 0,
+      CSS_abundance > 0  ~ log10(CSS_abundance),
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  dplyr::select(
+    Sample.NTC.Control, Growout, Treatment, House, Position,
+    CSS_abundance, log10_CSS_abundance, Target
+  )
+
+hirae_corr_logcss <- physeq_no_growout3_css %>%
+  subset_taxa(Species == "Enterococcus hirae") %>%
+  psmelt() %>%
+  dplyr::select(Sample, Abundance, Growout, Treatment, House, Position) %>%
+  dplyr::mutate(
+    Target = "E. hirae",
+    Sample.NTC.Control = gsub("Sample_", "", Sample),
+    CSS_abundance = Abundance,
+    log10_CSS_abundance = dplyr::case_when(
+      CSS_abundance == 0 ~ 0,
+      CSS_abundance > 0  ~ log10(CSS_abundance),
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  dplyr::select(
+    Sample.NTC.Control, Growout, Treatment, House, Position,
+    CSS_abundance, log10_CSS_abundance, Target
+  )
+
+# ==============================================================
+# 3. Combine all microbiome data
+# ==============================================================
+
+microbiome_combined_logcss <- rbind(
+  entero_genus_corr_logcss,
+  cecorum_corr_logcss,
+  hirae_corr_logcss
+) %>%
+  dplyr::mutate(
+    Target = factor(Target, levels = c("Enterococcus", "E. cecorum", "E. hirae"))
+  )
+
+cat("Microbiome data rows:", nrow(microbiome_combined_logcss), "\n")
+cat("Samples per target:\n")
+print(table(microbiome_combined_logcss$Target))
+
+# ==============================================================
+# 4. Merge with dPCR data and create log10 copies
+# ==============================================================
+
+genus_dpcr_logcss <- entero.merged %>%
+  dplyr::mutate(
+    Target = "Enterococcus",
+    Sample.NTC.Control = as.character(Sample.NTC.Control),
+    copies_per_g = copies_per_gram,
+    log10_copies = dplyr::case_when(
+      copies_per_g == 0 ~ 0,
+      copies_per_g > 0  ~ log10(copies_per_g),
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  dplyr::select(Sample.NTC.Control, Target, copies_per_g, log10_copies)
+
+species_dpcr_logcss <- entero_species_merged %>%
+  dplyr::mutate(
+    Target = paste("E.", tolower(Target..Name.)),
+    Sample.NTC.Control = as.character(Sample.NTC.Control),
+    copies_per_g = copies_per_g_litter,
+    log10_copies = dplyr::case_when(
+      copies_per_g == 0 ~ 0,
+      copies_per_g > 0  ~ log10(copies_per_g),
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  dplyr::select(Sample.NTC.Control, Target, copies_per_g, log10_copies)
+
+dpcr_combined_logcss <- rbind(
+  genus_dpcr_logcss,
+  species_dpcr_logcss
+) %>%
+  dplyr::mutate(
+    Target = factor(Target, levels = c("Enterococcus", "E. cecorum", "E. hirae"))
+  )
+
+correlation_data_logcss <- microbiome_combined_logcss %>%
+  dplyr::left_join(dpcr_combined_logcss, by = c("Sample.NTC.Control", "Target")) %>%
+  dplyr::filter(
+    !is.na(log10_CSS_abundance),
+    !is.na(log10_copies),
+    is.finite(log10_CSS_abundance),
+    is.finite(log10_copies)
+  )
+
+cat("Final correlation data:", nrow(correlation_data_logcss), "rows\n")
+cat("Samples per target for correlation:\n")
+print(table(correlation_data_logcss$Target))
+
+# ==============================================================
+# 5. Calculate correlations per target
+# ==============================================================
+
+correlation_stats_logcss <- correlation_data_logcss %>%
+  dplyr::group_by(Target) %>%
+  dplyr::summarise(
+    n = dplyr::n(),
+    rho = cor(
+      log10_CSS_abundance,
+      log10_copies,
+      method = "spearman",
+      use = "complete.obs"
+    ),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    t_stat = rho * sqrt((n - 2) / (1 - rho^2)),
+    p_value = 2 * pt(-abs(t_stat), df = n - 2),
+    cor_label = paste0(
+      "rho == ", round(rho, 2),
+      "*','~~italic(p) == ", formatC(p_value, format = "e", digits = 2)
+    )
+  )
+
+print(correlation_stats_logcss)
+
+# ==============================================================
+# 6. Create faceted correlation plot
+# ==============================================================
+
+target_colors_logcss <- c(
+  "Enterococcus" = "royalblue4",
+  "E. cecorum" = "darkred",
+  "E. hirae" = "forestgreen"
+)
+
+correlation_plot_data_logcss <- correlation_data_logcss %>%
+  dplyr::left_join(
+    correlation_stats_logcss %>%
+      dplyr::select(Target, cor_label),
+    by = "Target"
+  )
+
+entero_correlation_plot_logcss <- ggplot(
+  correlation_plot_data_logcss,
+  aes(x = log10_CSS_abundance, y = log10_copies)
+) +
+  geom_point(
+    aes(fill = Target),
+    shape = 21,
+    color = "black",
+    size = 3,
+    alpha = 0.7
+  ) +
+  geom_smooth(
+    method = "lm",
+    se = TRUE,
+    color = "black",
+    alpha = 0.3,
+    linewidth = 0.8
+  ) +
+  geom_text(
+    data = correlation_stats_logcss,
+    aes(label = cor_label),
+    x = -Inf,
+    y = Inf,
+    parse = TRUE,
+    hjust = -0.1,
+    vjust = 2,
+    size = 4,
+    inherit.aes = FALSE
+  ) +
+  facet_wrap(~ Target, scales = "free", nrow = 1) +
+  scale_fill_manual(values = target_colors_logcss) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.15))) +
+  scale_x_continuous(expand = expansion(mult = c(0.05, 0.15))) +
+  labs(
+    x = expression(Log[10]~"CSS counts (16S)"),
+    y = expression(Log[10]~"counts (dPCR)"),
+    fill = "Target"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 12, color = "black"),
+    axis.title = element_text(size = 14),
+    strip.text = element_text(size = 13, face = "italic"),
+    strip.background = element_blank(),
+    legend.position = "none"
+  )
+
+print(entero_correlation_plot_logcss)
+
+# ==============================================================
+# 7. Save plot
+# ==============================================================
+
+ggsave(
+  "entero.correlation.combined.log10CSS.png",
+  entero_correlation_plot_logcss,
+  width = 6.5,
+  height = 3.2,
+  units = "in",
+  dpi = 900
+)
+
+# ==============================================================
+# 8. Summary of correlation results
+# ==============================================================
+
+cat("\n==============================================\n")
+cat("CORRELATION SUMMARY: log10 CSS abundance, zeros retained as 0\n")
+cat("==============================================\n")
+
+correlation_stats_logcss %>%
+  dplyr::select(Target, n, rho, p_value) %>%
+  dplyr::mutate(
+    Significant = ifelse(p_value < 0.05, "Yes", "No"),
+    rho = round(rho, 3),
+    p_value = formatC(p_value, format = "e", digits = 2)
+  ) %>%
+  print()
+
+```
+
+```{r}
+# ==============================================================
+# Correlation between dPCR counts and log10 CSS 16S abundance
+# EXCLUDING zeros in either 16S or dPCR
+# Does NOT overwrite existing objects
+# ==============================================================
+
+library(dplyr)
+library(ggplot2)
+library(phyloseq)
+
+# ==============================================================
+# 1. Extract genus-level Enterococcus abundance
+# ==============================================================
+
+entero_genus_corr_logcss_nozero <- phy_genus %>%
+  subset_taxa(Genus == "Enterococcus") %>%
+  psmelt() %>%
+  dplyr::select(Sample, Abundance, Growout, Treatment, House, Position) %>%
+  dplyr::mutate(
+    Target = "Enterococcus",
+    Sample.NTC.Control = gsub("Sample_", "", Sample),
+    CSS_abundance = Abundance,
+    log10_CSS_abundance = log10(CSS_abundance)
+  ) %>%
+  dplyr::select(
+    Sample.NTC.Control, Growout, Treatment, House, Position,
+    CSS_abundance, log10_CSS_abundance, Target
+  )
+
+# ==============================================================
+# 2. Species
+# ==============================================================
+
+cecorum_corr_logcss_nozero <- physeq_no_growout3_css %>%
+  subset_taxa(Species == "Enterococcus cecorum") %>%
+  psmelt() %>%
+  dplyr::select(Sample, Abundance, Growout, Treatment, House, Position) %>%
+  dplyr::mutate(
+    Target = "E. cecorum",
+    Sample.NTC.Control = gsub("Sample_", "", Sample),
+    CSS_abundance = Abundance,
+    log10_CSS_abundance = log10(CSS_abundance)
+  ) %>%
+  dplyr::select(
+    Sample.NTC.Control, Growout, Treatment, House, Position,
+    CSS_abundance, log10_CSS_abundance, Target
+  )
+
+hirae_corr_logcss_nozero <- physeq_no_growout3_css %>%
+  subset_taxa(Species == "Enterococcus hirae") %>%
+  psmelt() %>%
+  dplyr::select(Sample, Abundance, Growout, Treatment, House, Position) %>%
+  dplyr::mutate(
+    Target = "E. hirae",
+    Sample.NTC.Control = gsub("Sample_", "", Sample),
+    CSS_abundance = Abundance,
+    log10_CSS_abundance = log10(CSS_abundance)
+  ) %>%
+  dplyr::select(
+    Sample.NTC.Control, Growout, Treatment, House, Position,
+    CSS_abundance, log10_CSS_abundance, Target
+  )
+
+# ==============================================================
+# 3. Combine microbiome data
+# ==============================================================
+
+microbiome_combined_logcss_nozero <- rbind(
+  entero_genus_corr_logcss_nozero,
+  cecorum_corr_logcss_nozero,
+  hirae_corr_logcss_nozero
+) %>%
+  dplyr::mutate(
+    Target = factor(Target, levels = c("Enterococcus", "E. cecorum", "E. hirae"))
+  )
+
+# ==============================================================
+# 4. dPCR data
+# ==============================================================
+
+genus_dpcr_logcss_nozero <- entero.merged %>%
+  dplyr::mutate(
+    Target = "Enterococcus",
+    Sample.NTC.Control = as.character(Sample.NTC.Control),
+    copies_per_g = copies_per_gram,
+    log10_copies = log10(copies_per_gram)
+  ) %>%
+  dplyr::select(Sample.NTC.Control, Target, copies_per_g, log10_copies)
+
+species_dpcr_logcss_nozero <- entero_species_merged %>%
+  dplyr::mutate(
+    Target = paste("E.", tolower(Target..Name.)),
+    Sample.NTC.Control = as.character(Sample.NTC.Control),
+    copies_per_g = copies_per_g_litter,
+    log10_copies = log10(copies_per_g_litter)
+  ) %>%
+  dplyr::select(Sample.NTC.Control, Target, copies_per_g, log10_copies)
+
+dpcr_combined_logcss_nozero <- rbind(
+  genus_dpcr_logcss_nozero,
+  species_dpcr_logcss_nozero
+) %>%
+  dplyr::mutate(
+    Target = factor(Target, levels = c("Enterococcus", "E. cecorum", "E. hirae"))
+  )
+
+# ==============================================================
+# 5. Merge and FILTER OUT ZEROS
+# ==============================================================
+
+correlation_data_logcss_nozero <- microbiome_combined_logcss_nozero %>%
+  dplyr::left_join(dpcr_combined_logcss_nozero, by = c("Sample.NTC.Control", "Target")) %>%
+  dplyr::filter(
+    CSS_abundance > 0,
+    copies_per_g > 0,
+    !is.na(log10_CSS_abundance),
+    !is.na(log10_copies),
+    is.finite(log10_CSS_abundance),
+    is.finite(log10_copies)
+  )
+
+cat("Final correlation data (no zeros):", nrow(correlation_data_logcss_nozero), "rows\n")
+
+# ==============================================================
+# 6. Correlation stats
+# ==============================================================
+
+correlation_stats_logcss_nozero <- correlation_data_logcss_nozero %>%
+  dplyr::group_by(Target) %>%
+  dplyr::summarise(
+    n = dplyr::n(),
+    rho = cor(
+      log10_CSS_abundance,
+      log10_copies,
+      method = "spearman",
+      use = "complete.obs"
+    ),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    t_stat = rho * sqrt((n - 2) / (1 - rho^2)),
+    p_value = 2 * pt(-abs(t_stat), df = n - 2),
+    cor_label = paste0(
+      "rho == ", round(rho, 2),
+      "*','~~italic(p) == ", formatC(p_value, format = "e", digits = 2)
+    )
+  )
+
+# ==============================================================
+# 7. Plot (UNCHANGED aesthetics)
+# ==============================================================
+
+correlation_plot_data_logcss_nozero <- correlation_data_logcss_nozero %>%
+  dplyr::left_join(
+    correlation_stats_logcss_nozero %>%
+      dplyr::select(Target, cor_label),
+    by = "Target"
+  )
+
+entero_correlation_plot_logcss_nozero <- ggplot(
+  correlation_plot_data_logcss_nozero,
+  aes(x = log10_CSS_abundance, y = log10_copies)
+) +
+  geom_point(
+    aes(fill = Target),
+    shape = 21,
+    color = "black",
+    size = 3,
+    alpha = 0.7
+  ) +
+  geom_smooth(
+    method = "lm",
+    se = TRUE,
+    color = "black",
+    alpha = 0.3,
+    linewidth = 0.8
+  ) +
+  geom_text(
+    data = correlation_stats_logcss_nozero,
+    aes(label = cor_label),
+    x = -Inf,
+    y = Inf,
+    parse = TRUE,
+    hjust = -0.1,
+    vjust = 2,
+    size = 4,
+    inherit.aes = FALSE
+  ) +
+  facet_wrap(~ Target, scales = "free", nrow = 1) +
+  scale_fill_manual(values = target_colors_logcss) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.15))) +
+  scale_x_continuous(expand = expansion(mult = c(0.05, 0.15))) +
+  labs(
+    x = expression(Log[10]~"CSS counts (16S)"),
+    y = expression(Log[10]~"counts (dPCR)"),
+    fill = "Target"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 12, color = "black"),
+    axis.title = element_text(size = 14),
+    strip.text = element_text(size = 13, face = "italic"),
+    strip.background = element_blank(),
+    legend.position = "none"
+  )
+
+print(entero_correlation_plot_logcss_nozero)
+
+# ==============================================================
+# 8. Save
+# ==============================================================
+
+ggsave(
+  "entero.correlation.combined.log10CSS.nozeros.png",
+  entero_correlation_plot_logcss_nozero,
+  width = 8,
+  height = 3,
+  units = "in",
+  dpi = 900
+)
+
+```
+
+```{r}
+# ==============================================================
+# Correlation between dPCR counts and log10 CSS 16S abundance
+# Rows: zeros retained vs zeros removed
+# Columns: Target
+# Independent scales using ggh4x
+# ==============================================================
+
+library(dplyr)
+library(ggplot2)
+library(ggh4x)
+
+# ==============================================================
+# 1. Create zero-retained and zero-removed datasets
+# ==============================================================
+
+correlation_data_with_zeros_plot <- correlation_data_logcss %>%
+  dplyr::mutate(
+    Zero_Status = "Zeros retained"
+  )
+
+correlation_data_no_zeros_plot <- correlation_data_logcss %>%
+  dplyr::filter(
+    CSS_abundance > 0,
+    copies_per_g > 0,
+    log10_CSS_abundance > 0,
+    log10_copies > 0
+  ) %>%
+  dplyr::mutate(
+    Zero_Status = "Zeros removed"
+  )
+
+correlation_data_combined_zero_status <- dplyr::bind_rows(
+  correlation_data_with_zeros_plot,
+  correlation_data_no_zeros_plot
+) %>%
+  dplyr::mutate(
+    Target = factor(Target, levels = c("Enterococcus", "E. cecorum", "E. hirae")),
+    Zero_Status = factor(
+      Zero_Status,
+      levels = c("Zeros retained", "Zeros removed")
+    )
+  )
+
+# ==============================================================
+# 2. Correlation stats
+# ==============================================================
+
+correlation_stats_combined_zero_status <- correlation_data_combined_zero_status %>%
+  dplyr::group_by(Zero_Status, Target) %>%
+  dplyr::summarise(
+    n = dplyr::n(),
+    rho = cor(
+      log10_CSS_abundance,
+      log10_copies,
+      method = "spearman",
+      use = "complete.obs"
+    ),
+    p_value = cor.test(
+      log10_CSS_abundance,
+      log10_copies,
+      method = "spearman",
+      exact = FALSE
+    )$p.value,
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    cor_label = paste0(
+      "rho == ", round(rho, 2),
+      "*','~~italic(p) == '", formatC(p_value, format = "e", digits = 2), "'"
+    )
+  )
+
+# ==============================================================
+# 3. Plot
+# ==============================================================
+
+entero_correlation_plot_zero_comparison <- ggplot(
+  correlation_data_combined_zero_status,
+  aes(x = log10_CSS_abundance, y = log10_copies)
+) +
+  geom_point(
+    aes(fill = Target),
+    shape = 21,
+    color = "black",
+    size = 3,
+    alpha = 0.7
+  ) +
+  geom_smooth(
+    method = "lm",
+    se = TRUE,
+    color = "black",
+    alpha = 0.3,
+    linewidth = 0.8
+  ) +
+  geom_text(
+    data = correlation_stats_combined_zero_status,
+    aes(label = cor_label),
+    x = Inf,
+    y = -Inf,
+    parse = TRUE,
+    hjust = 1.08,
+    vjust = -0.35,
+    size = 3,
+    inherit.aes = FALSE
+  ) +
+  ggh4x::facet_grid2(
+    rows = vars(Zero_Status),
+    cols = vars(Target),
+    scales = "free",
+    independent = "all"
+  ) +
+  scale_fill_manual(values = target_colors_logcss) +
+  scale_y_continuous(expand = expansion(mult = c(0.22, 0.15))) +
+  scale_x_continuous(expand = expansion(mult = c(0.12, 0.15))) +
+  labs(
+    x = expression(Log[10]~"CSS counts (16S)"),
+    y = expression(Log[10]~"counts (dPCR)"),
+    fill = "Target"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 8, color = "black"),
+    axis.title = element_text(size = 11),
+    strip.text.x = element_text(size = 12, face = "italic"),
+    strip.text.y = element_text(size = 10),
+    strip.background = element_blank(),
+    legend.position = "none"
+  )
+
+print(entero_correlation_plot_zero_comparison)
+
+ggsave(
+  "entero.correlation.combined.log10CSS.zero_comparison.png",
+  entero_correlation_plot_zero_comparison,
+  width = 6,
+  height = 3,
+  units = "in",
+  dpi = 900
+)
+
+```
+

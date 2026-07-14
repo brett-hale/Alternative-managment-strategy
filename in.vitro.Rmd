@@ -1,0 +1,2869 @@
+---
+title: "in vitro"
+author: "BH"
+date: "2026-05-26"
+output: html_document
+---
+
+---
+title: "entero"
+author: "BH"
+date: "2026-03-29"
+output: html_document
+---
+
+```{r}
+##In vitro data received from the University of Arkansas on March 24, 2026
+```
+
+
+```{r}
+##Faecalis
+
+e.faecalis <- data.frame(
+  Treatment = c(
+    rep("24.00%", 5), rep("12.00%", 5), rep("6.00%", 5),
+    rep("3.00%", 5), rep("1.50%", 5), rep("Pathogen + TSB", 5), rep("TSB", 5)
+  ),
+  Sample_ID = c(
+    "1-1","1-2","1-3","1-4","1-5",
+    "2-1","2-2","2-3","2-4","2-5",
+    "3-1","3-2","3-3","3-4","3-5",
+    "4-1","4-2","4-3","4-4","4-5",
+    "5-1","5-2","5-3","5-4","5-5",
+    "6-1","6-2","6-3","6-4","6-5",
+    "7-1","7-2","7-3","7-4","7-5"
+  ),
+  Log10_6hr = c(
+    4.477, 4.301, 4.845, 4.477, 4.602,
+    6.000, 5.699, 6.079, 6.041, 5.954,
+    7.255, 7.301, 7.176, 7.146, 7.000,
+    7.903, 7.778, 7.477, 7.602, 7.301,
+    7.845, 7.954, 7.477, 8.146, 8.114,
+    8.477, 8.000, 8.301, 8.301, 9.380,
+    0, 0, 0, 0, 0
+  ),
+  Log10_12hr = c(
+    4.602, 4.602, 4.301, 4.301, 4.699,
+    7.000, 7.000, 8.000, 7.000, 7.000,
+    8.301, 8.000, 8.000, 8.322, 8.301,
+    8.000, 8.301, 8.301, 8.301, 8.477,
+    8.301, 8.477, 8.301, 8.301, 8.602,
+    8.602, 8.602, 8.301, 8.602, 8.778,
+    0, 0, 0, 0, 0
+  ),
+  Log10_24hr = c(
+    4.000, 4.000, 4.301, 4.301, 4.301,
+    7.301, 7.602, 7.699, 7.845, 4.000,
+    8.146, 8.000, 7.903, 8.301, 8.000,
+    8.322, 8.000, 8.000, 8.255, 8.000,
+    8.845, 8.301, 8.699, 8.602, 8.602,
+    8.845, 8.845, 8.778, 8.477, 8.778,
+    0, 0, 0, 0, 0
+  ),
+  stringsAsFactors = FALSE
+)
+
+# Factor treatment with meaningful order
+e.faecalis$Treatment <- factor(e.faecalis$Treatment,
+  levels = c("TSB", "Pathogen + TSB", "1.50%", "3.00%", "6.00%", "12.00%", "24.00%")
+)
+
+cat("Dimensions:", dim(e.faecalis), "\n")
+print(head(e.faecalis))
+
+```
+
+```{r}
+##Visualize faecalis
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+# ==============================================================
+# 1. Pivot to long format
+# ==============================================================
+
+e.faecalis_long <- e.faecalis %>%
+  tidyr::pivot_longer(
+    cols = starts_with("Log10_"),
+    names_to = "Timepoint",
+    values_to = "Log10"
+  ) %>%
+  dplyr::mutate(
+    Timepoint = factor(
+      gsub("Log10_", "", Timepoint),
+      levels = c("6hr", "12hr", "24hr")
+    )
+  )
+
+# ==============================================================
+# 2. Summary statistics
+# ==============================================================
+
+e.faecalis_summary <- e.faecalis_long %>%
+  dplyr::group_by(Treatment, Timepoint) %>%
+  dplyr::summarise(
+    Mean = mean(Log10, na.rm = TRUE),
+    SD   = sd(Log10, na.rm = TRUE),
+    N    = dplyr::n(),
+    SEM  = SD / sqrt(N),
+    .groups = "drop"
+  )
+
+# ==============================================================
+# 3. Define color palette: neutral for controls, gradient for doses
+# ==============================================================
+
+treatment_fills <- c(
+  "TSB"            = "grey70",
+  "Pathogen + TSB" = "grey40",
+  "1.50%"          = alpha("#bf3729", 0.25),
+  "3.00%"          = alpha("#bf3729", 0.40),
+  "6.00%"          = alpha("#bf3729", 0.55),
+  "12.00%"         = alpha("#bf3729", 0.75),
+  "24.00%"         = alpha("#bf3729", 1.00)
+)
+
+# ==============================================================
+# 4. Plot
+# ==============================================================
+
+dodge_width <- 0.8
+
+p_faecalis <- ggplot(e.faecalis_summary, aes(x = Timepoint, y = Mean, fill = Treatment)) +
+
+  # Barplot
+  geom_col(
+    position = position_dodge(width = dodge_width),
+    color = "black",
+    linewidth = 0.3,
+    width = 0.75
+  ) +
+
+  # Error bars (mean ± SEM)
+  geom_errorbar(
+    aes(ymin = Mean - SEM, ymax = Mean + SEM),
+    position = position_dodge(width = dodge_width),
+    width = 0.2,
+    linewidth = 0.5
+  ) +
+
+  # Individual points
+  geom_point(
+    data = e.faecalis_long,
+    aes(x = Timepoint, y = Log10, fill = Treatment, group = Treatment),
+    position = position_jitterdodge(jitter.width = 0.1, dodge.width = dodge_width),
+    shape = 21,
+    size = 1.5,
+    color = "black",
+    stroke = 0.4,
+    alpha = 0.7,
+    show.legend = FALSE
+  ) +
+
+  scale_fill_manual(values = treatment_fills) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.08))) +
+
+  labs(
+    x = "Time Post-Treatment",
+    y = expression(bold(Log[10]~CFU/mL)),
+    fill = "Treatment"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 11, color = "black"),
+    axis.title = element_text(size = 12, face = "bold", color = "black"),
+    legend.position = "right",
+    legend.text = element_text(size = 10),
+    legend.title = element_text(size = 11, face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+print(p_faecalis)
+
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+# ==============================================================
+# 1. Pivot to long format
+# ==============================================================
+
+e.faecalis_long <- e.faecalis %>%
+  tidyr::pivot_longer(
+    cols = starts_with("Log10_"),
+    names_to = "Timepoint",
+    values_to = "Log10"
+  ) %>%
+  dplyr::mutate(
+    Timepoint = factor(
+      gsub("Log10_", "", Timepoint),
+      levels = c("6hr", "12hr", "24hr")
+    ),
+    Treatment = factor(Treatment,
+      levels = c("TSB", "Pathogen + TSB", "1.50%", "3.00%", "6.00%", "12.00%", "24.00%")
+    )
+  )
+
+# ==============================================================
+# 2. Summary statistics
+# ==============================================================
+
+e.faecalis_summary <- e.faecalis_long %>%
+  dplyr::group_by(Treatment, Timepoint) %>%
+  dplyr::summarise(
+    Mean = mean(Log10, na.rm = TRUE),
+    SD   = sd(Log10, na.rm = TRUE),
+    N    = dplyr::n(),
+    SEM  = SD / sqrt(N),
+    .groups = "drop"
+  )
+
+# ==============================================================
+# 3. CLD annotations (Tukey groups from statistical output)
+# ==============================================================
+
+cld_df <- data.frame(
+  Treatment = rep(c("TSB", "Pathogen + TSB", "1.50%", "3.00%", "6.00%", "12.00%", "24.00%"), 3),
+  Timepoint = rep(c("6hr", "12hr", "24hr"), each = 7),
+  CLD = c(
+    # 6hr Tukey groups
+    "", "a", "b", "bc", "c", "d", "e",
+    # 12hr Tukey groups
+    "", "a", "a", "a", "a", "b", "c",
+    # 24hr Tukey groups
+    "", "a", "a", "ab", "ab", "b", "c"
+  ),
+  stringsAsFactors = FALSE
+) %>%
+  dplyr::mutate(
+    Treatment = factor(Treatment,
+      levels = c("TSB", "Pathogen + TSB", "1.50%", "3.00%", "6.00%", "12.00%", "24.00%")
+    ),
+    Timepoint = factor(Timepoint, levels = c("6hr", "12hr", "24hr"))
+  )
+
+# Merge CLD with summary to get y-positions
+cld_df <- cld_df %>%
+  dplyr::left_join(e.faecalis_summary, by = c("Treatment", "Timepoint")) %>%
+  dplyr::mutate(
+    y_pos = Mean + SEM + 0.3
+  )
+
+# ==============================================================
+# 4. Define color palette
+# ==============================================================
+
+treatment_fills <- c(
+  "TSB"            = "grey70",
+  "Pathogen + TSB" = "grey40",
+  "1.50%"          = alpha("#bf3729", 0.25),
+  "3.00%"          = alpha("#bf3729", 0.40),
+  "6.00%"          = alpha("#bf3729", 0.55),
+  "12.00%"         = alpha("#bf3729", 0.75),
+  "24.00%"         = alpha("#bf3729", 1.00)
+)
+
+# ==============================================================
+# 5. Plot
+# ==============================================================
+
+dodge_width <- 0.8
+
+p_faecalis <- ggplot(e.faecalis_summary, aes(x = Timepoint, y = Mean, fill = Treatment)) +
+
+  # Barplot
+  geom_col(
+    position = position_dodge(width = dodge_width),
+    color = "black",
+    linewidth = 0.3,
+    width = 0.75
+  ) +
+
+  # Error bars (mean ± SEM)
+  geom_errorbar(
+    aes(ymin = Mean - SEM, ymax = Mean + SEM),
+    position = position_dodge(width = dodge_width),
+    width = 0.2,
+    linewidth = 0.5
+  ) +
+
+  # Individual points
+  geom_point(
+    data = e.faecalis_long,
+    aes(x = Timepoint, y = Log10, fill = Treatment, group = Treatment),
+    position = position_jitterdodge(jitter.width = 0.08, dodge.width = dodge_width),
+    shape = 21,
+    size = 1.5,
+    color = "black",
+    stroke = 0.4,
+    alpha = 0.7,
+    show.legend = FALSE
+  ) +
+
+  # CLD letters
+  geom_text(
+    data = cld_df,
+    aes(x = Timepoint, y = y_pos, label = CLD, group = Treatment),
+    position = position_dodge(width = dodge_width),
+    size = 2.75,
+    fontface = "bold",
+    vjust = 0,
+    show.legend = FALSE
+  ) +
+
+  scale_fill_manual(values = treatment_fills) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.08))) +
+
+  labs(
+    x = "Time Post-Inoculation",
+    y = expression(bold(Log[10]~CFU/mL)),
+    fill = "Treatment"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 11, color = "black"),
+    axis.title = element_text(size = 12, face = "bold", color = "black"),
+    legend.position = "right",
+    legend.text = element_text(size = 10),
+    legend.title = element_text(size = 11, face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+print(p_faecalis)
+
+# ==============================================================
+# 6. Save
+# ==============================================================
+
+png("e_faecalis_invitro.png", width = 6, height = 3.5, units = "in", res = 900)
+print(p_faecalis)
+dev.off()
+
+cat("\nE. faecalis in vitro plot saved.\n")
+
+```
+
+
+```{r}
+# ==============================================================
+# E. cecorum strain 7: Data, Visualization with CLDs
+# ==============================================================
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+# ==============================================================
+# 1. Create data frame
+# ==============================================================
+
+e.cecorum7 <- data.frame(
+  Treatment = c(
+    rep("24.00%", 5), rep("12.00%", 5), rep("6.00%", 5),
+    rep("3.00%", 5), rep("1.50%", 5), rep("Pathogen + TSB", 5), rep("TSB", 5)
+  ),
+  Sample_ID = c(
+    "1-1","1-2","1-3","1-4","1-5",
+    "2-1","2-2","2-3","2-4","2-5",
+    "3-1","3-2","3-3","3-4","3-5",
+    "4-1","4-2","4-3","4-4","4-5",
+    "5-1","5-2","5-3","5-4","5-5",
+    "6-1","6-2","6-3","6-4","6-5",
+    "7-1","7-2","7-3","7-4","7-5"
+  ),
+  Log10_6hr = c(
+    3.000, 4.000, 3.778, 3.477, 3.699,
+    4.903, 4.954, 4.903, 4.301, 4.903,
+    5.477, 5.699, 5.845, 5.699, 5.699,
+    6.301, 6.602, 6.477, 6.301, 6.602,
+    6.954, 7.114, 6.602, 8.041, 8.342,
+    7.041, 7.342, 7.176, 7.322, 7.000,
+    0, 0, 0, 0, 0
+  ),
+  Log10_12hr = c(
+    3.477, 3.000, 3.699, 3.477, 3.602,
+    6.000, 6.301, 6.301, 6.000, 6.204,
+    7.000, 7.301, 7.477, 7.301, 7.845,
+    8.000, 8.000, 8.301, 8.301, 8.301,
+    8.903, 8.000, 8.845, 8.000, 8.301,
+    8.477, 8.301, 8.000, 8.301, 8.602,
+    0, 0, 0, 0, 0
+  ),
+  Log10_24hr = c(
+    2.903, 3.146, 3.000, 3.000, 3.000,
+    7.000, 7.230, 7.462, 7.477, 7.000,
+    7.845, 7.602, 7.477, 7.903, 7.778,
+    8.204, 7.477, 7.845, 8.114, 8.079,
+    8.362, 8.301, 8.000, 8.342, 8.301,
+    8.778, 8.602, 8.301, 8.301, 8.301,
+    0, 0, 0, 0, 0
+  ),
+  stringsAsFactors = FALSE
+)
+
+e.cecorum7$Treatment <- factor(e.cecorum7$Treatment,
+  levels = c("TSB", "Pathogen + TSB", "1.50%", "3.00%", "6.00%", "12.00%", "24.00%")
+)
+
+# ==============================================================
+# 2. Pivot to long format
+# ==============================================================
+
+e.cecorum7_long <- e.cecorum7 %>%
+  tidyr::pivot_longer(
+    cols = starts_with("Log10_"),
+    names_to = "Timepoint",
+    values_to = "Log10"
+  ) %>%
+  dplyr::mutate(
+    Timepoint = factor(
+      gsub("Log10_", "", Timepoint),
+      levels = c("6hr", "12hr", "24hr")
+    )
+  )
+
+# ==============================================================
+# 3. Summary statistics
+# ==============================================================
+
+e.cecorum7_summary <- e.cecorum7_long %>%
+  dplyr::group_by(Treatment, Timepoint) %>%
+  dplyr::summarise(
+    Mean = mean(Log10, na.rm = TRUE),
+    SD   = sd(Log10, na.rm = TRUE),
+    N    = dplyr::n(),
+    SEM  = SD / sqrt(N),
+    .groups = "drop"
+  )
+
+# ==============================================================
+# 4. CLD annotations (Tukey groups)
+# ==============================================================
+
+cld_df <- data.frame(
+  Treatment = rep(c("TSB", "Pathogen + TSB", "1.50%", "3.00%", "6.00%", "12.00%", "24.00%"), 3),
+  Timepoint = rep(c("6hr", "12hr", "24hr"), each = 7),
+  CLD = c(
+    # 6hr Tukey groups
+    "", "ab", "a", "b", "c", "d", "e",
+    # 12hr Tukey groups
+    "", "a", "a", "a", "b", "c", "d",
+    # 24hr Tukey groups
+    "", "a", "ab", "bc", "c", "d", "e"
+  ),
+  stringsAsFactors = FALSE
+) %>%
+  dplyr::mutate(
+    Treatment = factor(Treatment,
+      levels = c("TSB", "Pathogen + TSB", "1.50%", "3.00%", "6.00%", "12.00%", "24.00%")
+    ),
+    Timepoint = factor(Timepoint, levels = c("6hr", "12hr", "24hr"))
+  )
+
+cld_df <- cld_df %>%
+  dplyr::left_join(e.cecorum7_summary, by = c("Treatment", "Timepoint")) %>%
+  dplyr::mutate(
+    y_pos = Mean + SEM + 0.3
+  )
+
+# ==============================================================
+# 5. Define color palette
+# ==============================================================
+
+treatment_fills <- c(
+  "TSB"            = "grey70",
+  "Pathogen + TSB" = "grey40",
+  "1.50%"          = alpha("#bf3729", 0.25),
+  "3.00%"          = alpha("#bf3729", 0.40),
+  "6.00%"          = alpha("#bf3729", 0.55),
+  "12.00%"         = alpha("#bf3729", 0.75),
+  "24.00%"         = alpha("#bf3729", 1.00)
+)
+
+# ==============================================================
+# 6. Plot
+# ==============================================================
+
+dodge_width <- 0.8
+
+p_cecorum7 <- ggplot(e.cecorum7_summary, aes(x = Timepoint, y = Mean, fill = Treatment)) +
+
+  geom_col(
+    position = position_dodge(width = dodge_width),
+    color = "black",
+    linewidth = 0.3,
+    width = 0.75
+  ) +
+
+  geom_errorbar(
+    aes(ymin = Mean - SEM, ymax = Mean + SEM),
+    position = position_dodge(width = dodge_width),
+    width = 0.2,
+    linewidth = 0.5
+  ) +
+
+  geom_point(
+    data = e.cecorum7_long,
+    aes(x = Timepoint, y = Log10, fill = Treatment, group = Treatment),
+    position = position_jitterdodge(jitter.width = 0.08, dodge.width = dodge_width),
+    shape = 21,
+    size = 1.5,
+    color = "black",
+    stroke = 0.4,
+    alpha = 0.7,
+    show.legend = FALSE
+  ) +
+
+  geom_text(
+    data = cld_df,
+    aes(x = Timepoint, y = y_pos, label = CLD, group = Treatment),
+    position = position_dodge(width = dodge_width),
+    size = 2.75,
+    fontface = "bold",
+    vjust = 0,
+    show.legend = FALSE
+  ) +
+
+  scale_fill_manual(values = treatment_fills) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.08))) +
+
+  labs(
+    x = "Time Post-Inoculation",
+    y = expression(bold(Log[10]~CFU/mL)),
+    fill = "Treatment"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 11, color = "black"),
+    axis.title = element_text(size = 12, face = "bold", color = "black"),
+    legend.position = "right",
+    legend.text = element_text(size = 10),
+    legend.title = element_text(size = 11, face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+print(p_cecorum7)
+
+# ==============================================================
+# 7. Save
+# ==============================================================
+
+png("e_cecorum7_invitro.png", width = 6, height = 3.5, units = "in", res = 900)
+print(p_cecorum7)
+dev.off()
+
+cat("\nE. cecorum strain 7 in vitro plot saved.\n")
+```
+
+```{r}
+# ==============================================================
+# E. cecorum strain 5: Data, Visualization with CLDs
+# ==============================================================
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+# ==============================================================
+# 1. Create data frame
+# ==============================================================
+
+e.cecorum5 <- data.frame(
+  Treatment = c(
+    rep("24.00%", 5), rep("12.00%", 5), rep("6.00%", 5),
+    rep("3.00%", 5), rep("1.50%", 5), rep("Pathogen + TSB", 5), rep("TSB", 5)
+  ),
+  Sample_ID = c(
+    "1-1","1-2","1-3","1-4","1-5",
+    "2-1","2-2","2-3","2-4","2-5",
+    "3-1","3-2","3-3","3-4","3-5",
+    "4-1","4-2","4-3","4-4","4-5",
+    "5-1","5-2","5-3","5-4","5-5",
+    "6-1","6-2","6-3","6-4","6-5",
+    "7-1","7-2","7-3","7-4","7-5"
+  ),
+  Log10_6hr = c(
+    4.602, 5.041, 4.845, 4.602, 4.477,
+    5.477, 5.000, 5.301, 5.602, 5.301,
+    6.079, 5.954, 6.000, 6.477, 6.114,
+    6.000, 6.000, 6.000, 6.279, 6.301,
+    6.903, 6.699, 6.301, 6.778, 6.903,
+    6.602, 6.602, 7.000, 6.903, 6.903,
+    0, 0, 0, 0, 0
+  ),
+  Log10_12hr = c(
+    5.079, 5.041, 5.000, 4.903, 5.000,
+    6.000, 6.000, 6.477, 6.000, 6.301,
+    7.000, 7.000, 7.301, 7.301, 6.954,
+    7.301, 7.477, 7.398, 7.477, 7.602,
+    8.362, 8.301, 8.301, 8.415, 8.000,
+    8.602, 8.301, 8.778, 8.602, 8.845,
+    0, 0, 0, 0, 0
+  ),
+  Log10_24hr = c(
+    4.000, 4.301, 4.279, 4.602, 4.000,
+    8.000, 8.000, 8.000, 8.477, 7.845,
+    8.301, 8.699, 8.301, 8.000, 8.301,
+    8.699, 8.477, 8.477, 8.301, 8.301,
+    8.602, 8.477, 8.000, 8.000, 8.477,
+    9.477, 8.301, 8.699, 8.301, 8.778,
+    0, 0, 0, 0, 0
+  ),
+  stringsAsFactors = FALSE
+)
+
+e.cecorum5$Treatment <- factor(e.cecorum5$Treatment,
+  levels = c("TSB", "Pathogen + TSB", "1.50%", "3.00%", "6.00%", "12.00%", "24.00%")
+)
+
+# ==============================================================
+# 2. Pivot to long format
+# ==============================================================
+
+e.cecorum5_long <- e.cecorum5 %>%
+  tidyr::pivot_longer(
+    cols = starts_with("Log10_"),
+    names_to = "Timepoint",
+    values_to = "Log10"
+  ) %>%
+  dplyr::mutate(
+    Timepoint = factor(
+      gsub("Log10_", "", Timepoint),
+      levels = c("6hr", "12hr", "24hr")
+    )
+  )
+
+# ==============================================================
+# 3. Summary statistics
+# ==============================================================
+
+e.cecorum5_summary <- e.cecorum5_long %>%
+  dplyr::group_by(Treatment, Timepoint) %>%
+  dplyr::summarise(
+    Mean = mean(Log10, na.rm = TRUE),
+    SD   = sd(Log10, na.rm = TRUE),
+    N    = dplyr::n(),
+    SEM  = SD / sqrt(N),
+    .groups = "drop"
+  )
+
+# ==============================================================
+# 4. CLD annotations (Tukey groups)
+# ==============================================================
+
+cld_df <- data.frame(
+  Treatment = rep(c("TSB", "Pathogen + TSB", "1.50%", "3.00%", "6.00%", "12.00%", "24.00%"), 3),
+  Timepoint = rep(c("6hr", "12hr", "24hr"), each = 7),
+  CLD = c(
+    # 6hr Tukey groups
+    "", "a", "a", "b", "b", "c", "d",
+    # 12hr Tukey groups
+    "", "a", "b", "c", "d", "e", "f",
+    # 24hr Tukey groups
+    "", "a", "ab", "ab", "ab", "b", "c"
+  ),
+  stringsAsFactors = FALSE
+) %>%
+  dplyr::mutate(
+    Treatment = factor(Treatment,
+      levels = c("TSB", "Pathogen + TSB", "1.50%", "3.00%", "6.00%", "12.00%", "24.00%")
+    ),
+    Timepoint = factor(Timepoint, levels = c("6hr", "12hr", "24hr"))
+  )
+
+cld_df <- cld_df %>%
+  dplyr::left_join(e.cecorum5_summary, by = c("Treatment", "Timepoint")) %>%
+  dplyr::mutate(
+    y_pos = Mean + SEM + 0.3
+  )
+
+# ==============================================================
+# 5. Define color palette
+# ==============================================================
+
+treatment_fills <- c(
+  "TSB"            = "grey70",
+  "Pathogen + TSB" = "grey40",
+  "1.50%"          = alpha("#bf3729", 0.25),
+  "3.00%"          = alpha("#bf3729", 0.40),
+  "6.00%"          = alpha("#bf3729", 0.55),
+  "12.00%"         = alpha("#bf3729", 0.75),
+  "24.00%"         = alpha("#bf3729", 1.00)
+)
+
+# ==============================================================
+# 6. Plot
+# ==============================================================
+
+dodge_width <- 0.8
+
+p_cecorum5 <- ggplot(e.cecorum5_summary, aes(x = Timepoint, y = Mean, fill = Treatment)) +
+
+  geom_col(
+    position = position_dodge(width = dodge_width),
+    color = "black",
+    linewidth = 0.3,
+    width = 0.75
+  ) +
+
+  geom_errorbar(
+    aes(ymin = Mean - SEM, ymax = Mean + SEM),
+    position = position_dodge(width = dodge_width),
+    width = 0.2,
+    linewidth = 0.5
+  ) +
+
+  geom_point(
+    data = e.cecorum5_long,
+    aes(x = Timepoint, y = Log10, fill = Treatment, group = Treatment),
+    position = position_jitterdodge(jitter.width = 0.08, dodge.width = dodge_width),
+    shape = 21,
+    size = 1.5,
+    color = "black",
+    stroke = 0.4,
+    alpha = 0.7,
+    show.legend = FALSE
+  ) +
+
+  geom_text(
+    data = cld_df,
+    aes(x = Timepoint, y = y_pos, label = CLD, group = Treatment),
+    position = position_dodge(width = dodge_width),
+    size = 2.75,
+    fontface = "bold",
+    vjust = 0,
+    show.legend = FALSE
+  ) +
+
+  scale_fill_manual(values = treatment_fills) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.08))) +
+
+  labs(
+    x = "Time Post-Inoculation",
+    y = expression(bold(Log[10]~CFU/mL)),
+    fill = "Treatment"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 11, color = "black"),
+    axis.title = element_text(size = 12, face = "bold", color = "black"),
+    legend.position = "right",
+    legend.text = element_text(size = 10),
+    legend.title = element_text(size = 11, face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+print(p_cecorum5)
+
+# ==============================================================
+# 7. Save
+# ==============================================================
+
+png("e_cecorum5_invitro.png", width = 6, height = 3.5, units = "in", res = 900)
+print(p_cecorum5)
+dev.off()
+
+cat("\nE. cecorum strain 5 in vitro plot saved.\n")
+
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(ggtext)
+
+# ==============================================================
+# 1. Combine all three strains into one long data frame
+# ==============================================================
+
+e.faecalis_long <- e.faecalis %>%
+  tidyr::pivot_longer(
+    cols = starts_with("Log10_"),
+    names_to = "Timepoint",
+    values_to = "Log10"
+  ) %>%
+  dplyr::mutate(Strain = "*E. faecalis*")
+
+e.cecorum7_long <- e.cecorum7 %>%
+  tidyr::pivot_longer(
+    cols = starts_with("Log10_"),
+    names_to = "Timepoint",
+    values_to = "Log10"
+  ) %>%
+  dplyr::mutate(Strain = "*E. cecorum* strain 7")
+
+e.cecorum5_long <- e.cecorum5 %>%
+  tidyr::pivot_longer(
+    cols = starts_with("Log10_"),
+    names_to = "Timepoint",
+    values_to = "Log10"
+  ) %>%
+  dplyr::mutate(Strain = "*E. cecorum* strain 5")
+
+all_strains_long <- dplyr::bind_rows(e.faecalis_long, e.cecorum7_long, e.cecorum5_long) %>%
+  dplyr::mutate(
+    Timepoint = factor(
+      gsub("Log10_", "", Timepoint),
+      levels = c("6hr", "12hr", "24hr")
+    ),
+    Treatment = factor(Treatment,
+      levels = c("TSB", "Pathogen + TSB", "1.50%", "3.00%", "6.00%", "12.00%", "24.00%")
+    ),
+    Strain = factor(Strain,
+      levels = c("*E. faecalis*", "*E. cecorum* strain 7", "*E. cecorum* strain 5")
+    )
+  )
+
+# ==============================================================
+# 2. Summary statistics
+# ==============================================================
+
+all_strains_summary <- all_strains_long %>%
+  dplyr::group_by(Strain, Treatment, Timepoint) %>%
+  dplyr::summarise(
+    Mean = mean(Log10, na.rm = TRUE),
+    SD   = sd(Log10, na.rm = TRUE),
+    N    = dplyr::n(),
+    SEM  = SD / sqrt(N),
+    .groups = "drop"
+  )
+
+# ==============================================================
+# 3. CLD annotations for all three strains
+# ==============================================================
+
+cld_df <- data.frame(
+  Strain = rep(
+    c("*E. faecalis*", "*E. cecorum* strain 7", "*E. cecorum* strain 5"),
+    each = 21
+  ),
+  Treatment = rep(
+    rep(c("TSB", "Pathogen + TSB", "1.50%", "3.00%", "6.00%", "12.00%", "24.00%"), 3),
+    3
+  ),
+  Timepoint = rep(
+    rep(c("6hr", "12hr", "24hr"), each = 7),
+    3
+  ),
+  CLD = c(
+    # E. faecalis
+    "", "a", "b", "bc", "c", "d", "e",       # 6hr
+    "", "a", "a", "a", "a", "b", "c",         # 12hr
+    "", "a", "a", "ab", "ab", "b", "c",       # 24hr
+    # E. cecorum strain 7
+    "", "ab", "a", "b", "c", "d", "e",        # 6hr
+    "", "a", "a", "a", "b", "c", "d",         # 12hr
+    "", "a", "ab", "bc", "c", "d", "e",       # 24hr
+    # E. cecorum strain 5
+    "", "a", "a", "b", "b", "c", "d",         # 6hr
+    "", "a", "b", "c", "d", "e", "f",         # 12hr
+    "", "a", "ab", "ab", "ab", "b", "c"       # 24hr
+  ),
+  stringsAsFactors = FALSE
+) %>%
+  dplyr::mutate(
+    Strain = factor(Strain,
+      levels = c("*E. faecalis*", "*E. cecorum* strain 7", "*E. cecorum* strain 5")
+    ),
+    Treatment = factor(Treatment,
+      levels = c("TSB", "Pathogen + TSB", "1.50%", "3.00%", "6.00%", "12.00%", "24.00%")
+    ),
+    Timepoint = factor(Timepoint, levels = c("6hr", "12hr", "24hr"))
+  )
+
+cld_df <- cld_df %>%
+  dplyr::left_join(all_strains_summary, by = c("Strain", "Treatment", "Timepoint")) %>%
+  dplyr::mutate(
+    y_pos = Mean + SEM + 0.5
+  )
+
+# ==============================================================
+# 4. Define color palette
+# ==============================================================
+
+treatment_fills <- c(
+  "TSB"            = "grey70",
+  "Pathogen + TSB" = "grey40",
+  "1.50%"          = alpha("#bf3729", 0.25),
+  "3.00%"          = alpha("#bf3729", 0.40),
+  "6.00%"          = alpha("#bf3729", 0.55),
+  "12.00%"         = alpha("#bf3729", 0.75),
+  "24.00%"         = alpha("#bf3729", 1.00)
+)
+
+# ==============================================================
+# 5. Plot
+# ==============================================================
+
+dodge_width <- 0.8
+
+p_all_strains <- ggplot(all_strains_summary, aes(x = Timepoint, y = Mean, fill = Treatment)) +
+
+  geom_col(
+    position = position_dodge(width = dodge_width),
+    color = "black",
+    linewidth = 0.3,
+    width = 0.75
+  ) +
+
+  geom_errorbar(
+    aes(ymin = Mean - SEM, ymax = Mean + SEM),
+    position = position_dodge(width = dodge_width),
+    width = 0.2,
+    linewidth = 0.5
+  ) +
+
+  geom_point(
+    data = all_strains_long,
+    aes(x = Timepoint, y = Log10, fill = Treatment, group = Treatment),
+    position = position_jitterdodge(jitter.width = 0.08, dodge.width = dodge_width),
+    shape = 21,
+    size = 1.5,
+    color = "black",
+    stroke = 0.4,
+    alpha = 0.7,
+    show.legend = FALSE
+  ) +
+
+  geom_text(
+    data = cld_df,
+    aes(x = Timepoint, y = y_pos, label = CLD, group = Treatment),
+    position = position_dodge(width = dodge_width),
+    size = 2.75,
+    fontface = "bold",
+    vjust = 0,
+    show.legend = FALSE
+  ) +
+
+  facet_wrap(~ Strain, ncol = 1, scales = "free_y") +
+
+  scale_fill_manual(values = treatment_fills) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.08))) +
+
+  labs(
+    x = "Time Post-Inoculation",
+    y = expression(bold(Log[10]~CFU/mL)),
+    fill = "Treatment"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 11, color = "black"),
+    axis.title = element_text(size = 12, face = "bold", color = "black"),
+    legend.position = "right",
+    legend.text = element_text(size = 10),
+    legend.title = element_text(size = 11, face = "bold"),
+    panel.grid.minor = element_blank(),
+    strip.text = element_markdown(size = 11, color = "white", face = "bold"),
+    strip.background = element_rect(fill = "black", color = "black")
+  )
+
+print(p_all_strains)
+
+# ==============================================================
+# 6. Save
+# ==============================================================
+
+png("enterococcus_invitro_faceted.png", width = 7, height = 5.5, units = "in", res = 900)
+print(p_all_strains)
+dev.off()
+
+cat("\nFaceted Enterococcus in vitro plot saved.\n")
+```
+
+```{r}
+##Integrate UW data, received on 5-22-26
+hirae <- read.csv("~/Documents/DeQueen_Litter/hirae.csv")
+
+```
+
+```{r}
+## ==============================================================
+## Hirae in vitro data: log10 CFU/mL, ANOVA, t-tests, Tukey HSD, plot
+## ==============================================================
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(multcompView)
+library(scales)
+
+alpha <- 0.05
+
+# ==============================================================
+# 1. Prepare data
+# ==============================================================
+
+hirae_plot_df <- hirae %>%
+  dplyr::mutate(
+    Treatment_raw = as.character(`ILT.conc.....`),
+
+    # Updated logic
+    Treatment = dplyr::case_when(
+      Replicate == "TSB only" ~ "TSB",
+      Treatment_raw == "0"    ~ "Pathogen + TSB",
+      TRUE ~ paste0(Treatment_raw, "%")
+    ),
+
+    Treatment = factor(
+      Treatment,
+      levels = c("TSB", "Pathogen + TSB", "1.5%", "3%", "6%", "12%", "24%")
+    ),
+
+    Timepoint = factor(
+      paste0(`Time.Point..h.`, "hr"),
+      levels = c("0hr", "6hr", "12hr", "24hr")
+    ),
+
+    Log10 = dplyr::if_else(CFU.ml > 0, log10(CFU.ml), 0)
+  )
+
+# ==============================================================
+# 2. Summary statistics
+# ==============================================================
+
+hirae_summary <- hirae_plot_df %>%
+  dplyr::group_by(Treatment, Timepoint) %>%
+  dplyr::summarise(
+    Mean = mean(Log10, na.rm = TRUE),
+    SD   = sd(Log10, na.rm = TRUE),
+    N    = dplyr::n(),
+    SEM  = SD / sqrt(N),
+    .groups = "drop"
+  )
+
+# ==============================================================
+# 3. One-way ANOVA at each timepoint
+# ==============================================================
+
+hirae_anova_results <- hirae_plot_df %>%
+  dplyr::group_by(Timepoint) %>%
+  dplyr::group_modify(~ {
+    fit <- aov(Log10 ~ Treatment, data = .x)
+    out <- summary(fit)[[1]]
+    data.frame(
+      df_treatment = out["Treatment", "Df"],
+      df_residual  = out["Residuals", "Df"],
+      F_value      = out["Treatment", "F value"],
+      p_value      = out["Treatment", "Pr(>F)"]
+    )
+  }) %>%
+  dplyr::ungroup()
+
+print(hirae_anova_results)
+
+# ==============================================================
+# 4. Pairwise Student's t-tests at each timepoint
+# ==============================================================
+
+hirae_pairwise_ttests <- lapply(levels(hirae_plot_df$Timepoint), function(tp) {
+  df_tp <- hirae_plot_df %>%
+    dplyr::filter(Timepoint == tp)
+
+  pairwise.t.test(
+    x = df_tp$Log10,
+    g = df_tp$Treatment,
+    p.adjust.method = "none",
+    pool.sd = FALSE
+  )
+})
+
+names(hirae_pairwise_ttests) <- levels(hirae_plot_df$Timepoint)
+
+hirae_pairwise_ttests
+
+# ==============================================================
+# 5. Tukey HSD at each timepoint
+# ==============================================================
+
+hirae_tukey_results <- lapply(levels(hirae_plot_df$Timepoint), function(tp) {
+  df_tp <- hirae_plot_df %>%
+    dplyr::filter(Timepoint == tp)
+
+  fit <- aov(Log10 ~ Treatment, data = df_tp)
+  TukeyHSD(fit)
+})
+
+names(hirae_tukey_results) <- levels(hirae_plot_df$Timepoint)
+
+hirae_tukey_results
+
+# ==============================================================
+# 6. Tukey CLD letters
+# ==============================================================
+
+cld_list <- lapply(levels(hirae_plot_df$Timepoint), function(tp) {
+  df_tp <- hirae_plot_df %>%
+    dplyr::filter(Timepoint == tp)
+
+  fit <- aov(Log10 ~ Treatment, data = df_tp)
+  tuk <- TukeyHSD(fit)
+
+  cld <- multcompView::multcompLetters4(fit, tuk)
+
+  data.frame(
+    Timepoint = tp,
+    Treatment = names(cld$Treatment$Letters),
+    CLD = cld$Treatment$Letters,
+    stringsAsFactors = FALSE
+  )
+})
+
+cld_df <- dplyr::bind_rows(cld_list) %>%
+  dplyr::mutate(
+    Timepoint = factor(Timepoint, levels = c("0hr", "6hr", "12hr", "24hr")),
+    Treatment = factor(Treatment, levels = c("TSB", "Pathogen + TSB", "1.5%", "3%", "6%", "12%", "24%"))
+  ) %>%
+  dplyr::left_join(hirae_summary, by = c("Treatment", "Timepoint")) %>%
+  dplyr::mutate(
+    y_pos = Mean + SEM + 0.4
+  )
+
+# ==============================================================
+# 7. Define color palette
+# ==============================================================
+
+treatment_fills <- c(
+  "TSB"              = "grey70",
+  "Pathogen + TSB"   = "grey40",
+  "1.5%"             = scales::alpha("#bf3729", 0.25),
+  "3%"               = scales::alpha("#bf3729", 0.40),
+  "6%"               = scales::alpha("#bf3729", 0.55),
+  "12%"              = scales::alpha("#bf3729", 0.75),
+  "24%"              = scales::alpha("#bf3729", 1.00)
+)
+
+# ==============================================================
+# 8. Plot
+# ==============================================================
+
+dodge_width <- 0.8
+
+p_hirae <- ggplot(hirae_summary, aes(x = Timepoint, y = Mean, fill = Treatment)) +
+
+  geom_col(
+    position = position_dodge(width = dodge_width),
+    color = "black",
+    linewidth = 0.3,
+    width = 0.75
+  ) +
+
+  geom_errorbar(
+    aes(ymin = Mean - SEM, ymax = Mean + SEM),
+    position = position_dodge(width = dodge_width),
+    width = 0.2,
+    linewidth = 0.5
+  ) +
+
+  geom_point(
+    data = hirae_plot_df,
+    aes(x = Timepoint, y = Log10, fill = Treatment, group = Treatment),
+    position = position_jitterdodge(jitter.width = 0.08, dodge.width = dodge_width),
+    shape = 21,
+    size = 1.5,
+    color = "black",
+    stroke = 0.4,
+    alpha = 0.7,
+    show.legend = FALSE
+  ) +
+
+  geom_text(
+    data = cld_df,
+    aes(x = Timepoint, y = y_pos, label = CLD, group = Treatment),
+    position = position_dodge(width = dodge_width),
+    size = 2.75,
+    fontface = "bold",
+    vjust = 0,
+    show.legend = FALSE
+  ) +
+
+  scale_fill_manual(values = treatment_fills) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.10))) +
+
+  labs(
+    x = "Time Post-Inoculation",
+    y = expression(bold(Log[10]~CFU/mL)),
+    fill = "Treatment"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 11, color = "black"),
+    axis.title = element_text(size = 12, face = "bold", color = "black"),
+    legend.position = "right",
+    legend.text = element_text(size = 10),
+    legend.title = element_text(size = 11, face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+print(p_hirae)
+
+# ==============================================================
+# 9. Save
+# ==============================================================
+
+png("hirae_invitro.png", width = 6, height = 3.5, units = "in", res = 900)
+print(p_hirae)
+dev.off()
+
+cat("\nHirae in vitro plot saved.\n")
+
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(ggtext)
+library(multcompView)
+library(scales)
+
+# ==============================================================
+# 1. Prepare E. cecorum strain 7
+# ==============================================================
+
+e.cecorum7_long <- e.cecorum7 %>%
+  tidyr::pivot_longer(
+    cols = starts_with("Log10_"),
+    names_to = "Timepoint",
+    values_to = "Log10"
+  ) %>%
+  dplyr::mutate(
+    Pathogen = "*E. cecorum* strain 7",
+    Timepoint = gsub("Log10_", "", Timepoint)
+  )
+
+# ==============================================================
+# 2. Prepare E. cecorum strain 5
+# ==============================================================
+
+e.cecorum5_long <- e.cecorum5 %>%
+  tidyr::pivot_longer(
+    cols = starts_with("Log10_"),
+    names_to = "Timepoint",
+    values_to = "Log10"
+  ) %>%
+  dplyr::mutate(
+    Pathogen = "*E. cecorum* strain 5",
+    Timepoint = gsub("Log10_", "", Timepoint)
+  )
+
+# ==============================================================
+# 3. Prepare E. hirae
+# ==============================================================
+
+hirae_long <- hirae %>%
+  dplyr::mutate(
+    Treatment_raw = as.character(`ILT.conc.....`),
+    Treatment_num = suppressWarnings(as.numeric(Treatment_raw)),
+    Replicate_chr = as.character(Replicate),
+
+    Treatment = dplyr::case_when(
+      Replicate_chr == "TSB only" ~ "TSB",
+      Treatment_num == 0          ~ "CT",
+      Treatment_num == 1.5        ~ "1.5%",
+      Treatment_num == 3          ~ "3%",
+      Treatment_num == 6          ~ "6%",
+      Treatment_num == 12         ~ "12%",
+      Treatment_num == 24         ~ "24%",
+      TRUE ~ paste0(Treatment_raw, "%")
+    ),
+
+    Timepoint = paste0(`Time.Point..h.`, "hr"),
+    Log10 = dplyr::if_else(CFU.ml > 0, log10(CFU.ml), 0),
+    Pathogen = "*E. hirae*"
+  ) %>%
+  dplyr::select(Pathogen, Treatment, Timepoint, Log10)
+
+# ==============================================================
+# 4. Combine + clean
+# ==============================================================
+
+all_pathogens_long <- dplyr::bind_rows(
+  e.cecorum7_long,
+  e.cecorum5_long,
+  hirae_long
+) %>%
+  dplyr::filter(Timepoint %in% c("6hr", "12hr", "24hr")) %>%
+  dplyr::mutate(
+    Treatment = dplyr::recode(
+      as.character(Treatment),
+      "Pathogen + TSB" = "CT",
+      "1.50%" = "1.5%",
+      "3.00%" = "3%",
+      "6.00%" = "6%",
+      "12.00%" = "12%",
+      "24.00%" = "24%"
+    ),
+    Timepoint = factor(Timepoint, levels = c("6hr", "12hr", "24hr")),
+    Treatment = factor(
+      Treatment,
+      levels = c("TSB", "CT", "1.5%", "3%", "6%", "12%", "24%")
+    ),
+    Pathogen = factor(
+      Pathogen,
+      levels = c("*E. cecorum* strain 7", "*E. cecorum* strain 5", "*E. hirae*")
+    )
+  )
+
+# ==============================================================
+# 5. Summary stats
+# ==============================================================
+
+all_pathogens_summary <- all_pathogens_long %>%
+  dplyr::group_by(Pathogen, Timepoint, Treatment) %>%
+  dplyr::summarise(
+    Mean = mean(Log10, na.rm = TRUE),
+    SD   = sd(Log10, na.rm = TRUE),
+    N    = dplyr::n(),
+    SEM  = SD / sqrt(N),
+    .groups = "drop"
+  )
+
+# ==============================================================
+# 6. One-way ANOVA by pathogen and timepoint
+# ==============================================================
+
+anova_results <- all_pathogens_long %>%
+  dplyr::group_by(Pathogen, Timepoint) %>%
+  dplyr::group_modify(~ {
+    fit <- aov(Log10 ~ Treatment, data = .x)
+    out <- summary(fit)[[1]]
+
+    data.frame(
+      df_treatment = out["Treatment", "Df"],
+      df_residual  = out["Residuals", "Df"],
+      F_value      = out["Treatment", "F value"],
+      p_value      = out["Treatment", "Pr(>F)"]
+    )
+  }) %>%
+  dplyr::ungroup()
+
+print(anova_results)
+
+# ==============================================================
+# 7. Pairwise Student's t-tests by pathogen and timepoint
+# ==============================================================
+
+pairwise_ttest_results <- all_pathogens_long %>%
+  dplyr::group_by(Pathogen, Timepoint) %>%
+  dplyr::group_split() %>%
+  setNames(
+    all_pathogens_long %>%
+      dplyr::distinct(Pathogen, Timepoint) %>%
+      dplyr::mutate(name = paste(Pathogen, Timepoint, sep = " | ")) %>%
+      dplyr::pull(name)
+  ) %>%
+  lapply(function(df) {
+    pairwise.t.test(
+      x = df$Log10,
+      g = df$Treatment,
+      p.adjust.method = "none",
+      pool.sd = FALSE
+    )
+  })
+
+pairwise_ttest_results
+
+# ==============================================================
+# 8. Tukey HSD + CLD letters by pathogen and timepoint
+# ==============================================================
+
+cld_df <- all_pathogens_long %>%
+  dplyr::group_by(Pathogen, Timepoint) %>%
+  dplyr::group_modify(~ {
+    fit <- aov(Log10 ~ Treatment, data = .x)
+    tuk <- TukeyHSD(fit)
+    cld <- multcompView::multcompLetters4(fit, tuk)
+
+    data.frame(
+      Treatment = names(cld$Treatment$Letters),
+      CLD = cld$Treatment$Letters,
+      stringsAsFactors = FALSE
+    )
+  }) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(
+    Treatment = factor(
+      Treatment,
+      levels = c("TSB", "CT", "1.5%", "3%", "6%", "12%", "24%")
+    )
+  ) %>%
+  dplyr::left_join(
+    all_pathogens_summary,
+    by = c("Pathogen", "Timepoint", "Treatment")
+  ) %>%
+  dplyr::mutate(
+    y_pos = Mean + SEM + 0.5
+  )
+
+# ==============================================================
+# 9. Viridis-style palette
+# ==============================================================
+
+treatment_fills <- c(
+  "TSB"  = "grey85",
+  "CT"   = "grey45",
+  "1.5%" = "#fcfdbf",
+  "3%"   = "#febb81",
+  "6%"   = "#f8765c",
+  "12%"  = "#982d80",
+  "24%"  = "#221150"
+)
+
+# ==============================================================
+# 10. Plot: 3 pathogens x 3 timepoints
+# ==============================================================
+
+p_pathogen_time <- ggplot(
+  all_pathogens_summary,
+  aes(x = Treatment, y = Mean, fill = Treatment)
+) +
+
+  geom_col(
+    color = "black",
+    #linewidth = 0.3,
+    width = 0.75
+  ) +
+
+  geom_errorbar(
+    aes(ymin = Mean - SEM, ymax = Mean + SEM),
+    width = 0.3,
+    linewidth = 0.5
+  ) +
+
+  geom_point(
+    data = all_pathogens_long,
+    aes(x = Treatment, y = Log10),
+    position = position_jitter(width = 0.08),
+    shape = 21,
+    size = 1.4,
+    fill = "white",
+    color = "black",
+    stroke = 0.4,
+    alpha = 0.9,
+    show.legend = FALSE
+  ) +
+
+  geom_text(
+    data = cld_df,
+    aes(x = Treatment, y = y_pos, label = CLD),
+    size = 2.6,
+    fontface = "bold",
+    vjust = -0.35,
+    show.legend = FALSE
+  ) +
+
+  facet_grid(
+    rows = vars(Pathogen),
+    cols = vars(Timepoint),
+    scales = "free_y"
+  ) +
+
+  scale_fill_manual(values = treatment_fills, drop = FALSE) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.18))) +
+
+  labs(
+    x = NULL,
+    y = expression(bold(Log[10]~CFU/mL))
+  ) +
+
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(size = 7.5, color = "black"),
+    axis.ticks.x = element_line(color = "black"),
+    axis.text.y = element_text(size = 9, color = "black"),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 12, face = "bold", color = "black"),
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    strip.text.x = element_text(size = 10, color = "white", face = "bold"),
+    strip.text.y = ggtext::element_markdown(size = 7, color = "white", face = "bold"),
+    strip.background = element_rect(fill = "black", color = "black")
+  )
+
+print(p_pathogen_time)
+
+# ==============================================================
+# 11. Save
+# ==============================================================
+
+png(
+  "cecorum_hirae_invitro_3x3_faceted.png",
+  width = 8,
+  height = 3.75,
+  units = "in",
+  res = 900
+)
+print(p_pathogen_time)
+dev.off()
+
+cat("\nUpdated 3x3 faceted E. cecorum + E. hirae in vitro plot saved.\n")
+
+```
+
+
+```{r}
+## ==============================================================
+## Biofilm MBIC data: raw OD 540 nm visualization + ANOVA/Tukey
+## Boxplots with raw points + mean stat summaries
+## Updated to match 3x3 in vitro plot aesthetics
+## ==============================================================
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(multcompView)
+library(scales)
+library(ggtext)
+
+alpha <- 0.05
+
+# ==============================================================
+# 1. Prepare E. hirae biofilm data
+# ==============================================================
+
+hirae_biofilm_long <- hirae.mbic %>%
+  dplyr::mutate(Replicate = dplyr::row_number()) %>%
+  tidyr::pivot_longer(
+    cols = -Replicate,
+    names_to = "Treatment_raw",
+    values_to = "Biomass"
+  ) %>%
+  dplyr::mutate(
+    Treatment = dplyr::case_when(
+      Treatment_raw == "E.h."    ~ "CT",
+      Treatment_raw == "Vanc"    ~ "Van",
+      Treatment_raw == "X0.75."  ~ "0.75%",
+      Treatment_raw == "X1.50."  ~ "1.5%",
+      Treatment_raw == "X3."     ~ "3%",
+      Treatment_raw == "X6."     ~ "6%",
+      Treatment_raw == "X12."    ~ "12%",
+      Treatment_raw == "X24."    ~ "24%",
+      TRUE ~ Treatment_raw
+    ),
+    Strain = "*E. hirae*"
+  )
+
+# ==============================================================
+# 2. Prepare E. cecorum biofilm data
+# ==============================================================
+
+cecorum_biofilm_long <- cecorum.mbic %>%
+  dplyr::mutate(Replicate = dplyr::row_number()) %>%
+  tidyr::pivot_longer(
+    cols = -Replicate,
+    names_to = "Treatment_raw",
+    values_to = "Biomass"
+  ) %>%
+  dplyr::mutate(
+    Treatment = dplyr::case_when(
+      Treatment_raw == "E.h."    ~ "CT",
+      Treatment_raw == "Vanc"    ~ "Van",
+      Treatment_raw == "X0.75."  ~ "0.75%",
+      Treatment_raw == "X1.50."  ~ "1.5%",
+      Treatment_raw == "X3."     ~ "3%",
+      Treatment_raw == "X6."     ~ "6%",
+      Treatment_raw == "X12."    ~ "12%",
+      Treatment_raw == "X24."    ~ "24%",
+      TRUE ~ Treatment_raw
+    ),
+    Strain = "*E. cecorum*"
+  )
+
+# ==============================================================
+# 3. Combine data
+# ==============================================================
+
+biofilm_long <- dplyr::bind_rows(
+  hirae_biofilm_long,
+  cecorum_biofilm_long
+) %>%
+  dplyr::mutate(
+    Treatment = factor(
+      Treatment,
+      levels = c("CT", "Van", "0.75%", "1.5%", "3%", "6%", "12%", "24%")
+    ),
+    Strain = factor(
+      Strain,
+      levels = c("*E. hirae*", "*E. cecorum*")
+    )
+  )
+
+# ==============================================================
+# 4. Summary statistics
+# ==============================================================
+
+biofilm_summary <- biofilm_long %>%
+  dplyr::group_by(Strain, Treatment) %>%
+  dplyr::summarise(
+    Mean = mean(Biomass, na.rm = TRUE),
+    SD   = sd(Biomass, na.rm = TRUE),
+    N    = dplyr::n(),
+    SEM  = SD / sqrt(N),
+    CI95 = qt(0.975, df = N - 1) * SEM,
+    .groups = "drop"
+  )
+
+# ==============================================================
+# 5. ANOVA by strain
+# ==============================================================
+
+biofilm_anova_results <- biofilm_long %>%
+  dplyr::group_by(Strain) %>%
+  dplyr::group_modify(~ {
+    fit <- aov(Biomass ~ Treatment, data = .x)
+    out <- summary(fit)[[1]]
+
+    data.frame(
+      df_treatment = out["Treatment", "Df"],
+      df_residual  = out["Residuals", "Df"],
+      F_value      = out["Treatment", "F value"],
+      p_value      = out["Treatment", "Pr(>F)"]
+    )
+  }) %>%
+  dplyr::ungroup()
+
+print(biofilm_anova_results)
+
+# ==============================================================
+# 6. Tukey HSD + CLD
+# ==============================================================
+
+biofilm_cld_df <- biofilm_long %>%
+  dplyr::group_by(Strain) %>%
+  dplyr::group_modify(~ {
+    fit <- aov(Biomass ~ Treatment, data = .x)
+    tuk <- TukeyHSD(fit)
+    cld <- multcompView::multcompLetters4(fit, tuk)
+
+    data.frame(
+      Treatment = names(cld$Treatment$Letters),
+      CLD = cld$Treatment$Letters,
+      stringsAsFactors = FALSE
+    )
+  }) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(
+    Treatment = factor(
+      Treatment,
+      levels = c("CT", "Van", "0.75%", "1.5%", "3%", "6%", "12%", "24%")
+    )
+  ) %>%
+  dplyr::left_join(biofilm_summary, by = c("Strain", "Treatment")) %>%
+  dplyr::mutate(
+    y_pos = Mean + CI95 + 0.03
+  )
+
+# ==============================================================
+# 7. Viridis-style palette
+# ==============================================================
+
+biofilm_fills <- c(
+  "CT"    = "grey45",
+  "Van"   = "grey85",
+  "0.75%" = "#fcfdbf",
+  "1.5%"  = "#febb81",
+  "3%"    = "#f8765c",
+  "6%"    = "#d3436e",
+  "12%"   = "#982d80",
+  "24%"   = "#221150"
+)
+
+biofilm_point_colors <- setNames(
+  rep("black", length(biofilm_fills)),
+  names(biofilm_fills)
+)
+
+# ==============================================================
+# 8. Plot
+# ==============================================================
+
+p_biofilm <- ggplot(biofilm_long, aes(x = Treatment, y = Biomass)) +
+
+  geom_boxplot(
+    aes(fill = Treatment),
+    color = "black",
+    outlier.shape = NA,
+    linewidth = 0.35
+  ) +
+
+  stat_summary(
+    aes(fill = Treatment),
+    fun = mean,
+    geom = "point",
+    shape = 23,
+    size = 3,
+    color = "white",
+    show.legend = FALSE
+  ) +
+
+  geom_jitter(
+    aes(color = Treatment),
+    shape = 21,
+    size = 1.5,
+    alpha = 0.9,
+    fill = "white",
+    position = position_jitter(width = 0.08),
+    show.legend = FALSE
+  ) +
+
+  geom_text(
+    data = biofilm_cld_df,
+    aes(x = Treatment, y = y_pos, label = CLD),
+    inherit.aes = FALSE,
+    size = 2.6,
+    fontface = "bold",
+    vjust = -2,
+    show.legend = FALSE
+  ) +
+
+  facet_wrap(~ Strain, ncol = 1, scales = "free_y") +
+
+  scale_fill_manual(values = biofilm_fills, drop = FALSE) +
+  scale_color_manual(values = biofilm_point_colors, drop = FALSE) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.18))) +
+
+  labs(
+    x = NULL,
+    y = "Biomass (OD 540 nm)",
+    fill = "Treatment",
+    color = "Treatment"
+  ) +
+
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(size = 7.5, color = "black"),
+    axis.ticks.x = element_line(color = "black"),
+    axis.text.y = element_text(size = 9, color = "black"),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 12, face = "bold", color = "black"),
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    strip.text = ggtext::element_markdown(size = 7, color = "white", face = "bold"),
+    strip.background = element_rect(fill = "black", color = "black")
+  )
+
+print(p_biofilm)
+
+# ==============================================================
+# 9. Save
+# ==============================================================
+
+png("biofilm_mbic_boxplot.png", width = 5, height = 3.75, units = "in", res = 900)
+print(p_biofilm)
+dev.off()
+
+cat("\nBiofilm MBIC boxplot saved.\n")
+
+```
+
+```{r}
+
+# ==============================================================
+# 8. Plot biofilm inhibition with existing CLDs
+# ==============================================================
+
+# Convert OD/normalized biomass values to % biomass and % inhibition
+# relative to the untreated control mean within each strain.
+biofilm_long_plot <- biofilm_long %>%
+  dplyr::group_by(Strain) %>%
+  dplyr::mutate(
+    CT_mean = mean(Biomass[Treatment == "CT"], na.rm = TRUE),
+    Biomass_percent = (Biomass / CT_mean) * 100,
+    Inhibition = 100 - Biomass_percent
+  ) %>%
+  dplyr::ungroup()
+
+# Recalculate plotting positions for the existing CLDs on the inhibition scale.
+# CLDs still come from ANOVA + Tukey HSD on Biomass.
+biofilm_cld_plot_df <- biofilm_cld_df %>%
+  dplyr::group_by(Strain) %>%
+  dplyr::mutate(
+    CT_mean = Mean[Treatment == "CT"],
+    Mean_Biomass_percent = (Mean / CT_mean) * 100,
+    Mean_Inhibition = 100 - Mean_Biomass_percent,
+    CI95_Inhibition = (CI95 / CT_mean) * 100,
+    y_pos = Mean_Inhibition + CI95_Inhibition + 3
+  ) %>%
+  dplyr::ungroup()
+
+p_biofilm_inhibition <- ggplot(
+  biofilm_long_plot,
+  aes(x = Treatment, y = Inhibition)
+) +
+
+  geom_hline(
+    yintercept = 50,
+    linetype = "dashed",
+    linewidth = 0.45,
+    color = "black"
+  ) +
+
+  geom_boxplot(
+    aes(fill = Treatment),
+    color = "black",
+    outlier.shape = NA,
+    linewidth = 0.35
+  ) +
+
+  stat_summary(
+    aes(fill = Treatment),
+    fun = mean,
+    geom = "point",
+    shape = 23,
+    size = 3,
+    color = "white",
+    show.legend = FALSE
+  ) +
+
+  geom_jitter(
+    aes(color = Treatment),
+    shape = 21,
+    size = 1.5,
+    alpha = 0.9,
+    fill = "white",
+    position = position_jitter(width = 0.08),
+    show.legend = FALSE
+  ) +
+
+  geom_text(
+    data = biofilm_cld_plot_df,
+    aes(x = Treatment, y = y_pos, label = CLD),
+    inherit.aes = FALSE,
+    size = 3.5,
+    fontface = "bold",
+    vjust = -2,
+    show.legend = FALSE
+  ) +
+
+  facet_wrap(~ Strain, ncol = 1) +
+
+  scale_fill_manual(values = biofilm_fills, drop = FALSE) +
+  scale_color_manual(values = biofilm_point_colors, drop = FALSE) +
+
+  labs(
+    x = NULL,
+    y = "% biofilm inhibition",
+    fill = "Treatment",
+    color = "Treatment"
+  ) +
+
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(size = 7.5, color = "black"),
+    axis.ticks.x = element_line(color = "black"),
+    axis.text.y = element_text(size = 9, color = "black"),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 12, face = "bold", color = "black"),
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    strip.text = ggtext::element_markdown(
+      size = 10,
+      color = "white",
+      face = "bold"
+    ),
+    strip.background = element_rect(fill = "black", color = "black")
+  )
+
+print(p_biofilm_inhibition)
+
+png("p_biofilm_inhibition.png", width = 5, height = 3.75, units = "in", res = 900)
+print(p_biofilm_inhibition)
+dev.off()
+
+```
+
+```{r}
+# ==============================================================
+# Mean % inhibition by strain and treatment
+# ==============================================================
+
+biofilm_inhibition_summary <- biofilm_long %>%
+  dplyr::group_by(Strain) %>%
+  dplyr::mutate(
+    CT_mean = mean(Biomass[Treatment == "CT"], na.rm = TRUE),
+    Biomass_percent = (Biomass / CT_mean) * 100,
+    Inhibition = 100 - Biomass_percent
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::group_by(Strain, Treatment) %>%
+  dplyr::summarise(
+    Mean_Inhibition = mean(Inhibition, na.rm = TRUE),
+    SD = sd(Inhibition, na.rm = TRUE),
+    N = dplyr::n(),
+    SEM = SD / sqrt(N),
+    CI95 = qt(0.975, df = N - 1) * SEM,
+    .groups = "drop"
+  )
+
+biofilm_inhibition_summary %>%
+  dplyr::mutate(
+    Mean_Inhibition = round(Mean_Inhibition, 1),
+    SD = round(SD, 1),
+    SEM = round(SEM, 1),
+    CI95 = round(CI95, 1)
+  )
+
+print(biofilm_inhibition_summary)
+
+```
+
+```{r}
+##Update plot
+# Convert OD/normalized biomass values to % biomass and % inhibition
+# Update palette names if they still use CT.
+if ("CT" %in% names(biofilm_fills)) {
+  names(biofilm_fills)[names(biofilm_fills) == "CT"] <- "BCT"
+}
+
+if ("CT" %in% names(biofilm_point_colors)) {
+  names(biofilm_point_colors)[names(biofilm_point_colors) == "CT"] <- "BCT"
+}
+
+# Preserve treatment order while relabeling CT as BCT.
+biofilm_treatment_levels <- biofilm_long %>%
+  dplyr::pull(Treatment) %>%
+  as.character() %>%
+  unique()
+
+biofilm_treatment_levels <- dplyr::recode(
+  biofilm_treatment_levels,
+  "CT" = "BCT"
+)
+
+biofilm_long_plot <- biofilm_long %>%
+  dplyr::mutate(
+    Treatment = dplyr::recode(as.character(Treatment), "CT" = "BCT"),
+    Treatment = factor(Treatment, levels = biofilm_treatment_levels)
+  ) %>%
+  dplyr::group_by(Strain) %>%
+  dplyr::mutate(
+    BCT_mean = mean(Biomass[Treatment == "BCT"], na.rm = TRUE),
+    Biomass_percent = (Biomass / BCT_mean) * 100,
+    Inhibition = 100 - Biomass_percent
+  ) %>%
+  dplyr::ungroup()
+
+# Format ANOVA p-values.
+fmt_p_rich <- function(p) {
+  if (is.na(p)) return("<i>p</i> = NA")
+  if (p < 0.01) {
+    paste0("<i>p</i> = ", formatC(p, format = "e", digits = 1))
+  } else {
+    paste0("<i>p</i> = ", sprintf("%.2f", p))
+  }
+}
+
+biofilm_anova_label_df <- biofilm_anova_results %>%
+  dplyr::mutate(
+    P_Label = paste0("ANOVA ", vapply(p_value, fmt_p_rich, character(1))),
+    x_lab = 0.65,
+    y_lab = Inf
+  )
+
+# Recalculate plotting positions for the existing CLDs on the inhibition scale.
+# CLDs still come from ANOVA + Tukey HSD on Biomass.
+biofilm_cld_plot_df <- biofilm_cld_df %>%
+  dplyr::mutate(
+    Treatment = dplyr::recode(as.character(Treatment), "CT" = "BCT"),
+    Treatment = factor(Treatment, levels = biofilm_treatment_levels)
+  ) %>%
+  dplyr::group_by(Strain) %>%
+  dplyr::mutate(
+    BCT_mean = Mean[Treatment == "BCT"],
+    Mean_Biomass_percent = (Mean / BCT_mean) * 100,
+    Mean_Inhibition = 100 - Mean_Biomass_percent,
+    CI95_Inhibition = (CI95 / BCT_mean) * 100,
+    y_pos = Mean_Inhibition + CI95_Inhibition + 3
+  ) %>%
+  dplyr::ungroup()
+
+p_biofilm_inhibition <- ggplot(
+  biofilm_long_plot,
+  aes(x = Treatment, y = Inhibition)
+) +
+
+  geom_hline(
+    yintercept = 50,
+    linetype = "dashed",
+    linewidth = 0.45,
+    color = "black"
+  ) +
+
+  geom_boxplot(
+    aes(fill = Treatment),
+    color = "black",
+    outlier.shape = NA,
+    linewidth = 0.35
+  ) +
+
+  stat_summary(
+    aes(fill = Treatment),
+    fun = mean,
+    geom = "point",
+    shape = 23,
+    size = 3,
+    color = "white",
+    show.legend = FALSE
+  ) +
+
+  geom_jitter(
+    aes(color = Treatment),
+    shape = 21,
+    size = 1.5,
+    alpha = 0.9,
+    fill = "white",
+    position = position_jitter(width = 0.08),
+    show.legend = FALSE
+  ) +
+
+  geom_text(
+    data = biofilm_cld_plot_df,
+    aes(x = Treatment, y = y_pos, label = CLD),
+    inherit.aes = FALSE,
+    size = 3.5,
+    fontface = "bold",
+    vjust = -2.5,
+    show.legend = FALSE
+  ) +
+
+  ggtext::geom_richtext(
+    data = biofilm_anova_label_df,
+    aes(x = x_lab, y = y_lab, label = P_Label),
+    inherit.aes = FALSE,
+    hjust = 0,
+    vjust = 2,
+    size = 3.5,
+    fill = NA,
+    label.colour = NA,
+    label.padding = unit(0, "lines"),
+    show.legend = FALSE
+  ) +
+
+  facet_wrap(~ forcats::fct_rev(Strain), ncol = 1) +
+
+  scale_fill_manual(values = biofilm_fills, drop = FALSE) +
+  scale_color_manual(values = biofilm_point_colors, drop = FALSE) +
+  scale_y_continuous(
+    expand = expansion(mult = c(0.05, 0.30))
+  ) +
+
+  labs(
+    x = NULL,
+    y = "% biofilm inhibition",
+    fill = "Treatment",
+    color = "Treatment"
+  ) +
+
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(size = 7.5, color = "black"),
+    axis.ticks.x = element_line(color = "black"),
+    axis.text.y = element_text(size = 12, color = "black"),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 15, face = "bold", color = "black"),
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    strip.text = ggtext::element_markdown(
+      size = 14,
+      color = "black",
+      face = "plain"
+    ),
+    strip.background = element_blank()
+  )
+
+print(p_biofilm_inhibition)
+
+png("p_biofilm_inhibition.2.png", width = 6, height = 3.75, units = "in", res = 900)
+print(p_biofilm_inhibition)
+dev.off()
+
+```
+
+```{r}
+##Updated clinical isolate plot to show % inhibition
+
+# ==============================================================
+# Clinical isolate growth inhibition plot
+# Strains: EC5, EC7, E. hirae
+# Run ANOVA + Tukey HSD for all strains, generate CLDs + ANOVA p
+# Plot % growth inhibition relative to BCT
+# ==============================================================
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(ggtext)
+library(multcompView)
+
+# ==============================================================
+# 1. Combine all three strains into one long data frame
+# ==============================================================
+
+e.cecorum7_long <- e.cecorum7 %>%
+  tidyr::pivot_longer(
+    cols = starts_with("Log10_"),
+    names_to = "Timepoint",
+    values_to = "Log10"
+  ) %>%
+  dplyr::mutate(
+    Strain = "EC7",
+    Timepoint = gsub("Log10_", "", Timepoint)
+  )
+
+e.cecorum5_long <- e.cecorum5 %>%
+  tidyr::pivot_longer(
+    cols = starts_with("Log10_"),
+    names_to = "Timepoint",
+    values_to = "Log10"
+  ) %>%
+  dplyr::mutate(
+    Strain = "EC5",
+    Timepoint = gsub("Log10_", "", Timepoint)
+  )
+
+hirae_long <- hirae %>%
+  dplyr::mutate(
+    Treatment_raw = as.character(`ILT.conc.....`),
+    Treatment_num = suppressWarnings(as.numeric(Treatment_raw)),
+    Replicate_chr = as.character(Replicate),
+
+    Treatment = dplyr::case_when(
+      Replicate_chr == "TSB only" ~ "TSB",
+      Treatment_num == 0          ~ "BCT",
+      Treatment_num == 1.5        ~ "1.5%",
+      Treatment_num == 3          ~ "3%",
+      Treatment_num == 6          ~ "6%",
+      Treatment_num == 12         ~ "12%",
+      Treatment_num == 24         ~ "24%",
+      TRUE ~ paste0(Treatment_raw, "%")
+    ),
+
+    Timepoint = paste0(`Time.Point..h.`, "hr"),
+    Log10 = dplyr::if_else(CFU.ml > 0, log10(CFU.ml), 0),
+    Strain = "*E. hirae*"
+  ) %>%
+  dplyr::select(Strain, Treatment, Timepoint, Log10)
+
+all_strains_long <- dplyr::bind_rows(
+  e.cecorum7_long,
+  e.cecorum5_long,
+  hirae_long
+) %>%
+  dplyr::filter(Timepoint %in% c("6hr", "12hr", "24hr")) %>%
+  dplyr::mutate(
+    Treatment = dplyr::recode(
+      as.character(Treatment),
+      "Pathogen + TSB" = "BCT",
+      "1.50%" = "1.5%",
+      "3.00%" = "3%",
+      "6.00%" = "6%",
+      "12.00%" = "12%",
+      "24.00%" = "24%"
+    ),
+    Timepoint = factor(Timepoint, levels = c("6hr", "12hr", "24hr")),
+    Treatment = factor(
+      Treatment,
+      levels = c("TSB", "BCT", "1.5%", "3%", "6%", "12%", "24%")
+    ),
+    Strain = factor(
+      Strain,
+      levels = c("EC5", "EC7", "*E. hirae*")
+    )
+  )
+
+# ==============================================================
+# 2. Summary statistics on Log10 CFU/mL
+# ==============================================================
+
+all_strains_summary <- all_strains_long %>%
+  dplyr::group_by(Strain, Treatment, Timepoint) %>%
+  dplyr::summarise(
+    Mean = mean(Log10, na.rm = TRUE),
+    SD   = sd(Log10, na.rm = TRUE),
+    N    = dplyr::n(),
+    SEM  = SD / sqrt(N),
+    .groups = "drop"
+  )
+
+# ==============================================================
+# 3. ANOVA p-values
+# ==============================================================
+
+fmt_p_rich <- function(p) {
+  if (is.na(p)) return("<i>p</i> = NA")
+  if (p < 0.01) {
+    paste0("<i>p</i> = ", formatC(p, format = "e", digits = 1))
+  } else {
+    paste0("<i>p</i> = ", sprintf("%.2f", p))
+  }
+}
+
+anova_results_all_strains <- all_strains_long %>%
+  dplyr::filter(Treatment != "TSB") %>%
+  dplyr::group_by(Strain, Timepoint) %>%
+  dplyr::group_modify(~ {
+    fit <- aov(Log10 ~ Treatment, data = .x)
+    out <- summary(fit)[[1]]
+
+    data.frame(
+      df_treatment = out["Treatment", "Df"],
+      df_residual  = out["Residuals", "Df"],
+      F_value      = out["Treatment", "F value"],
+      p_value      = out["Treatment", "Pr(>F)"]
+    )
+  }) %>%
+  dplyr::ungroup()
+
+anova_label_df <- anova_results_all_strains %>%
+  dplyr::mutate(
+    P_Label = paste0("ANOVA ", vapply(p_value, fmt_p_rich, character(1))),
+    x_lab = 0.65,
+    y_lab = Inf
+  )
+
+# ==============================================================
+# 4. Tukey HSD + CLD
+# ==============================================================
+
+cld_df_all_strains <- all_strains_long %>%
+  dplyr::filter(Treatment != "TSB") %>%
+  dplyr::group_by(Strain, Timepoint) %>%
+  dplyr::group_modify(~ {
+    fit <- aov(Log10 ~ Treatment, data = .x)
+    tuk <- TukeyHSD(fit)
+    cld <- multcompView::multcompLetters4(fit, tuk)
+
+    data.frame(
+      Treatment = names(cld$Treatment$Letters),
+      CLD = cld$Treatment$Letters,
+      stringsAsFactors = FALSE
+    )
+  }) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(
+    Treatment = factor(
+      Treatment,
+      levels = c("BCT", "1.5%", "3%", "6%", "12%", "24%")
+    ),
+    Strain = factor(
+      Strain,
+      levels = c("EC5", "EC7", "*E. hirae*")
+    )
+  )
+
+# ==============================================================
+# 5. % growth inhibition relative to BCT
+# ==============================================================
+
+all_strains_inhibition_long <- all_strains_long %>%
+  dplyr::filter(Treatment != "TSB") %>%
+  dplyr::group_by(Strain, Timepoint) %>%
+  dplyr::mutate(
+    BCT_mean = mean(Log10[Treatment == "BCT"], na.rm = TRUE),
+    Growth_inhibition = ((BCT_mean - Log10) / BCT_mean) * 100,
+    Growth_inhibition = pmax(0, pmin(100, Growth_inhibition)),
+    Treatment = factor(
+      Treatment,
+      levels = c("BCT", "1.5%", "3%", "6%", "12%", "24%")
+    ),
+    Strain = factor(
+      Strain,
+      levels = c("EC5", "EC7", "*E. hirae*")
+    )
+  ) %>%
+  dplyr::ungroup()
+
+all_strains_inhibition_summary <- all_strains_inhibition_long %>%
+  dplyr::group_by(Strain, Timepoint, Treatment) %>%
+  dplyr::summarise(
+    Mean = mean(Growth_inhibition, na.rm = TRUE),
+    SD   = sd(Growth_inhibition, na.rm = TRUE),
+    N    = dplyr::n(),
+    SEM  = SD / sqrt(N),
+    .groups = "drop"
+  )
+
+cld_inhibition_df <- cld_df_all_strains %>%
+  dplyr::left_join(
+    all_strains_inhibition_summary,
+    by = c("Strain", "Timepoint", "Treatment")
+  ) %>%
+  dplyr::mutate(
+    y_pos = Mean + SEM + 5
+  )
+
+# ==============================================================
+# 6. Colors
+# ==============================================================
+
+treatment_fills_inhibition <- c(
+  "BCT"  = "grey45",
+  "1.5%" = "#fcfdbf",
+  "3%"   = "#febb81",
+  "6%"   = "#f8765c",
+  "12%"  = "#982d80",
+  "24%"  = "#221150"
+)
+
+# ==============================================================
+# 7. Plot
+# ==============================================================
+
+p_pathogen_time_inhibition <- ggplot(
+  all_strains_inhibition_summary,
+  aes(x = Treatment, y = Mean, fill = Treatment)
+) +
+  geom_col(
+    color = "black",
+    width = 0.75
+  ) +
+  geom_errorbar(
+    aes(ymin = Mean - SEM, ymax = Mean + SEM),
+    width = 0.3,
+    linewidth = 0.5
+  ) +
+  geom_point(
+    data = all_strains_inhibition_long,
+    aes(x = Treatment, y = Growth_inhibition),
+    position = position_jitter(width = 0.08),
+    shape = 21,
+    size = 1.4,
+    fill = "white",
+    color = "black",
+    stroke = 0.4,
+    alpha = 0.9,
+    show.legend = FALSE
+  ) +
+  geom_text(
+    data = cld_inhibition_df,
+    aes(x = Treatment, y = y_pos, label = CLD),
+    size = 2.6,
+    fontface = "bold",
+    vjust = -0.75,
+    show.legend = FALSE
+  ) +
+  ggtext::geom_richtext(
+    data = anova_label_df,
+    aes(x = x_lab, y = y_lab, label = P_Label),
+    inherit.aes = FALSE,
+    hjust = 0,
+    vjust = 2,
+    size = 2.5,
+    fill = NA,
+    label.colour = NA,
+    label.padding = unit(0, "lines"),
+    show.legend = FALSE
+  ) +
+  facet_grid(
+    rows = vars(Strain),
+    cols = vars(Timepoint),
+    scales = "free_y"
+  ) +
+  scale_fill_manual(values = treatment_fills_inhibition, drop = FALSE) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.25))) +
+  labs(
+    x = NULL,
+    y = "% growth inhibition"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(size = 7.5, color = "black"),
+    axis.ticks.x = element_line(color = "black"),
+    axis.text.y = element_text(size = 9, color = "black"),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 12, face = "bold", color = "black"),
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    strip.text.x = element_text(size = 12),
+    strip.text.y = ggtext::element_markdown(size = 12),
+    strip.background = element_blank()
+  )
+
+print(p_pathogen_time_inhibition)
+
+png(
+  "clinical_isolates_growth_inhibition_3x3_faceted.png",
+  width = 9,
+  height = 3.5,
+  units = "in",
+  res = 900
+)
+print(p_pathogen_time_inhibition)
+dev.off()
+
+```
+
+```{r}
+##Updated CFU count plot to match this
+# ==============================================================
+# Clinical isolate CFU plot
+# Strains: EC5, EC7, E. hirae
+# ANOVA + Tukey HSD on Log10 CFU/mL
+# ==============================================================
+
+# ==============================================================
+# 1. Ensure strain labels and factor order match inhibition plot
+# ==============================================================
+
+all_strains_long <- all_strains_long %>%
+  dplyr::mutate(
+    Strain = dplyr::recode(
+      as.character(Strain),
+      "*E. cecorum* strain 5" = "EC5",
+      "*E. cecorum* strain 7" = "EC7",
+      "E. cecorum strain 5" = "EC5",
+      "E. cecorum strain 7" = "EC7"
+    ),
+    Strain = factor(
+      Strain,
+      levels = c("EC5", "EC7", "*E. hirae*")
+    ),
+    Timepoint = factor(Timepoint, levels = c("6hr", "12hr", "24hr"))
+  )
+
+anova_results_all_strains <- anova_results_all_strains %>%
+  dplyr::mutate(
+    Strain = dplyr::recode(
+      as.character(Strain),
+      "*E. cecorum* strain 5" = "EC5",
+      "*E. cecorum* strain 7" = "EC7",
+      "E. cecorum strain 5" = "EC5",
+      "E. cecorum strain 7" = "EC7"
+    ),
+    Strain = factor(
+      Strain,
+      levels = c("EC5", "EC7", "*E. hirae*")
+    ),
+    Timepoint = factor(Timepoint, levels = c("6hr", "12hr", "24hr"))
+  )
+
+cld_df_all_strains <- cld_df_all_strains %>%
+  dplyr::mutate(
+    Strain = dplyr::recode(
+      as.character(Strain),
+      "*E. cecorum* strain 5" = "EC5",
+      "*E. cecorum* strain 7" = "EC7",
+      "E. cecorum strain 5" = "EC5",
+      "E. cecorum strain 7" = "EC7"
+    ),
+    Strain = factor(
+      Strain,
+      levels = c("EC5", "EC7", "*E. hirae*")
+    ),
+    Timepoint = factor(Timepoint, levels = c("6hr", "12hr", "24hr"))
+  )
+
+# ==============================================================
+# 2. Summary statistics on Log10 CFU/mL
+# ==============================================================
+
+all_strains_cfu_summary <- all_strains_long %>%
+  dplyr::filter(Treatment != "TSB") %>%
+  dplyr::mutate(
+    Treatment = factor(
+      Treatment,
+      levels = c("BCT", "1.5%", "3%", "6%", "12%", "24%")
+    ),
+    Strain = factor(
+      Strain,
+      levels = c("EC5", "EC7", "*E. hirae*")
+    ),
+    Timepoint = factor(Timepoint, levels = c("6hr", "12hr", "24hr"))
+  ) %>%
+  dplyr::group_by(Strain, Timepoint, Treatment) %>%
+  dplyr::summarise(
+    Mean = mean(Log10, na.rm = TRUE),
+    SD   = sd(Log10, na.rm = TRUE),
+    N    = dplyr::n(),
+    SEM  = SD / sqrt(N),
+    .groups = "drop"
+  )
+
+all_strains_cfu_long <- all_strains_long %>%
+  dplyr::filter(Treatment != "TSB") %>%
+  dplyr::mutate(
+    Treatment = factor(
+      Treatment,
+      levels = c("BCT", "1.5%", "3%", "6%", "12%", "24%")
+    ),
+    Strain = factor(
+      Strain,
+      levels = c("EC5", "EC7", "*E. hirae*")
+    ),
+    Timepoint = factor(Timepoint, levels = c("6hr", "12hr", "24hr"))
+  )
+
+# ==============================================================
+# 3. ANOVA labels
+# ==============================================================
+
+anova_label_df_cfu <- anova_results_all_strains %>%
+  dplyr::mutate(
+    P_Label = paste0("ANOVA ", vapply(p_value, fmt_p_rich, character(1))),
+    x_lab = 0.65,
+    y_lab = Inf
+  )
+
+# ==============================================================
+# 4. CLDs
+# ==============================================================
+
+cld_cfu_df <- cld_df_all_strains %>%
+  dplyr::left_join(
+    all_strains_cfu_summary,
+    by = c("Strain", "Timepoint", "Treatment")
+  ) %>%
+  dplyr::mutate(
+    y_pos = Mean + SEM + 0.6
+  )
+
+# ==============================================================
+# 5. Colors
+# ==============================================================
+
+treatment_fills_cfu <- c(
+  "BCT"  = "grey45",
+  "1.5%" = "#fcfdbf",
+  "3%"   = "#febb81",
+  "6%"   = "#f8765c",
+  "12%"  = "#982d80",
+  "24%"  = "#221150"
+)
+
+# ==============================================================
+# 6. Plot
+# ==============================================================
+
+p_pathogen_time_cfu <- ggplot(
+  all_strains_cfu_summary,
+  aes(x = Treatment, y = Mean, fill = Treatment)
+) +
+  geom_col(
+    color = "black",
+    width = 0.75
+  ) +
+  geom_errorbar(
+    aes(ymin = Mean - SEM, ymax = Mean + SEM),
+    width = 0.3,
+    linewidth = 0.5
+  ) +
+  geom_point(
+    data = all_strains_cfu_long,
+    aes(x = Treatment, y = Log10),
+    position = position_jitter(width = 0.08),
+    shape = 21,
+    size = 1.4,
+    fill = "white",
+    color = "black",
+    stroke = 0.4,
+    alpha = 0.9,
+    show.legend = FALSE
+  ) +
+  geom_text(
+    data = cld_cfu_df,
+    aes(x = Treatment, y = y_pos, label = CLD),
+    size = 2.6,
+    fontface = "bold",
+    vjust = -0.5,
+    show.legend = FALSE
+  ) +
+  ggtext::geom_richtext(
+    data = anova_label_df_cfu,
+    aes(x = x_lab, y = y_lab, label = P_Label),
+    inherit.aes = FALSE,
+    hjust = 0,
+    vjust = 2,
+    size = 2.5,
+    fill = NA,
+    label.colour = NA,
+    label.padding = unit(0, "lines"),
+    show.legend = FALSE
+  ) +
+  facet_grid(
+    rows = vars(Strain),
+    cols = vars(Timepoint),
+    scales = "free_y"
+  ) +
+  scale_fill_manual(values = treatment_fills_cfu, drop = FALSE) +
+  scale_y_continuous(
+    expand = expansion(mult = c(0.05, 0.45)) ##0.25
+  ) +
+  labs(
+    x = NULL,
+    y = expression(bold(Log[10]~CFU/mL))
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(size = 7.5, color = "black"),
+    axis.ticks.x = element_line(color = "black"),
+    axis.text.y = element_text(size = 9, color = "black"),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 12, face = "bold", color = "black"),
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    strip.text.x = element_text(size = 12),
+    strip.text.y = ggtext::element_markdown(size = 12),
+    strip.background = element_blank()
+  )
+
+print(p_pathogen_time_cfu)
+
+png(
+  "clinical_isolates_log10_cfu_3x3_faceted.png",
+  width = 9,
+  height = 3.5,
+  units = "in",
+  res = 900
+)
+print(p_pathogen_time_cfu)
+dev.off()
+
+```
+
+```{r}
+##ATCC biofilm OD with reverse orientation
+
+# ==============================================================
+# Biofilm MBIC boxplot — flipped, strains as columns
+# Includes ANOVA p-values + corrected CLD positions
+# ==============================================================
+fmt_p_rich <- function(p) {
+  if (is.na(p)) return("<i>p</i> = NA")
+  if (p < 0.01) {
+    paste0("<i>p</i> = ", formatC(p, format = "e", digits = 1))
+  } else {
+    paste0("<i>p</i> = ", sprintf("%.2f", p))
+  }
+}
+biofilm_long_flip <- biofilm_long %>%
+  dplyr::mutate(
+    Treatment = factor(
+      Treatment,
+      levels = rev(c("CT", "Van", "0.75%", "1.5%", "3%", "6%", "12%", "24%"))
+    )
+  )
+biofilm_cld_df_flip <- biofilm_cld_df %>%
+  dplyr::mutate(
+    Treatment = factor(
+      Treatment,
+      levels = levels(biofilm_long_flip$Treatment)
+    ),
+    y_pos_flip = y_pos + 0.06
+  )
+# After coord_flip:
+#   x = Treatment becomes vertical axis  (level 1 = bottom, last level = top)
+#   y = Biomass becomes horizontal axis  (-Inf = left, +Inf = right)
+# Bottom-right visually = FIRST Treatment level + high Biomass value
+biofilm_anova_label_df_flip <- biofilm_anova_results %>%
+  dplyr::mutate(
+    P_Label = paste0("ANOVA ", vapply(p_value, fmt_p_rich, character(1))),
+    x_lab = levels(biofilm_long_flip$Treatment)[1],   # bottom of axis
+    y_lab = Inf                                        # right side
+  )
+p_biofilm_flip <- ggplot(
+  biofilm_long_flip,
+  aes(x = Treatment, y = Biomass)
+) +
+  geom_boxplot(
+    aes(fill = Treatment),
+    color = "black",
+    outlier.shape = NA,
+    linewidth = 0.35
+  ) +
+  stat_summary(
+    aes(fill = Treatment),
+    fun = mean,
+    geom = "point",
+    shape = 23,
+    size = 3,
+    color = "white",
+    show.legend = FALSE
+  ) +
+  geom_jitter(
+    aes(color = Treatment),
+    shape = 21,
+    size = 1.5,
+    alpha = 0.9,
+    fill = "white",
+    position = position_jitter(width = 0.08),
+    show.legend = FALSE
+  ) +
+  geom_text(
+    data = biofilm_cld_df_flip,
+    aes(x = Treatment, y = y_pos_flip, label = CLD),
+    inherit.aes = FALSE,
+    size = 2.6,
+    fontface = "bold",
+    hjust = -0.25,
+    vjust = 0.5,
+    show.legend = FALSE
+  ) +
+  ggtext::geom_richtext(
+    data = biofilm_anova_label_df_flip,
+    aes(x = x_lab, y = y_lab, label = P_Label),
+    inherit.aes = FALSE,
+    hjust = 1.05,         # inset from right edge
+    vjust = 3.25,         # push up off the bottom edge
+    size = 2.55,
+    fill = NA,
+    label.colour = NA,
+    label.padding = unit(0, "lines"),
+    show.legend = FALSE
+  ) +
+  facet_wrap(
+    ~ Strain,
+    ncol = 2,
+    scales = "free_x"
+  ) +
+  coord_flip(clip = "off") +
+  scale_fill_manual(values = biofilm_fills, drop = FALSE) +
+  scale_color_manual(values = biofilm_point_colors, drop = FALSE) +
+  scale_y_continuous(
+    expand = expansion(mult = c(0.08, 0.35))
+  ) +
+  labs(
+    x = NULL,
+    y = "Biomass (OD 540 nm)",
+    fill = "Treatment",
+    color = "Treatment"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(size = 7.5, color = "black"),
+    axis.ticks.x = element_line(color = "black"),
+    axis.text.y = element_text(size = 10, color = "black", face = "bold"),
+    axis.title.x = element_text(size = 12, face = "bold", color = "black"),
+    axis.title.y = element_blank(),
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    strip.text = ggtext::element_markdown(
+      size = 8,
+      color = "white",
+      face = "bold"
+    ),
+    strip.clip = "off",                 # stops the strip border being trimmed
+    strip.background = element_rect(
+      fill = "black",
+      color = "black",
+      linewidth = 0.35                  # matched to panel.border so edges align
+    ),
+    panel.border = element_rect(
+      color = "black",
+      fill = NA,
+      linewidth = 0.35
+    ),
+    panel.spacing = unit(0.6, "lines"),
+    plot.margin = margin(5.5, 18, 5.5, 5.5)
+  )
+
+print(p_biofilm_flip)
+
+png(
+  "biofilm_mbic_boxplot_flip.png",
+  width = 4.85,
+  height = 6.5,
+  units = "in",
+  res = 900
+)
+print(p_biofilm_flip)
+dev.off()
+
+```
+
+```{r}
+##Pull clinical isolate info for results section
+
+# ==============================================================
+# 9. Extended summary: % inhibition, log10 reduction, fold change
+# ==============================================================
+
+ct_lookup <- all_pathogens_long %>%
+  dplyr::filter(Treatment == "CT") %>%
+  dplyr::group_by(Pathogen, Timepoint) %>%
+  dplyr::summarise(
+    CT_mean_log10 = mean(Log10, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+pathogen_summary_extended <- all_pathogens_summary %>%
+  dplyr::filter(Treatment != "TSB") %>%
+  dplyr::left_join(
+    ct_lookup,
+    by = c("Pathogen", "Timepoint")
+  ) %>%
+  dplyr::mutate(
+    log10_reduction_vs_CT = CT_mean_log10 - Mean,
+    fold_reduction_vs_CT  = 10^log10_reduction_vs_CT,
+    pct_inhibition = ((CT_mean_log10 - Mean) / CT_mean_log10) * 100,
+    pct_inhibition = pmax(0, pmin(100, pct_inhibition))
+  ) %>%
+  dplyr::arrange(Pathogen, Timepoint, Treatment)
+
+print(pathogen_summary_extended, n = Inf)
+
+
+# ==============================================================
+# 10. CT reference summary
+# ==============================================================
+
+ct_reference <- all_pathogens_summary %>%
+  dplyr::filter(Treatment == "CT") %>%
+  dplyr::arrange(Pathogen, Timepoint)
+
+print(ct_reference, n = Inf)
+
+
+# ==============================================================
+# 11. Clean ANOVA output
+# ==============================================================
+
+anova_results_clean <- anova_results %>%
+  dplyr::arrange(Pathogen, Timepoint)
+
+print(anova_results_clean, n = Inf)
+
+
+# ==============================================================
+# 12. Tukey HSD pairwise p values
+# ==============================================================
+
+tukey_pairwise_pathogens <- all_pathogens_long %>%
+  dplyr::filter(Treatment != "TSB") %>%
+  dplyr::group_by(Pathogen, Timepoint) %>%
+  dplyr::group_modify(~ {
+    fit <- aov(Log10 ~ Treatment, data = .x)
+    tuk <- TukeyHSD(fit)$Treatment
+
+    as.data.frame(tuk) %>%
+      tibble::rownames_to_column("contrast") %>%
+      dplyr::rename(
+        diff_log10 = diff,
+        lower_ci   = lwr,
+        upper_ci   = upr,
+        p_adj      = `p adj`
+      )
+  }) %>%
+  dplyr::ungroup() %>%
+  dplyr::arrange(Pathogen, Timepoint, p_adj)
+
+print(tukey_pairwise_pathogens, n = Inf)
+
+
+# ==============================================================
+# 13. Tukey comparisons versus CT only
+# ==============================================================
+
+tukey_vs_CT_pathogens <- tukey_pairwise_pathogens %>%
+  dplyr::filter(grepl("CT", contrast)) %>%
+  dplyr::arrange(Pathogen, Timepoint, p_adj)
+
+print(tukey_vs_CT_pathogens, n = Inf)
+
+```
+

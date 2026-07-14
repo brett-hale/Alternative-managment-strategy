@@ -1,0 +1,1109 @@
+---
+title: "Performance Data"
+author: "BH"
+date: "2024-05-30"
+output: html_document
+---
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggpubr)
+library(stringr)
+library(RColorBrewer)
+
+```
+
+```{r}
+###Import data
+Moisture <- read.csv("~/Documents/DeQueen_Litter/Moisture.csv")
+Temporal.mortality <- read.csv("~/Documents/DeQueen_Litter/Temporal.mortality.csv")
+Cumulative.mortality <- read.csv("~/Documents/DeQueen_Litter/Cumulative.mortality.csv")
+Temporal.mortality.growout.4 <- read.csv("~/Documents/DeQueen_Litter/Temporal.mortality.growout.4.csv")
+Cumulative.mortality.baseline <- read.csv("~/Documents/DeQueen_Litter/Cumulative.mortality.baseline.csv")
+
+```
+
+```{r}
+##Let's start with moisture
+##We will first summarize mean + SEM
+summary_df_moisture <- Moisture %>%
+  group_by(Growout, Treatment) %>%
+  summarise(
+    Mean = mean(Level, na.rm = TRUE),
+    SEM = sd(Level, na.rm = TRUE) / sqrt(n())
+  )
+
+Moisture$Growout <- factor(Moisture$Growout, levels = c("Pre-treatment", "1", "2", "3"))
+
+##Visualization 1
+# Calculate mean of Level for each combination of Growout and Treatment for plotting the lines
+means <- Moisture %>%
+  group_by(Growout, Treatment) %>%
+  summarise(Mean = mean(Level), .groups = 'drop')
+
+# Create the plot
+ggplot(Moisture, aes(x = Growout, y = Level, fill = Treatment)) +
+  geom_col(aes(y = 0), alpha = 0, width = 1) +  # Temporary invisible layer for alignment
+  geom_rect(aes(xmin = which(levels(as.factor(Growout)) == "1") - 0.5,
+                xmax = which(levels(as.factor(Growout)) == "1") + 0.5,
+                ymin = -Inf, ymax = Inf), alpha = 0.5, fill = "lightgray") +
+  geom_rect(aes(xmin = which(levels(as.factor(Growout)) == "3") - 0.5,
+                xmax = which(levels(as.factor(Growout)) == "3") + 0.5,
+                ymin = -Inf, ymax = Inf), alpha = 0.5, fill = "lightgray") +
+  geom_boxplot(color = 'black', alpha = 0.5) +
+  #geom_violin() +
+  geom_point(shape = 21, color = 'black', position = position_dodge(width = 0.75), alpha = 0.7, show.legend = FALSE) +
+  geom_line(data = means, aes(x = Growout, y = Mean, group = Treatment, color = Treatment), position = position_dodge(width = 0.75), show.legend = FALSE) +
+  stat_summary(fun.y = "mean", geom = "point", size = 4,
+               position = position_dodge(width = 0.75), color = "black", shape = 3, show.legend = FALSE) +
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 12, color = 'black'),
+        axis.text.y = element_text(size = 12, color = 'black'),
+        axis.title.x = element_text(size = 14, face = 'bold', color = 'black'),
+        axis.title.y = element_text(size = 14, face = 'bold', color = 'black'),
+        legend.title = element_text(size = 12, face = 'bold'),
+        legend.text = element_text(size = 10), 
+        legend.position = 'top',
+        legend.background = element_rect(fill = NA)) +
+  labs(y = "Moisture (%)")
+
+ggsave("Moisture_1.png", width = 6, height = 3.5, units = "in", dpi = 900)
+
+```
+
+```{r}
+##Let's run the statistics add add to the polished plot
+
+##Rename Pretreatment to Baseline
+Moisture <- Moisture %>%
+  mutate(Growout = recode(Growout, `Pre-treatment` = "Baseline"))
+
+##Let's start with the baseline
+Moisture.baseline <- Moisture %>%
+  filter(Growout == "Baseline")
+
+# Perform a t-test to compare the means of Level between Treatment groups IndigoLT and Control
+t.test.moisture.baseline <- t.test(Level ~ Treatment, data = Moisture.baseline)
+
+##Now, for the remaining growouts
+Moisture.real <- Moisture %>%
+  filter(Growout != "Baseline")
+
+
+# Model with Growout as a fixed effect and its interaction with Treatment
+library(lme4)
+library(glmmTMB)
+
+model <- glmmTMB(Level ~ Treatment * Growout + (1 | House), data = Moisture.real)
+
+# Print the summary of the model to see results
+summary(model)
+
+##Let's simplify and look at the growouts independently
+##Data subset for each Growout
+data_growout1 <- Moisture.real[Moisture.real$Growout == "1",]
+data_growout2 <- Moisture.real[Moisture.real$Growout == "2",]
+data_growout3 <- Moisture.real[Moisture.real$Growout == "3",]
+
+##Perform Shapiro-Wilk test for normality
+shapiro_test_g1 <- shapiro.test(data_growout1$Level)
+shapiro_test_g2 <- shapiro.test(data_growout2$Level)
+shapiro_test_g3 <- shapiro.test(data_growout3$Level)
+
+##Print the results
+print("Shapiro-Wilk test results for Growout 1:")
+print(shapiro_test_g1)
+print("Shapiro-Wilk test results for Growout 2:")
+print(shapiro_test_g2)
+print("Shapiro-Wilk test results for Growout 3:")
+print(shapiro_test_g3)
+
+##Create histograms for visual inspection
+ggplot(data_growout1, aes(x = Level)) + geom_histogram(bins = 10, fill = "blue", alpha = 0.7) + ggtitle("Level Distribution in Growout 1")
+ggplot(data_growout2, aes(x = Level)) + geom_histogram(bins = 10, fill = "red", alpha = 0.7) + ggtitle("Level Distribution in Growout 2")
+ggplot(data_growout3, aes(x = Level)) + geom_histogram(bins = 10, fill = "green", alpha = 0.7) + ggtitle("Level Distribution in Growout 3")
+
+##Separate models for each Growout
+model_growout1 <- glmmTMB(Level ~ Treatment + (1 | House), data = data_growout1)
+model_growout2 <- glmmTMB(Level ~ Treatment + (1 | House), data = data_growout2)
+model_growout3 <- glmmTMB(Level ~ Treatment + (1 | House), data = data_growout3)
+
+##Print the summaries to see the results and specifically the p-values for the treatment effect in each Growout
+summary(model_growout1)
+summary(model_growout2)
+summary(model_growout3)
+
+##Collect p-values to add to ggplot
+p_value_baseline <- t.test.moisture.baseline$p.value
+
+##Extracting from the models (assuming z-values and corresponding p-values are available directly)
+p_value_growout1 <- summary(model_growout1)$coefficients$cond["TreatmentIndigoLT", "Pr(>|z|)"]
+p_value_growout2 <- summary(model_growout2)$coefficients$cond["TreatmentIndigoLT", "Pr(>|z|)"]
+p_value_growout3 <- summary(model_growout3)$coefficients$cond["TreatmentIndigoLT", "Pr(>|z|)"]
+
+##Let's assess model performance with DHARMa
+###https://cran.r-project.org/web/packages/DHARMa/vignettes/DHARMa.html#simulation-options
+##library(DHARMa)
+
+# Simulating and analyzing residuals for model_growout1
+simulation_output_growout1 <- simulateResiduals(fittedModel = model_growout1, n = 1000, seed = 123)
+plot(simulation_output_growout1)
+qqnorm(simulation_output_growout1$scaledResiduals)
+qqline(simulation_output_growout1$scaledResiduals, col = "steelblue", lwd = 2)
+testDispersion(simulation_output_growout1)
+plotResiduals(simulation_output_growout1, quantreg = TRUE)
+testOutliers(simulation_output_growout1)
+testQuantiles(simulation_output_growout1)
+
+# Simulating and analyzing residuals for model_growout2
+simulation_output_growout2 <- simulateResiduals(fittedModel = model_growout2, n = 1000, seed = 123)
+plot(simulation_output_growout2)
+qqnorm(simulation_output_growout2$scaledResiduals)
+qqline(simulation_output_growout2$scaledResiduals, col = "steelblue", lwd = 2)
+testDispersion(simulation_output_growout2)
+plotResiduals(simulation_output_growout2, quantreg = TRUE)
+testOutliers(simulation_output_growout2)
+testQuantiles(simulation_output_growout2)
+
+# Simulating and analyzing residuals for model_growout3
+simulation_output_growout3 <- simulateResiduals(fittedModel = model_growout3, n = 1000, seed = 123)
+plot(simulation_output_growout3)
+qqnorm(simulation_output_growout3$scaledResiduals)
+qqline(simulation_output_growout3$scaledResiduals, col = "steelblue", lwd = 2)
+testDispersion(simulation_output_growout3)
+plotResiduals(simulation_output_growout3, quantreg = TRUE)
+testOutliers(simulation_output_growout3)
+testQuantiles(simulation_output_growout3)
+
+
+##Creating a dataframe for ggplot
+p_values_df <- data.frame(
+  Growout = c("Baseline", "1", "2", "3"),
+  P_Value = c(p_value_baseline, p_value_growout1, p_value_growout2, p_value_growout3),
+  P_Value_Label = sprintf("p = %.3f", c(p_value_baseline, p_value_growout1, p_value_growout2, p_value_growout3))
+)
+
+##Update the P_Value_Label for parse-able text in ggplot
+p_values_df$P_Value_Label <- sprintf("italic(p) == %.3f", c(p_value_baseline, p_value_growout1, p_value_growout2, p_value_growout3))
+
+##Add p-values to ggplot
+ggplot(Moisture, aes(x = Growout, y = Level)) +
+  geom_col(aes(y = 0), alpha = 0, width = 1) +  # Temporary invisible layer for alignment
+  geom_rect(aes(xmin = which(levels(as.factor(Growout)) == "1") - 0.5,
+                xmax = which(levels(as.factor(Growout)) == "1") + 0.5,
+                ymin = -Inf, ymax = Inf), alpha = 0.5, fill = "lightgray") +
+  geom_rect(aes(xmin = which(levels(as.factor(Growout)) == "3") - 0.5,
+                xmax = which(levels(as.factor(Growout)) == "3") + 0.5,
+                ymin = -Inf, ymax = Inf), alpha = 0.5, fill = "lightgray") +
+  geom_boxplot(aes(fill = Treatment), color = 'black', alpha = 0.5) +
+  geom_point(shape = 21, color = 'black', position = position_dodge(width = 0.75), alpha = 0.7, aes(fill = Treatment)) +
+  geom_line(data = means, aes(x = Growout, y = Mean, group = Treatment, color = Treatment), position = position_dodge(width = 0.75), show.legend = FALSE) +
+  stat_summary(fun.y = "mean", geom = "point", size = 4,
+               position = position_dodge(width = 0.75), color = "black", shape = 3, show.legend = FALSE, aes(fill = Treatment)) +
+  geom_text(data = p_values_df, aes(x = Growout, y = max(Moisture$Level) * 1.1, label = P_Value_Label),
+            hjust = 0.5, color = "red", parse = TRUE) +  # Enable parsing for mathematical annotation
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 12, color = 'black'),
+        axis.text.y = element_text(size = 12, color = 'black'),
+        axis.title.x = element_text(size = 14, face = 'bold', color = 'black'),
+        axis.title.y = element_text(size = 14, face = 'bold', color = 'black'),
+        legend.title = element_text(size = 12, face = 'bold'),
+        legend.text = element_text(size = 10), 
+        legend.position = 'top',
+        legend.background = element_rect(fill = NA)) +
+  labs(y = "Moisture (%)")
+
+```
+```{r}
+##For more context, let's add % change relative to the baseline for each Growout-Treatment combination
+
+##Calculate mean Level for each combination of Treatment and Growout
+mean_levels_df <- Moisture %>%
+  group_by(Treatment, Growout) %>%
+  summarise(Mean_Level = mean(Level, na.rm = TRUE), .groups = 'drop')
+
+##Calculate percentage change from Baseline for each Growout and Treatment
+percentage_change_df <- mean_levels_df %>%
+  group_by(Treatment) %>%
+  mutate(
+    Baseline_Level = Mean_Level[Growout == "Baseline"],  # Get the baseline level for each treatment
+    Percentage_Change = (Mean_Level - Baseline_Level) / Baseline_Level * 100
+  ) %>%
+  filter(Growout != "Baseline")
+
+##Plot
+# Assuming 'dodge_width' is defined
+dodge_width <- 0.8
+
+ggplot(Moisture, aes(x = Growout, y = Level)) +
+  geom_col(aes(y = 0), alpha = 0, width = 1) +  # Temporary invisible layer for alignment
+  geom_rect(aes(xmin = which(levels(as.factor(Growout)) == "1") - 0.5,
+                xmax = which(levels(as.factor(Growout)) == "1") + 0.5,
+                ymin = -Inf, ymax = Inf), alpha = 0.5, fill = "gray90") +
+  geom_rect(aes(xmin = which(levels(as.factor(Growout)) == "3") - 0.5,
+                xmax = which(levels(as.factor(Growout)) == "3") + 0.5,
+                ymin = -Inf, ymax = Inf), alpha = 0.5, fill = "gray90") +
+  geom_boxplot(aes(fill = Treatment), color = 'black', alpha = 0.5, position = position_dodge(width = dodge_width)) +
+  geom_point(shape = 21, color = 'black', alpha = 0.7, position = position_dodge(width = dodge_width), aes(fill = Treatment)) +
+  geom_line(data = means, aes(x = Growout, y = Mean, group = Treatment, color = Treatment), position = position_dodge(width = dodge_width)) +
+  stat_summary(fun.y = mean, geom = "point", size = 4,
+               position = position_dodge(width = dodge_width), color = "black", shape = 3, aes(fill = Treatment), show.legend = FALSE) +
+  geom_text(data = p_values_df, aes(x = Growout, y = max(Moisture$Level) * 1.1, label = P_Value_Label),
+            hjust = 0.5, color = "black", parse = TRUE, show.legend = FALSE) +
+  geom_label(data = percentage_change_df, aes(x = Growout, y = min(Moisture$Level) * 0.75, label = sprintf("%.1f%%", Percentage_Change), color = Treatment),
+             hjust = 0.5, position = position_dodge(width = dodge_width), fill = "white", label.size = 0.25, label.padding = unit(0.25, "lines"), label.r = unit(0.15, "lines"), show.legend = FALSE) +
+  scale_color_manual(values = c("#002051", "#bbaf71")) +
+  scale_fill_manual(values = c("#002051", "#bbaf71")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 12, color = 'black'),
+        axis.text.y = element_text(size = 12, color = 'black'),
+        axis.title.x = element_text(size = 14, face = 'bold', color = 'black'),
+        axis.title.y = element_text(size = 14, face = 'bold', color = 'black'),
+        legend.title = element_text(size = 12, face = 'bold'),
+        legend.text = element_text(size = 10), 
+        legend.position = 'top',
+        legend.background = element_rect(fill = NA)) +
+  labs(y = "Moisture (%)")
+
+ggsave("Moisture_2.png", width = 6, height = 4, units = "in", dpi = 900)
+
+```
+```{r}
+##Let's create a version without the third growout
+# Filter the data to exclude Growout 3
+Moisture_noG3 <- subset(Moisture, Growout %in% c("1", "2", "Baseline"))
+
+# Calculate mean Level for each combination of Treatment and Growout
+mean_levels_df_noG3 <- Moisture_noG3 %>%
+  group_by(Treatment, Growout) %>%
+  summarise(Mean_Level = mean(Level, na.rm = TRUE), .groups = 'drop')
+
+# Calculate percentage change from Baseline for each Growout and Treatment
+percentage_change_df_noG3 <- mean_levels_df_noG3 %>%
+  group_by(Treatment) %>%
+  mutate(
+    Baseline_Level = Mean_Level[Growout == "Baseline"],  # Get the baseline level for each treatment
+    Percentage_Change = (Mean_Level - Baseline_Level) / Baseline_Level * 100
+  ) %>%
+  filter(Growout != "Baseline")
+
+# Creating a dataframe for ggplot using the previously stored p-values
+p_values_df_noG3 <- data.frame(
+  Growout = c("1", "2", "Baseline"),
+  P_Value = c(p_value_growout1, p_value_growout2, p_value_baseline),
+  P_Value_Label = sprintf("p = %.3f", c(p_value_growout1, p_value_growout2, p_value_baseline))
+)
+
+# Update the P_Value_Label for parse-able text in ggplot
+p_values_df_noG3$P_Value_Label <- sprintf("italic(p) == %.3f", c(p_value_growout1, p_value_growout2, p_value_baseline))
+
+# Plot
+dodge_width <- 0.8
+
+ggplot(Moisture_noG3, aes(x = Growout, y = Level)) +
+  geom_col(aes(y = 0), alpha = 0, width = 1) +  # Temporary invisible layer for alignment
+  geom_rect(aes(xmin = which(levels(as.factor(Growout)) == "1") - 0.5,
+                xmax = which(levels(as.factor(Growout)) == "1") + 0.5,
+                ymin = -Inf, ymax = Inf), alpha = 0.5, fill = "gray90") +
+  geom_boxplot(aes(fill = Treatment), color = 'black', alpha = 0.9, position = position_dodge(width = dodge_width)) +
+  stat_summary(
+    aes(fill = Treatment),
+    fun = mean,
+    geom = "point",
+    shape = 23,
+    size = 3,
+    color = "white",
+    position = position_dodge(width = 0.75),
+    show.legend = FALSE) +
+  geom_jitter(
+    aes(color = Treatment),
+    shape = 21,
+    size = 1.25,
+    alpha = 0.9,
+    fill = "white",  # Point fill stays white
+    position = position_jitterdodge(
+      jitter.width = 0.1,
+      dodge.width = 0.75
+    ),
+    show.legend = FALSE
+  ) +
+  geom_line(data = mean_levels_df_noG3, aes(x = Growout, y = Mean_Level, group = Treatment, color = Treatment), position = position_dodge(width = dodge_width)) +
+  
+  geom_text(data = p_values_df_noG3, aes(x = Growout, y = max(Moisture$Level) * 1.1, label = P_Value_Label),
+            hjust = 0.5, color = "black", parse = TRUE, show.legend = FALSE) +
+  geom_label(data = percentage_change_df_noG3, aes(x = Growout, y = min(Moisture_noG3$Level) * 0.75, label = sprintf("%.1f%%", Percentage_Change), color = Treatment),
+             hjust = 0.5, position = position_dodge(width = dodge_width), fill = "white", label.size = 0.25, label.padding = unit(0.25, "lines"), label.r = unit(0.15, "lines"), show.legend = FALSE) +
+  scale_color_manual(values = c("Control" = "black", "IndigoLT" = "black")) +
+  scale_fill_manual(values = c("Control" = "#f8765c", "IndigoLT" = "#221150")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 12, color = 'black'),
+        axis.text.y = element_text(size = 12, color = 'black'),
+        axis.title.x = element_text(size = 14, face = 'bold', color = 'black'),
+        axis.title.y = element_text(size = 14, face = 'bold', color = 'black'),
+        legend.title = element_text(size = 12, face = 'bold'),
+        legend.text = element_text(size = 10), 
+        legend.position = 'top',
+        legend.background = element_rect(fill = NA)) +
+  labs(y = "Moisture (%)")
+
+ggsave("Moisture_noG3.png", width = 6, height = 4, units = "in", dpi = 900)
+
+```
+
+```{r}
+##Now we will move on to mortality
+
+##Let's first combined Temporal mortality (3 growout during the microbiome analysis) with Temporal.mortality.growout.4 (final growout)
+Temporal.mortality <- rbind(Temporal.mortality, Temporal.mortality.growout.4)
+
+
+##Calculate cumulative mortality
+cumulative_mortality_df <- Temporal.mortality %>%
+  group_by(Growout, House) %>%
+  arrange(Growout, House, Week) %>%  # Ensure the data is ordered by week
+  mutate(Cumulative_Mortality = cumsum(Level)) %>%
+  ungroup()
+
+##Make Week a factor
+cumulative_mortality_df <- cumulative_mortality_df %>%
+  mutate(
+    Week = factor(Week, levels = 1:9)  # Ensure Week is treated as a factor with levels 1 through 9
+  )
+
+##Plot
+
+##Function to create plots for each Growout
+create_plot <- function(data) {
+  ggplot(data, aes(x = Week, y = Cumulative_Mortality, fill = Treatment, color = Treatment)) +
+    geom_line() +  # Add line plot for each Treatment
+    geom_point(shape = 21, color = 'black', size = 3) +  # Add points for each data entry
+    stat_summary(fun.y = mean, geom = "point", size = 4,  # Add a point for the mean of each Treatment per week
+                 color = "black", shape = 3, aes(fill = Treatment), show.legend = FALSE) +
+    scale_color_manual(values = c("#002051", "#bbaf71")) +  # Define custom colors for lines
+    scale_fill_manual(values = c("#002051", "#bbaf71")) +  # Define custom fill colors for points and summary
+    labs(x = "Week", y = "Cumulative Mortality") +
+    theme_bw() +
+    theme(axis.title.x = element_text(size = 12), 
+          axis.title.y = element_text(size = 12))
+}
+
+##List to store plots
+plots <- list()
+
+##Generate a plot for each Growout
+growouts <- unique(cumulative_mortality_df$Growout)
+for (g in growouts) {
+  growout_data <- filter(cumulative_mortality_df, Growout == g)
+  plots[[paste("Growout", g)]] <- create_plot(growout_data)
+}
+
+##Display plots (example for Growout 1, adapt as needed or loop through to display all)
+print(plots[["Growout 1"]])
+
+```
+
+```{r}
+# Calculate mean, SEM for each Treatment, Week, and Growout
+statistical_summary_df <- cumulative_mortality_df %>%
+  group_by(Growout, Treatment, Week) %>%
+  summarise(
+    Mean_Cumulative_Mortality = mean(Cumulative_Mortality),
+    SEM = sd(Cumulative_Mortality) / sqrt(n()),  # Standard Error of the Mean
+    .groups = 'drop'
+  )
+
+# Function to create plots for each Growout
+create_plot <- function(data, actual_data, growout_number) {
+  ggplot(data, aes(x = Week, y = Mean_Cumulative_Mortality, group = Treatment, fill = Treatment, color = Treatment)) +
+    geom_line() +  # Line plot for mean cumulative mortality per Treatment
+    geom_errorbar(aes(ymin = Mean_Cumulative_Mortality - SEM, ymax = Mean_Cumulative_Mortality + SEM), width = 0.2) +  # Error bars for SEM
+    geom_point(data = actual_data, aes(x = Week, y = Cumulative_Mortality, color = Treatment), shape = 21, color = 'black', size = 3) +
+    scale_color_manual(values = c("#bbaf71", "#002051")) +
+    scale_fill_manual(values = c("#bbaf7170", "#00205170")) +
+    labs(x = "Week", y = "Cumulative Mortality") +
+    theme_bw() +
+    theme(axis.text.x = element_text(size = 12, color = 'black'),
+        axis.text.y = element_text(size = 12, color = 'black'),
+        axis.title.x = element_text(size = 14, face = 'bold', color = 'black'),
+        axis.title.y = element_text(size = 14, face = 'bold', color = 'black'),
+        legend.title = element_text(size = 12, face = 'bold'),
+        legend.text = element_text(size = 10), 
+        legend.position = 'none')
+}
+
+# Generate a plot for each Growout
+plots <- list()
+for (g in unique(cumulative_mortality_df$Growout)) {
+  summary_data <- filter(statistical_summary_df, Growout == g)
+  actual_data <- filter(cumulative_mortality_df, Growout == g)
+  plots[[paste("Growout", g)]] <- create_plot(summary_data, actual_data, g)
+}
+
+##Print plots
+print(plots[["Growout 1"]])
+print(plots[["Growout 2"]])
+print(plots[["Growout 3"]])
+print(plots[["Growout 4"]])
+
+```
+
+```{r}
+##Let's add p-values
+##Perform t-tests for each combination of Growout and Week
+p_value_df <- cumulative_mortality_df %>%
+  group_by(Growout, Week) %>%
+  do({
+    test_result <- t.test(Cumulative_Mortality ~ Treatment, data = .)
+    data.frame(p_value = test_result$p.value)
+  }) %>%
+  ungroup() %>%
+  mutate(
+    Growout = rep(unique(cumulative_mortality_df$Growout), each = 9),
+    Week = rep(1:9, times = length(unique(cumulative_mortality_df$Growout)))
+  )
+
+# Calculate the maximum y-position for text placement
+max_positions_df <- cumulative_mortality_df %>%
+  group_by(Growout, Week) %>%
+  summarise(Max_Cumulative_Mortality = max(Cumulative_Mortality), .groups = 'drop')
+
+# Ensure Week is a factor in both dataframes
+p_value_df$Week <- factor(p_value_df$Week, levels = 1:9)
+max_positions_df$Week <- factor(max_positions_df$Week, levels = 1:9)
+
+# Now perform the left join
+p_value_positioned_df <- left_join(p_value_df, max_positions_df, by = c("Growout", "Week"))
+
+# Adjust the position slightly above the maximum for visibility
+p_value_positioned_df$Text_Position <- p_value_positioned_df$Max_Cumulative_Mortality * 1.1
+
+create_plot <- function(data, actual_data, p_values, growout_number) {
+  ggplot(data, aes(x = Week, y = Mean_Cumulative_Mortality, group = Treatment, fill = Treatment, color = Treatment)) +
+    geom_line() +  # Line plot for mean cumulative mortality per Treatment
+    geom_errorbar(aes(ymin = Mean_Cumulative_Mortality - SEM, ymax = Mean_Cumulative_Mortality + SEM), width = 0.2) +  # Error bars for SEM
+    geom_point(data = actual_data, aes(x = Week, y = Cumulative_Mortality, color = Treatment), shape = 21, color = 'black', size = 3, alpha = 0.7) +
+    geom_text(data = p_values, aes(x = Week, y = Text_Position, label = sprintf("italic(p) == %.3f", p_value)), inherit.aes = FALSE, parse = TRUE, color = "black",
+              size = 3.5) +  # Make 'p' italic and ensure no inheritance of other aesthetics
+    scale_color_manual(values = c("#221150", "#f8765c")) +
+    scale_fill_manual(values = c("#22115070", "#f8765c70")) +  #"Control" = "#f8765c", "IndigoLT" = "#221150"
+    labs(x = "Week", y = "Cumulative Mortality") +
+    theme_bw() +
+    theme(axis.text.x = element_text(size = 12, color = 'black'),
+          axis.text.y = element_text(size = 12, color = 'black'),
+          axis.title.x = element_text(size = 14, face = 'bold', color = 'black'),
+          axis.title.y = element_text(size = 14, face = 'bold', color = 'black'),
+          legend.title = element_text(size = 12, face = 'bold'),
+          legend.text = element_text(size = 10), 
+          legend.position = 'none')
+}
+
+
+# Generate a plot for each Growout
+plots <- list()
+for (g in unique(cumulative_mortality_df$Growout)) {
+  summary_data <- filter(statistical_summary_df, Growout == g)
+  actual_data <- filter(cumulative_mortality_df, Growout == g)
+  p_values_data <- filter(p_value_positioned_df, Growout == g)
+  plots[[paste("Growout", g)]] <- create_plot(summary_data, actual_data, p_values_data, g)
+}
+
+##Print plots
+print(plots[["Growout 1"]])
+ggsave("Cumulative_Mortality_Growout1.png", width = 7, height = 4, units = "in", dpi = 900)
+
+print(plots[["Growout 2"]])
+ggsave("Cumulative_Mortality_Growout2.png", width = 7, height = 4, units = "in", dpi = 900)
+
+print(plots[["Growout 3"]])
+ggsave("Cumulative_Mortality_Growout3.png", width = 7, height = 4, units = "in", dpi = 900)
+
+print(plots[["Growout 4"]])
+ggsave("Cumulative_Mortality_Growout4.png", width = 7, height = 4, units = "in", dpi = 900)
+
+```
+
+```{r}
+##Let's now run t-tests for mortality for every Growout-Week combination
+##will use Temporal.mortality- the original df
+##library(broom)
+
+##Convert Treatment to a factor and specify the order of levels explicitly
+Temporal.mortality$Treatment <- factor(Temporal.mortality$Treatment, levels = c("IndigoLT", "Control"))
+
+##Check
+levels(Temporal.mortality$Treatment)
+
+# Perform t-tests for each combination of Growout and Week and tidy the results
+temporal_t_test_results <- Temporal.mortality %>%
+  group_by(Growout, Week) %>%
+  do(tidy(t.test(Level ~ Treatment, data = .))) %>%
+  ungroup() %>%
+  dplyr::select(Growout, Week, estimate, statistic, p.value, method) %>%
+  rename(`Estimate (IndigoLT - Control)` = estimate)
+
+# Write the dataframe to a CSV file
+write.csv(temporal_t_test_results, "temporal_ttest.csv", row.names = FALSE)
+
+```
+
+```{r}
+##We will now look at cumulative mortality collectively
+ggplot(Cumulative.mortality, aes(x = Cull_inclusion, y = Level)) +
+  geom_boxplot(aes(fill = Treatment), color = 'black', alpha = 0.5, position = position_dodge(width = dodge_width)) +
+  geom_point(shape = 21, color = 'black', alpha = 0.7, position = position_dodge(width = dodge_width), aes(fill = Treatment), size = 3) +
+  scale_color_manual(values = c("#002051", "#bbaf71")) +
+  scale_fill_manual(values = c("#002051", "#bbaf71")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 12, color = 'black'),
+        axis.text.y = element_text(size = 12, color = 'black'),
+        axis.title.x = element_blank(),
+        axis.title.y = element_text(size = 14, face = 'bold', color = 'black'),
+        legend.title = element_text(size = 12, face = 'bold'),
+        legend.text = element_text(size = 10), 
+        legend.position = 'top',
+        legend.background = element_rect(fill = NA)) +
+  labs(y = "Mortality")
+
+##GLMMs
+##Filter the dataframe for "with culls"
+with_culls_df <- filter(Cumulative.mortality, Cull_inclusion == "with culls")
+
+##Filter the dataframe for "without culls"
+without_culls_df <- filter(Cumulative.mortality, Cull_inclusion == "without culls")
+
+##Shapiro-Wilk test for with culls
+shapiro_test_with_culls <- shapiro.test(with_culls_df$Level) ##W = 0.94615, p-value = 0.3678
+
+##Shapiro-Wilk test for without culls
+shapiro_test_without_culls <- shapiro.test(without_culls_df$Level) ##W = 0.93864, p-value = 0.2746
+
+##Histograms
+ggplot(with_culls_df, aes(x = Level)) +
+  geom_histogram(bins = 10, fill = "blue", alpha = 0.7) +
+  ggtitle("Level Distribution for 'with culls'")
+
+ggplot(without_culls_df, aes(x = Level)) +
+  geom_histogram(bins = 10, fill = "red", alpha = 0.7) +
+  ggtitle("Level Distribution for 'without culls'")
+
+##GLMMs
+##With culls
+model_with_culls <- glmmTMB(Level ~ Treatment + (1 | Growout), data = with_culls_df)
+
+##Print the summaries to see the results and specifically the p-values for the treatment effect in each Growout
+summary(model_with_culls)
+
+##Extracting from the models (assuming z-values and corresponding p-values are available directly)
+p_value_with_culls <- summary(model_with_culls)$coefficients$cond["TreatmentIndigoLT", "Pr(>|z|)"]
+
+##Model performance
+#https://cran.r-project.org/web/packages/DHARMa/vignettes/DHARMa.html#simulation-options
+# Simulating residuals using the DHARMa package
+simulation_output <- simulateResiduals(fittedModel = model_with_culls, n = 1000, seed = 123)
+
+# Plotting simulated residuals
+plot(simulation_output)
+
+# Creating a QQ plot to check for normality of residuals
+qqnorm(simulation_output$scaledResiduals)
+qqline(simulation_output$scaledResiduals, col = "steelblue", lwd = 2)
+
+# Checking for overdispersion
+testDispersion(simulation_output)
+
+# Checking for uniformity of residuals - to detect issues like heteroscedasticity
+plotResiduals(simulation_output, quantreg = TRUE)
+
+# Checking for outliers
+testOutliers(simulation_output)
+
+testQuantiles(simulation_output)
+
+###Now for without culls####
+##GLMM
+model_without_culls <- glmmTMB(Level ~ Treatment + (1 | Growout), data = without_culls_df)
+
+##Print the summary to see the results, focusing on the p-values for treatment effect
+summary(model_without_culls)
+
+##Extract p-values from the model (assuming z-values and corresponding p-values are directly available)
+p_value_without_culls <- summary(model_without_culls)$coefficients$cond["TreatmentIndigoLT", "Pr(>|z|)"]
+
+##Model performance
+# Simulating residuals using the DHARMa package for the model without culls
+simulation_output_without_culls <- simulateResiduals(fittedModel = model_without_culls, n = 1000, seed = 123)
+
+# Plotting simulated residuals
+plot(simulation_output_without_culls)
+
+# Creating a QQ plot to check for normality of residuals
+qqnorm(simulation_output_without_culls$scaledResiduals)
+qqline(simulation_output_without_culls$scaledResiduals, col = "steelblue", lwd = 2)
+
+# Checking for overdispersion
+testDispersion(simulation_output_without_culls)
+
+# Checking for uniformity of residuals - to detect issues like heteroscedasticity
+plotResiduals(simulation_output_without_culls, quantreg = TRUE)
+
+# Checking for outliers
+testOutliers(simulation_output_without_culls)
+
+# Testing the distribution of residuals across quantiles
+testQuantiles(simulation_output_without_culls)
+
+```
+
+```{r}
+##Add p-values to boxplot
+##Convert p_value_with_culls to a dataframe if it's not already
+p_value_with_culls <- data.frame(p_value = p_value_with_culls)
+
+##Add 'Cull_inclusion' column to the dataframe
+p_value_with_culls <- p_value_with_culls %>%
+  mutate(Cull_inclusion = "with culls")
+
+##Similarly, for p_value_without_culls
+p_value_without_culls <- data.frame(p_value = p_value_without_culls)
+
+##Add 'Cull_inclusion' column to the dataframe
+p_value_without_culls <- p_value_without_culls %>%
+  mutate(Cull_inclusion = "without culls")
+
+##Combine the dataframes
+combined_p_values <- bind_rows(p_value_with_culls, p_value_without_culls)
+
+
+ggplot(Cumulative.mortality, aes(x = Cull_inclusion, y = Level)) +
+  geom_boxplot(aes(fill = Treatment), color = 'black', alpha = 0.5, position = position_dodge(width = dodge_width)) +
+  geom_point(shape = 21, color = 'black', alpha = 0.7, position = position_dodge(width = dodge_width), aes(fill = Treatment), size = 3) +
+  geom_text(data = combined_p_values, aes(x = Cull_inclusion, y = 2750, label = sprintf("italic(p) == %.3f", p_value)), inherit.aes = FALSE, parse = TRUE, color = "black") +
+  scale_color_manual(values = c("#002051", "#bbaf71")) +
+  scale_fill_manual(values = c("#002051", "#bbaf71")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 12, color = 'black'),
+          axis.text.y = element_text(size = 12, color = 'black'),
+          #axis.title.x = element_blank(),
+          axis.title = element_text(size = 14, face = 'bold', color = 'black'),
+          legend.title = element_text(size = 12, face = 'bold'),
+          legend.text = element_text(size = 10), 
+          legend.position = c(0.09, 0.85),
+          #legend.direction = 'horizontal',
+          legend.background = element_rect(fill="gray90", size=0.5, linetype="solid", colour ="black"),
+          legend.key = element_blank()) +
+  labs(y = "Mortality", x = 'Cull Inclusion')
+
+ggsave("Overall_Cumulative_Mortality_2.png", width = 7, height = 4, units = "in", dpi = 900)
+
+```
+
+```{r}
+##Let's now update this with information for all 6 growouts
+##First, we will add the 4th growout to the with_culls_df
+
+# Create a new dataframe with the information for Growout 4
+growout4_data <- data.frame(
+  House = 1:6,
+  Level = c(1600, 1980, 1216, 1213, 1656, 2123),
+  Treatment = c("IndigoLT", "IndigoLT", "IndigoLT", "Control", "Control", "Control"),
+  predicted_levels = NA,
+  Predicted = NA,
+  Growout = 4,
+  Cull_inclusion = "with culls"
+)
+
+# Combine the new dataframe with the existing dataframe
+with_culls_df_updated <- rbind(with_culls_df, growout4_data)
+
+with_culls_df_updated$Time <- "After"
+
+##Now, we will rerun the stats
+# Perform Shapiro-Wilk test for with culls
+shapiro_test_with_culls_updated <- shapiro.test(with_culls_df_updated$Level) #W = 0.97401, p-value = 0.7656
+
+# Plot histograms
+ggplot(with_culls_df_updated, aes(x = Level)) +
+  geom_histogram(bins = 10, fill = "blue", alpha = 0.7) +
+  ggtitle("Level Distribution for 'with culls (updated)'")
+
+ggplot(without_culls_df, aes(x = Level)) +
+  geom_histogram(bins = 10, fill = "red", alpha = 0.7) +
+  ggtitle("Level Distribution for 'without culls'")
+
+# GLMMs with the updated dataframe
+model_with_culls_updated <- glmmTMB(Level ~ Treatment + (1 | Growout), data = with_culls_df_updated)
+
+# Print the summaries to see the results and specifically the p-values for the treatment effect in each Growout
+summary(model_with_culls_updated)
+
+# Extracting p-values from the models
+p_value_with_culls_updated <- summary(model_with_culls_updated)$coefficients$cond["TreatmentIndigoLT", "Pr(>|z|)"]
+
+# Model performance
+# Simulating residuals using the DHARMa package
+simulation_output_updated <- simulateResiduals(fittedModel = model_with_culls_updated, n = 1000, seed = 123)
+
+# Plotting simulated residuals
+plot(simulation_output_updated)
+
+# Creating a QQ plot to check for normality of residuals
+qqnorm(simulation_output_updated$scaledResiduals)
+qqline(simulation_output_updated$scaledResiduals, col = "steelblue", lwd = 2)
+
+# Checking for overdispersion
+testDispersion(simulation_output_updated)
+
+# Checking for uniformity of residuals - to detect issues like heteroscedasticity
+plotResiduals(simulation_output_updated, quantreg = TRUE)
+
+# Checking for outliers
+testOutliers(simulation_output_updated)
+
+testQuantiles(simulation_output_updated)
+
+```
+
+```{r}
+##Now, we look at cumulative mortality in the baseline growouts- Cumulative.mortality.baseline
+##We will have to assess temporal mortality later after receiving that data
+
+# Perform a t-test to determine differences in 'Level' between levels of 'Treatment'
+t_test_result <- t.test(Level ~ Treatment, data = Cumulative.mortality.baseline)
+
+# Extract the p-value from the t-test result
+p_value_t_test <- t_test_result$p.value
+
+##Let's get ready to combine before and after cumulative mortality dfs for visualization
+##Add time to the with_culls_df
+with_culls_df$Time <- 'After'
+
+# Add columns for predicted_levels,Predicted, and Cull_inclusion to Cumulative.mortality.baseline
+Cumulative.mortality.baseline$predicted_levels <- NA
+Cumulative.mortality.baseline$Predicted <- NA
+Cumulative.mortality.baseline$Cull_inclusion <- 'with culls'
+
+# Combine Cumulative.mortality.baseline and Cumulative.mortality
+combined_cumulative_mortality <- rbind(Cumulative.mortality.baseline, with_culls_df)
+
+# Convert Time to a factor with levels Baseline and After
+combined_cumulative_mortality$Time <- factor(combined_cumulative_mortality$Time, levels = c("Baseline", "After"))
+
+# Extract the p-value from the p_value_with_culls data frame
+p_value_with_culls_value <- p_value_with_culls$p_value[1]
+
+# Define p-values for Baseline and After
+p_values_df <- data.frame(
+  Time = factor(c("Baseline", "After"), levels = c("Baseline", "After")),
+  P_Value = c(p_value_t_test, p_value_with_culls_value),
+  P_Value_Label = sprintf("italic(p) == %.3f", c(p_value_t_test, p_value_with_culls_value))
+)
+
+# Plotting
+ggplot(combined_cumulative_mortality, aes(x = Time, y = Level, fill = Treatment)) +
+  geom_boxplot(aes(fill = Treatment), color = 'black', alpha = 0.5, position = position_dodge(width = dodge_width)) +
+  geom_point(shape = 21, color = 'black', alpha = 0.7, position = position_dodge(width = dodge_width), aes(fill = Treatment), size = 3) +
+  stat_summary(
+    aes(fill = Treatment),
+    fun = mean,
+    geom = "point",
+    shape = 23,
+    size  = 5,
+    color = "white",
+    position = position_dodge(width = dodge_width),
+    show.legend = FALSE
+  ) +
+  geom_text(data = p_values_df, aes(x = Time, y = max(combined_cumulative_mortality$Level) * 1.1, label = P_Value_Label), inherit.aes = FALSE, parse = TRUE, color = "black", hjust = 0.5) +
+  scale_color_manual(values = c("#f8765c", "#221150")) +
+  scale_fill_manual(values = c("#f8765c", "#221150")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 12, color = 'black'),
+        axis.text.y = element_text(size = 12, color = 'black'),
+        #axis.title.x = element_blank(),
+        axis.title = element_text(size = 14, face = 'bold', color = 'black'),
+        legend.title = element_text(size = 12, face = 'bold'),
+        legend.text = element_text(size = 10), 
+        legend.position = 'none') +
+  labs(y = "Mortality")
+
+ggsave("Mortality_plot.png", width = 7, height = 4, units = "in", dpi = 900)
+
+##Second plot, for legend
+ggplot(combined_cumulative_mortality, aes(x = Time, y = Level, fill = Treatment)) +
+  geom_boxplot(aes(fill = Treatment), color = 'black', alpha = 0.5, position = position_dodge(width = dodge_width)) +
+  geom_point(shape = 21, color = 'black', alpha = 0.7, position = position_dodge(width = dodge_width), aes(fill = Treatment), size = 3, show.legend = FALSE) +
+  stat_summary(fun = mean, geom = "point", size = 4,
+               position = position_dodge(width = dodge_width), color = "black", shape = 3, aes(fill = Treatment), show.legend = FALSE) +
+  geom_text(data = p_values_df, aes(x = Time, y = max(combined_cumulative_mortality$Level) * 1.1, label = P_Value_Label), inherit.aes = FALSE, parse = TRUE, color = "black", hjust = 0.5) +
+  scale_color_manual(values = c("#f8765c", "#221150")) + 
+  scale_fill_manual(values = c("#f8765c", "#221150")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 12, color = 'black'),
+        axis.text.y = element_text(size = 12, color = 'black'),
+        #axis.title.x = element_blank(),
+        axis.title = element_text(size = 14, face = 'bold', color = 'black'),
+        legend.title = element_text(size = 12, face = 'bold'),
+        legend.text = element_text(size = 10), 
+        legend.position = 'top') +
+  labs(y = "Mortality")
+
+ggsave("Mortality_plot_legend.png", width = 7, height = 4, units = "in", dpi = 900)
+
+```
+
+```{r}
+##Let's add dharma comparison for consistency
+## ============================================================
+## DHARMa diagnostics for cumulative mortality GLMM
+## Model object: model_with_culls_updated
+## Matches manuscript diagnostics: simulateResiduals (n=1000),
+## testDispersion, testOutliers, testQuantiles + optional plots
+## ============================================================
+
+## Settings
+n_sims <- 1000
+set.seed(123)
+plot_dharma <- TRUE  # set FALSE if you only want printed output
+
+## Run DHARMa diagnostics
+simres <- DHARMa::simulateResiduals(
+  fittedModel = model_with_culls_updated,
+  n = n_sims
+)
+
+disp   <- DHARMa::testDispersion(simres)
+outs   <- DHARMa::testOutliers(simres)
+quants <- DHARMa::testQuantiles(simres)
+
+cat("\n--- DHARMa diagnostics: cumulative mortality GLMM ---\n")
+cat("Model object: model_with_culls_updated\n")
+cat("Simulations:", n_sims, "\n\n")
+
+cat("Dispersion test:\n")
+print(disp)
+cat("\nOutlier test:\n")
+print(outs)
+cat("\nQuantile fit test:\n")
+print(quants)
+
+## Optional plotting
+if (plot_dharma) {
+  plot(simres, main = "DHARMa residual diagnostics: cumulative mortality GLMM")
+}
+
+## Optional: quick pass/fail check following manuscript criteria
+acceptable <- (disp$p.value > 0.05) && (outs$p.value > 0.05) && (quants$p.value > 0.05)
+
+cat("\nModel acceptability (per manuscript criteria):\n")
+cat("Dispersion p > 0.05 AND Outliers p > 0.05 AND Quantiles p > 0.05 ?\n")
+cat("ACCEPTABLE =", acceptable, "\n")
+
+
+```
+
+```{r}
+##Let's pull mortality summary statistics
+library(dplyr)
+
+summary_stats <- combined_cumulative_mortality %>%
+  group_by(Treatment, Time) %>%
+  summarise(
+    Mean = mean(Level, na.rm = TRUE),
+    SD = sd(Level, na.rm = TRUE),
+    N = n(),
+    .groups = "drop"
+  )
+
+print(summary_stats)
+
+```
+
+```{r}
+# ==============================================================
+# Cumulative Mortality Summary Statistics (DeQueen)
+# ==============================================================
+
+library(dplyr)
+library(tidyr)
+
+# ==============================================================
+# 1. Per-Growout × Time: which treatment had lower mortality?
+# ==============================================================
+
+growout_comparison <- combined_cumulative_mortality %>%
+  dplyr::group_by(Time, Growout, Treatment) %>%
+  dplyr::summarise(Mean_Total = mean(Level, na.rm = TRUE), .groups = "drop") %>%
+  tidyr::pivot_wider(names_from = Treatment, values_from = Mean_Total) %>%
+  dplyr::mutate(
+    Difference = Control - IndigoLT,
+    Lower_In = ifelse(IndigoLT < Control, "IndigoLT",
+               ifelse(IndigoLT == Control, "Tie", "Control"))
+  )
+
+cat("\n=== Per-Growout comparison ===\n")
+print(growout_comparison, n = Inf)
+
+n_lower_baseline <- sum(growout_comparison$Lower_In[growout_comparison$Time == "Baseline"] == "IndigoLT")
+n_total_baseline <- sum(growout_comparison$Time == "Baseline")
+n_lower_after <- sum(growout_comparison$Lower_In[growout_comparison$Time == "After"] == "IndigoLT")
+n_total_after <- sum(growout_comparison$Time == "After")
+
+cat("\nBaseline: IndigoLT lower in", n_lower_baseline, "out of", n_total_baseline, "growouts\n")
+cat("After: IndigoLT lower in", n_lower_after, "out of", n_total_after, "growouts\n")
+
+# ==============================================================
+# 2. Overall difference (pooled across Time periods)
+# ==============================================================
+
+overall_total <- combined_cumulative_mortality %>%
+  dplyr::group_by(Treatment) %>%
+  dplyr::summarise(Total_Birds = sum(Level, na.rm = TRUE), .groups = "drop")
+
+cat("\n=== Overall total cumulative mortality ===\n")
+print(overall_total)
+
+diff_overall <- overall_total$Total_Birds[overall_total$Treatment == "Control"] -
+  overall_total$Total_Birds[overall_total$Treatment == "IndigoLT"]
+pct_reduction <- (diff_overall / overall_total$Total_Birds[overall_total$Treatment == "Control"]) * 100
+
+cat("Overall difference:", diff_overall, "birds\n")
+cat("Percent reduction:", round(pct_reduction, 1), "%\n")
+
+# ==============================================================
+# 3. Difference split by Time period
+# ==============================================================
+
+period_total <- combined_cumulative_mortality %>%
+  dplyr::group_by(Time, Treatment) %>%
+  dplyr::summarise(Total_Birds = sum(Level, na.rm = TRUE), .groups = "drop") %>%
+  tidyr::pivot_wider(names_from = Treatment, values_from = Total_Birds) %>%
+  dplyr::mutate(
+    Difference = Control - IndigoLT,
+    Pct_Reduction = round((Difference / Control) * 100, 1)
+  )
+
+cat("\n=== Total cumulative mortality by Time period ===\n")
+print(period_total)
+
+# ==============================================================
+# 4. Mean ± SEM per Treatment × Time
+#    Each house-growout combination is one observation
+# ==============================================================
+
+overall_summary <- combined_cumulative_mortality %>%
+  dplyr::group_by(Treatment, Time) %>%
+  dplyr::summarise(
+    Mean_Total = mean(Level, na.rm = TRUE),
+    SD_Total   = sd(Level, na.rm = TRUE),
+    n          = dplyr::n(),
+    SEM_Total  = SD_Total / sqrt(n),
+    .groups = "drop"
+  )
+
+cat("\n=== Mean ± SEM cumulative mortality per house ===\n")
+print(overall_summary)
+
+# ==============================================================
+# 5. Overall Mean ± SEM (pooled across Time periods)
+# ==============================================================
+
+overall_pooled <- combined_cumulative_mortality %>%
+  dplyr::group_by(Treatment) %>%
+  dplyr::summarise(
+    Mean_Total = mean(Level, na.rm = TRUE),
+    SD_Total   = sd(Level, na.rm = TRUE),
+    n          = dplyr::n(),
+    SEM_Total  = SD_Total / sqrt(n),
+    .groups = "drop"
+  )
+
+cat("\n=== Overall Mean ± SEM (pooled) ===\n")
+print(overall_pooled)
+
+cat("\nSummary statistics complete.\n")
+```
+
+```{r}
+##New plot with Alternative legend
+## Mortality plot with IndigoLT renamed to Alternative
+## Original data frames are not modified
+
+library(ggplot2)
+library(dplyr)
+
+dodge_width <- 0.75
+
+combined_cumulative_mortality_plot <- combined_cumulative_mortality %>%
+  dplyr::mutate(
+    Treatment = dplyr::recode(Treatment, "IndigoLT" = "Alternative"),
+    Treatment = factor(Treatment, levels = c("Control", "Alternative"))
+  )
+
+p_values_df_plot <- p_values_df
+
+ggplot(combined_cumulative_mortality_plot, aes(x = Time, y = Level, fill = Treatment)) +
+  geom_boxplot(
+    aes(fill = Treatment),
+    color = "black",
+    alpha = 0.5,
+    position = position_dodge(width = dodge_width)
+  ) +
+  geom_point(
+    shape = 21,
+    color = "black",
+    alpha = 0.7,
+    position = position_dodge(width = dodge_width),
+    aes(fill = Treatment),
+    size = 3,
+    show.legend = FALSE
+  ) +
+  stat_summary(
+    fun = mean,
+    geom = "point",
+    size = 4,
+    position = position_dodge(width = dodge_width),
+    color = "black",
+    shape = 3,
+    aes(fill = Treatment),
+    show.legend = FALSE
+  ) +
+  geom_text(
+    data = p_values_df_plot,
+    aes(
+      x = Time,
+      y = max(combined_cumulative_mortality_plot$Level, na.rm = TRUE) * 1.1,
+      label = P_Value_Label
+    ),
+    inherit.aes = FALSE,
+    parse = TRUE,
+    color = "black",
+    hjust = 0.5
+  ) +
+  scale_color_manual(
+    values = c("Control" = "#f8765c", "Alternative" = "#221150"),
+    breaks = c("Control", "Alternative")
+  ) +
+  scale_fill_manual(
+    values = c("Control" = "#f8765c", "Alternative" = "#221150"),
+    breaks = c("Control", "Alternative")
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(size = 12, color = "black"),
+    axis.text.y = element_text(size = 12, color = "black"),
+    axis.title = element_text(size = 14, face = "bold", color = "black"),
+    legend.title = element_text(size = 12, face = "bold"),
+    legend.text = element_text(size = 10),
+    legend.position = "top"
+  ) +
+  labs(
+    y = "Mortality",
+    fill = "Treatment",
+    color = "Treatment"
+  )
+
+ggsave("Mortality_plot_legend_alternative.png", width = 7, height = 4, units = "in", dpi = 900)
+
+```
+

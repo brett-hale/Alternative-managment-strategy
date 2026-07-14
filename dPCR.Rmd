@@ -1,0 +1,709 @@
+---
+title: "dPCR"
+author: "BH"
+date: "2026-02-27"
+output: html_document
+---
+
+```{r}
+##Let's visualize max ΔG for multiplex
+##Pairwise in silico heterodimer prediction performed with IDT's the OligoAnalyzer tool: https://www.idtdna.com/pages/tools/oligoanalyzer
+
+library(ggplot2)
+library(reshape2)
+
+# Primer name mapping
+name_map <- c(
+  "ACAGGTGCTAATACCGCATAAT" = "CecorumF",
+  "CCCACCAACTAGCTAATGCAC" = "CecorumR",
+  "ACCGCATGGTAGATGGATGAAAGGC" = "CecorumP",
+  "GACCGTTGCTGCGACAGTTA" = "HiraeF",
+  "GAGCCTGCGACGTTCAACAT" = "HiraeR",
+  "TGGCTTAGGGTTTGGACACACGAT" = "HiraeP"
+)
+
+# Pairwise data
+df <- data.frame(
+  Sequence1 = c("ACAGGTGCTAATACCGCATAAT","ACAGGTGCTAATACCGCATAAT","ACAGGTGCTAATACCGCATAAT",
+                 "ACAGGTGCTAATACCGCATAAT","ACAGGTGCTAATACCGCATAAT","CCCACCAACTAGCTAATGCAC",
+                 "CCCACCAACTAGCTAATGCAC","CCCACCAACTAGCTAATGCAC","CCCACCAACTAGCTAATGCAC",
+                 "ACCGCATGGTAGATGGATGAAAGGC","ACCGCATGGTAGATGGATGAAAGGC","ACCGCATGGTAGATGGATGAAAGGC",
+                 "GACCGTTGCTGCGACAGTTA","GACCGTTGCTGCGACAGTTA","GAGCCTGCGACGTTCAACAT"),
+  Sequence2 = c("CCCACCAACTAGCTAATGCAC","ACCGCATGGTAGATGGATGAAAGGC","GACCGTTGCTGCGACAGTTA",
+                 "GAGCCTGCGACGTTCAACAT","TGGCTTAGGGTTTGGACACACGAT","ACCGCATGGTAGATGGATGAAAGGC",
+                 "GACCGTTGCTGCGACAGTTA","GAGCCTGCGACGTTCAACAT","TGGCTTAGGGTTTGGACACACGAT",
+                 "GACCGTTGCTGCGACAGTTA","GAGCCTGCGACGTTCAACAT","TGGCTTAGGGTTTGGACACACGAT",
+                 "GAGCCTGCGACGTTCAACAT","TGGCTTAGGGTTTGGACACACGAT","TGGCTTAGGGTTTGGACACACGAT"),
+  DeltaG = c(-6.57, -5.37, -8.70, -8.70, -4.50, -6.57,
+             -5.24, -5.09, -6.97, -8.70, -8.70, -4.41,
+             -5.24, -4.95, -4.95)
+)
+
+# Replace sequences with primer names
+df$Primer1 <- name_map[df$Sequence1]
+df$Primer2 <- name_map[df$Sequence2]
+
+# Define primer order
+primer_order <- c("CecorumF", "CecorumR", "CecorumP", "HiraeF", "HiraeR", "HiraeP")
+
+# Build symmetric matrix for heatmap
+mat <- matrix(NA, nrow = 6, ncol = 6, dimnames = list(primer_order, primer_order))
+
+for (i in 1:nrow(df)) {
+  mat[df$Primer1[i], df$Primer2[i]] <- df$DeltaG[i]
+  mat[df$Primer2[i], df$Primer1[i]] <- df$DeltaG[i]
+}
+
+# Melt for ggplot
+melted <- melt(mat, na.rm = TRUE)
+colnames(melted) <- c("Primer1", "Primer2", "DeltaG")
+melted$Primer1 <- factor(melted$Primer1, levels = primer_order)
+melted$Primer2 <- factor(melted$Primer2, levels = primer_order)
+
+# Keep only lower triangle
+melted_lower <- melted[as.numeric(melted$Primer1) > as.numeric(melted$Primer2), ]
+
+melted_lower <- droplevels(melted_lower)
+
+ggplot(melted_lower, aes(x = Primer2, y = Primer1, fill = DeltaG)) +
+  geom_tile(color = "black", linewidth = 0.5) +
+  geom_text(aes(label = round(DeltaG, 2)), size = 3.5, color = "black") +
+  scale_fill_gradient(low = "#d3436e", high = "white",
+                      name = expression(Delta*G~"(kcal/mol)"),
+                      guide = guide_colorbar(frame.colour = "black",
+                                             ticks.colour = "black")) +
+  theme_minimal() +
+  labs(title = "Heterodimer ΔG Between All Multiplex Primer/Probe Pairs",
+       x = "", y = "") +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, color = "black"),
+    axis.text.y = element_text(color = "black"),
+    plot.title = element_text(color = "black"),
+    legend.text = element_text(color = "black"),
+    legend.title = element_text(color = "black"),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.grid = element_blank()
+  )
+
+
+```
+
+```{r}
+# Melt for ggplot
+melted <- reshape2::melt(mat, na.rm = TRUE)
+colnames(melted) <- c("Primer1", "Primer2", "DeltaG")
+
+# Use primer_order for indexing (robust)
+melted$i <- match(melted$Primer1, primer_order)
+melted$j <- match(melted$Primer2, primer_order)
+
+# Keep only lower triangle (i > j)
+melted_lower <- subset(melted, i > j)
+
+# Set factor levels:
+# x stays in normal order, y is reversed so the triangle sits at the bottom
+melted_lower$Primer2 <- factor(melted_lower$Primer2, levels = primer_order)
+melted_lower$Primer1 <- factor(melted_lower$Primer1, levels = rev(primer_order))
+
+ggplot(melted_lower, aes(x = Primer2, y = Primer1, fill = DeltaG)) +
+  geom_tile(color = "black", linewidth = 0.5) +
+  geom_text(aes(label = round(DeltaG, 2)), size = 3.5, color = "black") +
+  scale_fill_gradient(low = "#d3436e", high = "white",
+                      name = expression(Delta*G~"(kcal/mol)"),
+                      guide = guide_colorbar(frame.colour = "black",
+                                             ticks.colour = "black")) +
+  scale_x_discrete(drop = TRUE, expand = c(0, 0)) +
+  scale_y_discrete(drop = TRUE, expand = c(0, 0)) +
+  theme_minimal() +
+  labs(title = "Heterodimer ΔG Between All Multiplex Primer/Probe Pairs",
+       x = "", y = "") +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, color = "black"),
+    axis.text.y = element_text(color = "black"),
+    plot.title  = element_text(color = "black"),
+    legend.text = element_text(color = "black"),
+    legend.title = element_text(color = "black"),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background  = element_rect(fill = "white", color = NA),
+    panel.grid = element_blank()
+  )
+
+ggsave("heteroduplex.corr.png", width = 6.5, height = 4.5, units = "in", dpi = 900)
+
+
+```
+
+```{r}
+##Genus-level analysis
+entero.genus.dpcr <- read.csv("~/Documents/DeQueen_Litter/entero.genus.dpcr.csv")
+entero.qubit.clean <- read.csv("~/Documents/DeQueen_Litter/entero.qubit.clean.csv")
+```
+
+
+```{r}
+##Add metadata to genus-level dPCR results and filter to biological samples
+entero.filtered <- entero.genus.dpcr %>%
+  filter(Sample.NTC.Control %in% as.character(1:60)) %>%
+  mutate(sample_key = paste0("Sample_", Sample.NTC.Control)) %>%
+  left_join(meta, by = c("sample_key" = "Sample.ID")) %>%
+  dplyr::select(-sample_key)
+
+##Now, for every sample, take the mean of technical duplicates and filter out unnecessary data
+entero.summary <- entero.filtered %>%
+  mutate(
+    `Conc...cp.µL...dPCR.reaction.`      = as.numeric(`Conc...cp.µL...dPCR.reaction.`),
+    `Conc...cp.µL...undiluted.sample.`   = as.numeric(`Conc...cp.µL...undiluted.sample.`)
+  ) %>%
+  group_by(Sample.NTC.Control) %>%
+  summarise(
+    Conc.dpcr      = mean(`Conc...cp.µL...dPCR.reaction.`, na.rm = TRUE),
+    Conc.undiluted = mean(`Conc...cp.µL...undiluted.sample.`, na.rm = TRUE),
+    Growout        = first(Growout),
+    Position       = first(Position),
+    Treatment      = first(Treatment),
+    House          = first(House),
+    .groups = "drop"
+  )
+
+```
+
+```{r}
+##Let's add in qubit concentrations (after cleanup) to get total enterococcus load/sample
+entero.merged <- entero.summary %>%
+  inner_join(
+    entero.qubit.clean %>% dplyr::select(Sample, X260.230, X260.280, ng.uL..nanodrop., ng.uL..qubit.),
+    by = c("Sample.NTC.Control" = "Sample")
+  )
+
+##Back calculate to get per gram of litter. 
+elution_vol <- 100 
+
+entero.merged <- entero.merged %>%
+  mutate(
+    copies_per_reaction = Conc.dpcr * 15,
+    copies_per_ng       = copies_per_reaction / 4,
+    total_ng_extracted  = ng.uL..qubit. * elution_vol,
+    copies_per_gram     = copies_per_ng * total_ng_extracted / 0.25
+  )
+
+```
+
+
+```{r}
+##Visualize genus-level results
+ggplot(entero.merged, aes(x = Growout, y = copies_per_gram)) +
+  geom_boxplot(
+    aes(fill = Treatment),
+    color = "black",
+    alpha = 0.9,
+    outlier.shape = NA,
+    #position = position_dodge(width = 0.75)
+  ) +
+  stat_summary(
+    aes(fill = Treatment),
+    fun = mean,
+    geom = "point",
+    shape = 23,
+    size = 3,
+    color = "white",
+    position = position_dodge(width = 0.75),
+    show.legend = FALSE
+  ) +
+  geom_jitter(
+    aes(color = Treatment),
+    shape = 21,
+    size = 1.25,
+    alpha = 0.9,
+    fill = "white",  # Point fill stays white
+    position = position_jitterdodge(
+      jitter.width = 0.1,
+      dodge.width = 0.75
+    ),
+    show.legend = FALSE
+  ) +
+  scale_fill_manual(values = c("Control" = "#f8765c", "IndigoLT" = "#221150")) +
+  scale_color_manual(values = c("Control" = "black", "IndigoLT" = "black")) +
+  theme_bw() +
+  theme(
+    axis.title.x = element_text(size = 14, face = "bold"),
+    axis.title.y = element_blank(),
+    axis.text = element_text(size = 12, color = "black"),
+    axis.ticks.x = element_blank(),
+    strip.text = element_text(size = 12, face = 'bold'),
+    strip.background = element_blank(),
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text = element_text(size = 14),
+    legend.position = "top",
+    panel.spacing = unit(1, "lines")
+  ) +
+  labs(fill = "Treatment", color = "Treatment", x = "Growout")
+
+```
+
+```{r}
+# Distribution screening for copies_per_gram
+# Distribution screening: raw + log10 copies_per_gram
+
+library(MASS)
+library(dplyr)
+library(ggplot2)
+
+entero.merged <- entero.merged %>%
+  mutate(
+    log10_copies_per_gram = log10(copies_per_gram)
+  )
+
+for (g in c("1", "2")) {
+
+  df_sub <- entero.merged %>%
+    filter(Growout == g)
+
+  vars <- c("copies_per_gram", "log10_copies_per_gram")
+
+  cat("\n============================\n")
+  cat(paste("Growout:", g, "\n"))
+
+  for (v in vars) {
+
+    y <- df_sub[[v]]
+    y <- y[!is.na(y) & is.finite(y)]
+
+    cat("\n----------------------------\n")
+    cat(paste("Variable:", v, "\n"))
+
+    shapiro_result <- shapiro.test(y)
+    cat("Shapiro-Wilk p-value:", round(shapiro_result$p.value, 4), "\n")
+
+    print(
+      ggplot(df_sub, aes(x = .data[[v]])) +
+        geom_histogram(bins = 20, fill = "steelblue", color = "black") +
+        ggtitle(paste(v, "- Growout", g))
+    )
+
+    dist_fits <- list()
+
+    try(dist_fits$normal  <- MASS::fitdistr(y, "normal"), silent = TRUE)
+    try(dist_fits$gamma   <- MASS::fitdistr(y[y > 0], "gamma"), silent = TRUE)
+    try(dist_fits$lognorm <- MASS::fitdistr(y[y > 0], "lognormal"), silent = TRUE)
+
+    aics <- sapply(dist_fits, AIC)
+    cat("AICs:\n")
+    print(round(aics, 2))
+    cat("Best distribution (AIC):", names(which.min(aics)), "\n")
+  }
+}
+
+```
+
+```{r}
+# ==============================================================
+# Genus-level Enterococcus GLMM — Raw counts with lognormal distribution
+# Log-transform response + Gaussian family (based on distribution screening)
+# ==============================================================
+
+library(glmmTMB)
+library(car)
+library(emmeans)
+library(DHARMa)
+library(dplyr)
+
+# ==============================================================
+# Setup data with log transformation of raw counts
+# ==============================================================
+
+entero_df_genus_raw <- entero.merged %>%
+  dplyr::mutate(
+    Growout   = as.factor(Growout),
+    Treatment = as.factor(Treatment),
+    House     = as.factor(House),
+    Position  = as.factor(Position),
+    log_copies_raw = log(copies_per_gram)  # Natural log for lognormal
+  ) %>%
+  dplyr::filter(is.finite(log_copies_raw))
+
+cat("Genus-level samples:", nrow(entero_df_genus_raw), "\n")
+
+# Set contrasts for Type III tests
+old_contr_genus <- options(contrasts = c("contr.sum", "contr.poly"))
+
+# ==============================================================
+# Fit full model with random effect (lognormal = log-transform + gaussian)
+# ==============================================================
+
+entero_genus_model_raw <- glmmTMB(
+  log_copies_raw ~ Treatment * Growout + Position + (1 | Growout:House),
+  family = gaussian(link = "identity"),
+  data   = entero_df_genus_raw
+)
+
+# ==============================================================
+# Check and conditionally drop random effect
+# ==============================================================
+
+kept_random_genus <- TRUE
+rv_genus <- .extract_rand_var(entero_genus_model_raw)
+cat("Random effect variance (Growout:House):", rv_genus, "\n")
+
+if (is.na(rv_genus) || rv_genus <= 1e-6) {
+  kept_random_genus <- FALSE
+  cat("Random effect near zero — refitting without it.\n")
+  
+  entero_genus_model_raw <- glmmTMB(
+    log_copies_raw ~ Treatment * Growout + Position,
+    family = gaussian(link = "identity"),
+    data   = entero_df_genus_raw
+  )
+} else {
+  cat("Random effect retained\n")
+}
+
+# ==============================================================
+# Type III Wald tests
+# ==============================================================
+
+cat("\n--- Type III Wald Tests ---\n")
+entero_genus_anova_raw <- car::Anova(entero_genus_model_raw, type = 3)
+print(entero_genus_anova_raw)
+
+# ==============================================================
+# Global treatment effect (marginal means)
+# ==============================================================
+
+cat("\n--- Global Treatment Effect ---\n")
+entero_genus_global_emm_raw <- emmeans(entero_genus_model_raw, ~ Treatment)
+entero_genus_global_pairs_raw <- contrast(entero_genus_global_emm_raw, 
+                                          method = "pairwise", 
+                                          adjust = "BH")
+global_genus_df_raw <- as.data.frame(summary(entero_genus_global_pairs_raw))
+global_genus_df_raw$Comparison <- "Global"
+global_genus_df_raw$Growout <- NA
+print(summary(entero_genus_global_pairs_raw))
+
+# ==============================================================
+# Per-growout treatment effects
+# ==============================================================
+
+cat("\n--- Per-Growout Treatment Effects ---\n")
+entero_genus_pergrowout_emm_raw <- emmeans(entero_genus_model_raw, ~ Treatment | Growout)
+entero_genus_pergrowout_pairs_raw <- contrast(entero_genus_pergrowout_emm_raw, 
+                                              method = "pairwise", 
+                                              adjust = "BH")
+pergrowout_genus_df_raw <- as.data.frame(summary(entero_genus_pergrowout_pairs_raw))
+pergrowout_genus_df_raw$Comparison <- paste("Growout", pergrowout_genus_df_raw$Growout)
+print(summary(entero_genus_pergrowout_pairs_raw))
+
+# ==============================================================
+# DHARMa diagnostics
+# ==============================================================
+
+cat("\n--- DHARMa Diagnostics ---\n")
+entero_genus_dharma_raw <- simulateResiduals(entero_genus_model_raw, n = 1000)
+
+disp_test_genus_raw <- testDispersion(entero_genus_dharma_raw)
+out_test_genus_raw <- testOutliers(entero_genus_dharma_raw)
+quant_test_genus_raw <- testQuantiles(entero_genus_dharma_raw)
+
+cat("Dispersion p =", round(disp_test_genus_raw$p.value, 4), "\n")
+cat("Outliers p =", round(out_test_genus_raw$p.value, 4), "\n")
+cat("Quantiles p =", round(quant_test_genus_raw$p.value, 4), "\n")
+
+# ==============================================================
+# Combine results
+# ==============================================================
+
+common_cols_genus_raw <- intersect(names(global_genus_df_raw), names(pergrowout_genus_df_raw))
+entero_genus_pairs_all_raw <- rbind(
+  global_genus_df_raw[, common_cols_genus_raw],
+  pergrowout_genus_df_raw[, common_cols_genus_raw]
+)
+
+# Restore contrasts
+options(old_contr_genus)
+
+# ==============================================================
+# Summary of genus results
+# ==============================================================
+
+cat("\n==============================================\n")
+cat("GENUS-LEVEL ENTEROCOCCUS RAW COUNT RESULTS SUMMARY\n")
+cat("==============================================\n")
+
+treatment_main_genus_raw <- entero_genus_anova_raw["Treatment", ]
+cat("Main Treatment Effect: Chi² =", round(treatment_main_genus_raw$Chisq, 2),
+    ", p =", round(treatment_main_genus_raw$`Pr(>Chisq)`, 4),
+    ifelse(treatment_main_genus_raw$`Pr(>Chisq)` < 0.05, " *", ""), "\n")
+
+sig_genus_raw <- entero_genus_pairs_all_raw %>%
+  dplyr::filter(p.value < 0.05)
+
+if (nrow(sig_genus_raw) > 0) {
+  cat("\nSignificant contrasts:\n")
+  print(sig_genus_raw %>% dplyr::select(Comparison, estimate, SE, z.ratio, p.value))
+} else {
+  cat("\nNo significant treatment contrasts at p < 0.05\n")
+}
+
+cat("\nModel kept random effect:", kept_random_genus, "\n")
+
+```
+
+```{r}
+##Pull out all relevant p-values for the manuscript
+# ==============================================================
+# Genus-level Enterococcus GLMM p-values:
+#   1. Global fixed effects across growouts
+#   2. Fixed effects within each growout
+#   3. Optional treatment pairwise contrasts via emmeans
+# ==============================================================
+
+library(glmmTMB)
+library(car)
+library(emmeans)
+library(dplyr)
+library(purrr)
+library(tibble)
+
+# --------------------------------------------------------------
+# Preserve Type III contrast settings
+# --------------------------------------------------------------
+
+old_contr_genus_pvals <- options(contrasts = c("contr.sum", "contr.poly"))
+
+# ==============================================================
+# 1. Global fixed-effect p-values from full model
+# ==============================================================
+
+entero_genus_global_fixed_pvals <- car::Anova(
+  entero_genus_model_raw,
+  type = 3
+) %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("Fixed_Effect") %>%
+  dplyr::rename(
+    Chi_square = Chisq,
+    df = Df,
+    p_value = `Pr(>Chisq)`
+  ) %>%
+  dplyr::mutate(
+    Model = "Global",
+    Growout = NA_character_,
+    kept_random = kept_random_genus
+  ) %>%
+  dplyr::select(
+    Model,
+    Growout,
+    Fixed_Effect,
+    Chi_square,
+    df,
+    p_value,
+    kept_random
+  )
+
+print(entero_genus_global_fixed_pvals)
+
+# ==============================================================
+# 2. Fixed-effect p-values within each growout
+#    Model within growout: Treatment + Position + (1 | House)
+#    Random effect dropped if near-zero variance
+# ==============================================================
+
+.extract_house_rand_var <- function(model) {
+  vc <- try(glmmTMB::VarCorr(model), silent = TRUE)
+  if (inherits(vc, "try-error")) return(NA_real_)
+
+  vcdf <- try(as.data.frame(vc), silent = TRUE)
+  if (inherits(vcdf, "try-error") || !nrow(vcdf)) return(NA_real_)
+
+  row <- vcdf[
+    vcdf$component == "cond" &
+      vcdf$grp == "House",
+    ,
+    drop = FALSE
+  ]
+
+  if (!nrow(row)) return(NA_real_)
+
+  as.numeric(row$sdcor[1])^2
+}
+
+entero_genus_within_growout_fixed_pvals <- purrr::map_dfr(
+  levels(entero_df_genus_raw$Growout),
+  function(growout_i) {
+
+    df_i <- entero_df_genus_raw %>%
+      dplyr::filter(Growout == growout_i) %>%
+      base::droplevels()
+
+    model_i <- glmmTMB::glmmTMB(
+      log_copies_raw ~ Treatment + Position + (1 | House),
+      family = gaussian(link = "identity"),
+      data = df_i
+    )
+
+    rv_i <- .extract_house_rand_var(model_i)
+    kept_random_i <- TRUE
+
+    if (is.na(rv_i) || rv_i <= 1e-6) {
+      kept_random_i <- FALSE
+
+      model_i <- glmmTMB::glmmTMB(
+        log_copies_raw ~ Treatment + Position,
+        family = gaussian(link = "identity"),
+        data = df_i
+      )
+    }
+
+    car::Anova(model_i, type = 3) %>%
+      as.data.frame() %>%
+      tibble::rownames_to_column("Fixed_Effect") %>%
+      dplyr::rename(
+        Chi_square = Chisq,
+        df = Df,
+        p_value = `Pr(>Chisq)`
+      ) %>%
+      dplyr::mutate(
+        Model = "Within growout",
+        Growout = as.character(growout_i),
+        kept_random = kept_random_i
+      ) %>%
+      dplyr::select(
+        Model,
+        Growout,
+        Fixed_Effect,
+        Chi_square,
+        df,
+        p_value,
+        kept_random
+      )
+  }
+)
+
+print(entero_genus_within_growout_fixed_pvals)
+
+# ==============================================================
+# 3. Treatment pairwise contrasts using emmeans
+#    These are pairwise treatment comparisons, not omnibus effects
+# ==============================================================
+
+entero_genus_global_treatment_pairs <- emmeans::emmeans(
+  entero_genus_model_raw,
+  ~ Treatment
+) %>%
+  emmeans::contrast(
+    method = "pairwise",
+    adjust = "BH"
+  ) %>%
+  summary() %>%
+  as.data.frame() %>%
+  dplyr::mutate(
+    Model = "Global",
+    Growout = NA_character_
+  )
+
+entero_genus_within_growout_treatment_pairs <- emmeans::emmeans(
+  entero_genus_model_raw,
+  ~ Treatment | Growout
+) %>%
+  emmeans::contrast(
+    method = "pairwise",
+    adjust = "BH"
+  ) %>%
+  summary() %>%
+  as.data.frame() %>%
+  dplyr::mutate(
+    Model = "Within growout"
+  )
+
+print(entero_genus_global_treatment_pairs)
+print(entero_genus_within_growout_treatment_pairs)
+
+# ==============================================================
+# 4. Combined fixed-effect p-value table
+# ==============================================================
+
+entero_genus_fixed_pvals_all <- dplyr::bind_rows(
+  entero_genus_global_fixed_pvals,
+  entero_genus_within_growout_fixed_pvals
+)
+
+print(entero_genus_fixed_pvals_all)
+
+# Restore contrast settings
+options(old_contr_genus_pvals)
+
+```
+
+```{r}
+##Let's look at the correlation between microbiome and dPCR counts. 
+# ---- Extract Enterococcus genus abundance (per-sample) ----
+
+entero_genus_df <- phy_genus %>%
+  subset_taxa(Genus == "Enterococcus") %>%
+  psmelt() %>%
+  dplyr::select(Sample, Abundance, Growout, Treatment, House, Position) %>%
+  dplyr::rename(Enterococcus_abundance = Abundance)
+
+```
+
+```{r}
+# ---- Merge + correlation + plot ----
+
+library(dplyr)
+library(ggplot2)
+
+entero_combined <- entero_genus_df %>%
+  mutate(
+    Sample.NTC.Control = gsub("Sample_", "", Sample)
+  ) %>%
+  dplyr::left_join(entero.merged, by = "Sample.NTC.Control")
+
+# ---- Correlation (Spearman, recompute p-value to avoid underflow) ----
+cor_res <- cor.test(
+  entero_combined$Enterococcus_abundance,
+  entero_combined$log10_copies_per_gram,
+  method = "spearman"
+)
+
+rho <- cor_res$estimate
+n   <- sum(complete.cases(entero_combined$Enterococcus_abundance,
+                          entero_combined$log10_copies_per_gram))
+
+# Approximate t-statistic for Spearman
+t_stat <- as.numeric(rho) * sqrt((n - 2) / (1 - rho^2))
+
+# Recalculate p-value (two-sided)
+p_val <- 2 * pt(-abs(t_stat), df = n - 2)
+
+# ---- Plot ----
+ggplot(entero_combined, aes(x = Enterococcus_abundance, y = log10_copies_per_gram)) +
+  geom_point(
+    shape = 21,
+    fill = "royalblue4",
+    color = "black",
+    size = 4,
+    alpha = 0.6
+  ) +
+  geom_smooth(method = "lm", se = TRUE, color = "black", alpha = 0.5) +
+  annotate(
+    "text",
+    x = -Inf, y = Inf,
+    label = paste0(
+      "rho == ", round(rho, 2),
+      "*','~~italic(p) == ", formatC(p_val, format = "e", digits = 2)
+    ),
+    parse = TRUE,
+    hjust = -0.1, vjust = 3,
+    size = 4
+  ) +
+  theme_bw() +
+  labs(
+    x = "CSS-normalized counts (V1-V9 ONT)",
+    y = expression(Log[10]~"copies per gram (dPCR)")) +
+  theme(axis.text = element_text(size = 12, color = 'black'),
+        axis.title = element_text(size = 14, color = 'black'))
+
+ggsave("genus.entero.correlation.png", width = 5, height = 4, units = "in", dpi = 900)
+
+```
+

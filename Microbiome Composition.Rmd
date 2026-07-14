@@ -1,0 +1,176 @@
+---
+title: "Composition Overview"
+author: "BH"
+date: "2025-07-28"
+output: html_document
+---
+
+```{r}
+
+# 1. Agglomerate at Family level (already relative abundance)
+physeq_decontam_family <- tax_glom(physeq_decontam_rel_abund, taxrank = "Family")
+
+# 2. Clean Family names
+clean_family <- function(family_vec) {
+  cleaned <- sub("^\\s*f__", "", family_vec)
+  cleaned <- trimws(cleaned)
+  cleaned[cleaned == "" | is.na(cleaned)] <- "Unknown"
+  cleaned
+}
+tax_table(physeq_decontam_family)[, "Family"] <-
+  clean_family(tax_table(physeq_decontam_family)[, "Family"])
+
+# 3. Melt to long format
+df_family_long <- psmelt(physeq_decontam_family) %>%
+  mutate(Family = as.character(Family))
+
+# ️4. Remove "Unknown" family
+df_family_long_filtered <- df_family_long %>%
+  filter(Family != "Unknown")
+
+# 5. Collapse <5% per sample
+df_family_collapsed <- df_family_long_filtered %>%
+  group_by(Sample) %>%
+  mutate(Family = if_else(Abundance < 0.05, "<5% abund.", Family)) %>%
+  ungroup() %>%
+  group_by(Sample, Family) %>%
+  summarise(Abundance = sum(Abundance), .groups = "drop")
+
+# 6. Attach metadata
+meta <- as.data.frame(sample_data(physeq_decontam_family), stringsAsFactors = FALSE)
+meta$Sample <- rownames(meta)
+
+df_family_meta <- df_family_collapsed %>%
+  left_join(meta, by = "Sample")
+
+
+custom_family_colors <- c(
+  "Carnobacteriaceae"   = "#fcfdbf",  # rgb(252, 253, 191)
+  "Lactobacillaceae"    = "#febb81",  # rgb(254, 187, 129)
+  "Staphylococcaceae"   = "#f8765c",  # rgb(248, 118, 92)
+  "Dermabacteraceae"    = "#d3436e",  # rgb(211, 67, 110)
+  "Nocardiopsaceae"     = "#982d80",  # rgb(152, 45, 128)
+  "Bacillaceae"         = "#5f187f",  # rgb(95, 24, 127)
+  "Micrococcaceae"      = "#221150",  # rgb(34, 17, 80)
+  "<5% abund."          = "#000004"   # rgb(0, 0, 4)
+)
+
+ggplot(df_family_meta, aes(x = Sample, y = Abundance, fill = Family)) +
+  geom_bar(stat = "identity", position = position_fill(reverse = TRUE), color = 'black') +
+  scale_fill_manual(values = custom_family_colors) +
+  scale_y_continuous(labels = scales::percent_format(), limits = c(0, 1), expand = c(0, 0)) +
+  coord_flip() +
+  facet_nested(
+    rows      = vars(Growout, Treatment),
+    scales    = "free_y",
+    nest_line = TRUE
+  ) +
+  theme_bw() +
+  theme(
+    axis.title.x = element_text(size = 14, face = "bold", color = "black"),
+    axis.title.y = element_blank(),
+    axis.text.x = element_text(size = 12, color = 'black'),
+    axis.ticks.y = element_blank(),
+    axis.text.y = element_blank(),
+    strip.background = element_blank(),
+    strip.text = element_text(size = 16),
+    legend.title = element_text(size = 16, face = "bold"),
+    legend.text = element_text(size = 14),
+    legend.position = 'top',
+    panel.spacing.y  = unit(0.2, "lines"),
+    panel.spacing.x  = unit(0.5, "lines")
+  ) +
+  labs(y = "Relative Abundance", fill = "Family") +
+  facet_nested(
+    rows      = vars(Growout, Treatment),
+    scales    = "free_y",
+    nest_line = TRUE
+  ) +
+  coord_flip()
+
+ggsave("sample_barplot.final.png", width = 4.5, height = 15, units = "in", dpi = 900)
+
+ggsave("sample_barplot.legend.png", width = 10, height = 15, units = "in", dpi = 900)
+
+```
+
+```{r}
+# Filter out samples where Growout == 3
+df_family_meta_no_g3 <- df_family_meta %>%
+  filter(Growout != 3)
+
+# Plot
+ggplot(df_family_meta_no_g3, aes(x = Sample, y = Abundance, fill = Family)) +
+  geom_bar(stat = "identity", position = position_fill(reverse = TRUE), color = 'black') +
+  scale_fill_manual(values = custom_family_colors) +
+  scale_y_continuous(labels = scales::percent_format(), limits = c(0, 1), expand = c(0, 0)) +
+  facet_nested(
+    rows      = vars(Growout, Treatment),
+    scales    = "free_y",
+    nest_line = TRUE
+  ) +
+  coord_flip() +
+  theme_bw() +
+  theme(
+    axis.title.x = element_text(size = 14, face = "bold", color = "black"),
+    axis.title.y = element_blank(),
+    axis.text.x = element_text(size = 12, color = 'black'),
+    axis.ticks.y = element_blank(),
+    axis.text.y = element_blank(),
+    strip.background = element_blank(),
+    strip.text = element_text(size = 16),
+    legend.title = element_text(size = 16, face = "bold"),
+    legend.text = element_text(size = 14),
+    legend.position = 'top',
+    panel.spacing.y  = unit(0.2, "lines"),
+    panel.spacing.x  = unit(0.5, "lines")
+  ) +
+  labs(y = "Relative Abundance", fill = "Family")
+
+# Save
+ggsave("sample_barplot.no_growout3.png", width = 4.5, height = 15, units = "in", dpi = 900)
+
+```
+
+```{r}
+##IndigoLT changed to Alternative
+## Create intermediate df with IndigoLT -> Alternative (do NOT overwrite original)
+df_family_meta_no_g3_plot <- df_family_meta_no_g3 %>%
+  dplyr::mutate(
+    Treatment = dplyr::recode(Treatment, "IndigoLT" = "Alternative"),
+    Treatment = factor(Treatment, levels = c("Control", "Alternative"))
+  )
+
+# Plot
+ggplot(df_family_meta_no_g3_plot, aes(x = Sample, y = Abundance, fill = Family)) +
+  geom_bar(stat = "identity", position = position_fill(reverse = TRUE), color = 'black') +
+  scale_fill_manual(values = custom_family_colors) +
+  scale_y_continuous(labels = scales::percent_format(), limits = c(0, 1), expand = c(0.02, 0)) +
+  facet_nested(
+    rows      = vars(Growout, Treatment),
+    scales    = "free_y",
+    nest_line = TRUE
+  ) +
+  coord_flip() +
+  theme_bw() +
+  theme(
+    axis.title.x = element_text(size = 14, face = "bold", color = "black"),
+    axis.title.y = element_blank(),
+    axis.text.x = element_text(size = 12, color = 'black'),
+    axis.ticks.y = element_blank(),
+    axis.text.y = element_blank(),
+    strip.background = element_blank(),
+    strip.text = element_text(size = 16),
+    legend.title = element_text(size = 16, face = "bold"),
+    legend.text = element_text(size = 14),
+    legend.position = 'top',
+    panel.spacing.y  = unit(0.2, "lines"),
+    panel.spacing.x  = unit(0.5, "lines")
+  ) +
+  labs(y = "Relative Abundance", fill = "Family")
+
+# Save
+ggsave("sample_barplot.no_growout3_alternative.png", width = 4.5, height = 15, units = "in", dpi = 900)
+
+```
+

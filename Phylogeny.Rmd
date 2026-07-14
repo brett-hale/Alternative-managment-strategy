@@ -1,0 +1,295 @@
+---
+title: "Phylogeny"
+author: "BH"
+date: "2025-07-28"
+output: html_document
+---
+
+```{r}
+##This leverages 'species_df', which was created for the BacDive query.
+
+```
+
+```{r}
+#library(rentrez)
+
+# Function to retrieve 16S sequences for a given species
+retrieve_16S_sequences <- function(species_name) {
+  query <- paste0(species_name, "[Organism] AND 16S[All Fields] AND (33175[BioProject] OR 33317[BioProject])")
+  search_results <- entrez_search(db = "nuccore", term = query, retmax = 10)
+  
+  if (length(search_results$ids) == 0) {
+    message("No results found for: ", species_name)
+    return(data.frame(Species = species_name, Sequence = NA))
+  } else {
+    message("Found IDs for ", species_name, ": ", paste(search_results$ids, collapse = ", "))
+    sequence_data <- entrez_fetch(db = "nuccore", id = search_results$ids, rettype = "fasta")
+    return(data.frame(Species = species_name, Sequence = sequence_data, ID = search_results$ids))
+  }
+}
+
+# Retrieve sequences for each species in the species_list
+sequences_list <- lapply(species_list, retrieve_16S_sequences)
+
+##For species with multiple 'hits', every hit is a concatenation of all hits. We must correct this before proceeding. 
+# Function to split concatenated sequences into individual entries
+split_concatenated_sequences <- function(species_entry) {
+  # Ensure the Sequence column is a character vector
+  species_entry$Sequence <- as.character(species_entry$Sequence)
+  
+  sequences <- unlist(strsplit(species_entry$Sequence, split = "\n\n"))
+  unique_sequences <- unique(sequences)
+  
+  return(data.frame(Species = rep(species_entry$Species[1], length(unique_sequences)), 
+                    Sequence = unique_sequences, stringsAsFactors = FALSE))
+}
+
+# Apply the function to all entries in sequences_list
+cleaned_sequences_list <- lapply(sequences_list, split_concatenated_sequences)
+
+# Retain only the first hit for each species
+cleaned_sequences_list <- lapply(cleaned_sequences_list, function(species_entry) {
+  if (nrow(species_entry) > 1) {
+    return(species_entry[1, , drop = FALSE])
+  } else {
+    return(species_entry)
+  }
+})
+
+# Combine the results into a single data frame
+cleaned_sequences_df_new <- do.call(rbind, cleaned_sequences_list)
+
+
+```
+
+```{r}
+##We must add a few manually in which 16S sequences were only available for synonyms
+# Provided sequence for Alkalihalobacillus hemicellulosilyticus
+alkalihalobacillus_hemicellulosilyticus_sequence <- "AATTCGGCTTAGAGTTTGATCCTGGCTCAGGACGAACGCTGGCGGCGTGCCTAATACATGCAAGTCGAGCGGACAGAAGGGAGCTTGCTCCCGGAAGTTAGCGGCGAACGGGTGAGTAACACGTGGGCAACCTGCCCTGTAGATTGGGATAACATCGAGAAATCGGTGCTAATACCGGATGATAGAATGAGCGTGCATGCGTTTCTTCTCAAAGATGGCTTCGGCTATCACTACAGGATGGGCCCGCGGCGCATTAGCTAGTTGGTAAGGTAACGGCTTACCAAGGCGACGATGCGTAGCCGACCTGAGAGGGTGATCGGCCACACTGGGACTGAGACACGGCCCAGACTCCTACGGGAGGCAGCAGTAGGGAATCTTCCGCAATGGACGAAAGTCTGACGGAGCAACGCCGCGTGAGTGATGAAGGGTTTCGGCTCGTAAAGCTCTGTTGTTAGGGAAGAACAAGTGCTAGTCGAATAGGATGGCACCTTGACGGTACCTAACCAGAAAGCCACGGCTAACTACGTGCCAGCAGCCGCGGTAATACGTAGGTGGCAAGCGTTGTCCGGAATTATTGGGCGTAAAGCGCGCGCAGGCGGTCTTTTAAGTCTGATGTGAAAGCCCCCGGCTCAACCGGGGAGGGTCATTGGAAACTGGGAGACTTGAGTACAGAAGAGGAGAGTGGAATTCCACGTGTAGCGGTGAAATGCGTAGAGATGTGGAGGAACACCAGTGGCGAAGGCGACTCTCTGGTCTGTAACTGACGCTGAGGCGCGAAAGCGTGGGGAGCAAACAGGATTAGATACCCTGGTAGTCCACGCCGTAAACGATGAGTGCTAGGTGTTAGGGGTTTCGATGCCCTTAGTGCCGAAGTTAACACATTAAGCACTCCGCCTGGGGAGTACGACCGCAAGGTTGAAACTCAAAGGAATTGACGGGGGCCCGCACAAGCAGTGGAGCATGTGGTTTAATTCGAAGCAACGCGAAGAACCTTACCAGGTCTTGACATCCTTTGACCACTCTAGAGATAGAGCTTTCCCCTTCGGGGGACAAAGTGACAGGTGGTGCATGGTTGTCGTCAGCTCGTGTCGTGAGATGTTGGGTTAAGTCCCGCAACGAGCGCAACCCTTGATCTTAGTTGCCAGCATTCAGTTGGGCACTCTAAGGTGACTGCCGGTGACAAACCGGAGGAAGGTGGGGATGACGTCAAATCATCATGCCCCTTATGACCTGGGCTACACACGTGCTACAATGGATGGTACAAAGGGCAGCGAAGCCGCGAGGTGAAGCCAATCCCATAAAGCCATTCTCAGTTCGGATTGTAGGCTGCAACTCGCCTACATGAAGCCGGAATTGCTAGTAATCGCGGATCAGCATGCCGCGGTGAATACGTTCCCGGGCCTTGTACACACCGCCCGTCACACCACGAGAGTTTGTAACACCCGAAGTCGGTGGGGTAACCTTTTGGAGCCAGCCGCCTAAGGTGGGACAGATGATTGGGGTGAAGTCGTAACAAGGTAACCAAGCCGAATTCC"
+
+# Update the Sequence column in cleaned_sequences_df_new
+cleaned_sequences_df_new$Sequence[cleaned_sequences_df_new$Species == "Alkalihalobacillus hemicellulosilyticus"] <- alkalihalobacillus_hemicellulosilyticus_sequence
+
+# Verify the update
+print(cleaned_sequences_df_new[cleaned_sequences_df_new$Species == "Alkalihalobacillus hemicellulosilyticus", ])
+
+# Provided sequence for Bacillus massiliigabonensis
+bacillus_massiliigabonensis_sequence <- "AGAGTTTGATCCTGGCTCAGGACGAACGCTGGCGGCGTGCCTAATACATGCAAGTCGAGCGAACTTGCGG
+GAGCTTGCTCCCAAAAGTTAGCGGCGGACGGGTGAGTAACACGTGGGCAACCTGCCTGTAAGACTGGGAT
+AACTTCGGGAAACCGGAGCTAATACCGGATAATTCTTTTCCTCACATGTGGAAAAACTGAAAGATGGCTT
+CGGCTATCACTTACAGATGGGCCCGCGGCGCATTAGCTAGTTGGTGAGGTAACGGCTCACCAAGGCGACG
+ATGCGTAGCCGACCTGAGAGGGTGATCGGCCACACTGGGACTGAGACACGGCCCAGACTCCTACGGGAGG
+CAGCAGTAGGGAATCTTCCGCAATGGACGAAAGTCTGACGGAGCAACGCCGCGTGAGTGATGAAGGTTTT
+CGGATCGTAAAACTCTGTTGTTAGGGAAGAACAAGTACCGTTCGAATAGGGCGGTACCTTGACGGTACCT
+AACCAGAAAGCCACGGCTAACTACGTGCCAGCAGCCGCGGTAATACGTAGGTGGCAAGCGTTGTCCGGAA
+TTATTGGGCGTAAAGCGCGCGCAGGCGGTCTTTTAAGTCTGATGTGAAAGCCCCCGGCTCAACCGGGGAG
+GGTCATTGGAAACTGGGAGACTTGAGTGCAGAAGAGGAGAGTGGAATTCCACGTGTAGCGGTGAAATGCG
+TAGAGATGTGGAGGAACACCAGTGGCGAAGGCGACTCTCTGGTCTGTAACTGACGCTGAGGCGCGAAAGC
+GTGGGGAGCGAACAGGATTAGATACCCTGGTAGTCCACGCCGTAAACGATGAGTGCTAAGTGTTAGAGGG
+TTTCCGCCCTTTAGTGCTGCAGCAAACGCATTAAGCACTCCGCCTGGGGAGTACGGCCGCAAGGCTGAAA
+CTCAAAGGAATTGACGGGGGCCCGCACAAGCGGTGGAGCATGTGGTTTAATTCGAAGCAACGCGAAGAAC
+CTTACCAGGTCTTGACATCCTCTGACAATCCTAGAGATAGGACTTTCCCCTTCGGGGGACAGAGTGACAG
+GTGGTGCATGGTTGTCGTCAGCTCGTGTCGTGAGATGTTGGGTTAAGTCCCGCAACGAGCGCAACCCTTG
+ATCTTAGTTGCCAGCATTCAGTTGGGCACTCTAAGGTGACTGCCGGTGACAAACCGGAGGAAGGTGGGGA
+TGACGTCAAATCATCATGCCCCTTATGACCTGGGCTACACACGTGCTACAATGGATGGTACAAAGGGCTG
+CAAGACCGCGAGGTTTAGCCAATCCCATAAAACCATTCTCAGTTCGGATTGCAGGCTGCAACTCGCCTGC
+ATGAAGCCGGAATCGCTAGTAATCGCGGATCAGCATGCCGCGGTGAATACGTTCCCGGGCCTTGTACACA
+CCGCCCGTCACACCACGAGAGTTTGTAACACCCGAAGTCGGTGGGGTAACCGTAAGGAGCCAGCCGCCTA
+AGGTGGGACAGATGATTGGGGTGAAGTCGTAACAAGGTAGCCGT"
+
+# Update the Sequence column in cleaned_sequences_df_new
+cleaned_sequences_df_new$Sequence[cleaned_sequences_df_new$Species == "Bacillus massiliigabonensis"] <- bacillus_massiliigabonensis_sequence
+
+# Verify the update
+print(cleaned_sequences_df_new[cleaned_sequences_df_new$Species == "Bacillus massiliigabonensis", ])
+
+# Provided sequence for Paenibacillus cucumis
+paenibacillus_cucumis_sequence <- "AACGCTGGCGGCGTGCCTAATACATGCAAGTCGAGCGGAGCATCTGATGTAGCTTGCTACTGATGATGCT
+CAGCGGCGGACGGGTGAGTAACACGTAGGCAACCTGCCTGCAAGACCGGGATAACCCACGGAAACGTGAG
+CTAATACCGGATAGATGGTCTCTTCGCATGGAGGGATCAGGAAAGACGGAGCAATCTGTCACTTGCGGAT
+GGGCCTGCGGCGCATTAGCTAGTAGGTGAGGTAACGGCTCACCTAGGCGACGATGCGTAGCCGACCTGAG
+AGGGTGAACGGCCACACTGGGACTGAGACACGGCCCAGACTCCTACGGGAGGCAGCAGTAGGGAATCTTC
+GGCAATGGACGCAAGTCTGACCGAGCAACGCCGCGTGAGTGAAGAAGGGTTTCGGCTCGTAAAACTCTGT
+TGCCAGGGAAGAACGCCGGTGAGAGTAACTGCTCACCGGGTGACGGTACCTGAGAAGAAAGCCCCGGCTA
+ACTACGTGCCAGCAGCCGCGGTAATACGTAGGGGGCAAGCGTTGTCCGGAATTATTGGGCGTAAAGCGCG
+CGCAGGCGGCCGTTTAAGTCTGGTGTTTAAACCCAAGGCTCAACCTTGGGTCGCACTAGAAACTGGGCGG
+CTGGAGTGCAGGAGAGGAAAGTGGAATTCCACGTGTAGCGGTGAAATGCGTAGAGATGTGGAGGAACACC
+AGTGGCGAAGGCGACTTTCTGGCCTGTAACTGACGCTGAGGCGCGAAAGCGTGGGGAGCAAACAGGATTA
+GATACCCTGGTAGTCCACGCCGTAAACGATGAGTGCTAGGTGTTAGGGGTTTCGATACCCTTGGTGCCGA
+AGTTAACACAGTAAGCACTCCGCCTGGGGAGTACGCTCGCAAGAGTGAAACTCAAAGGAATTGACGGGGA
+CCCGCACAAGCAGTGGAGTATGTGGTTTAATTCGAAGCAACGCGAAGAACCTTACCAGGTCTTGACATCT
+GGGTGAAACATGCAGAGATGTATGCCTCCTTCGGGACACCCAAGACAGGTGGTGCATGGTTGTCGTCAGC
+TCGTGTCGTGAGATGTTGGGTTAAGTCCCGCAACGAGCGCAACCCTTGATCTTAGTTGCCAGCATTGAGT
+TGGGCACTCTAGGATGACTGCCGGTGACAAACCGGAGGAAGGTGGGGATGACGTCAAATCATCATGCCCC
+TTATGACCTGGGCTACACACGTACTACAATGGCCGGTACAACGGGAAGCGAAGTGGCGACACGGAGCGAA
+TCCTTAGAAGCCGGTCTCAGTTCGGATTGCAGGCTGCAACTCGCCTGCATGAAGTCGGAATTGCTAGTAA
+TCGCGGATCAGCATGCCGCGGTGAATACGTTCCCGGGTCTTGTACACACCGCCCGTCACACCACGAGAGT
+TTACAACACCCGAAGTCGGTGGGGTAACCGCAAGGGGCCAGCCGCCGAAGGTGGGGTAGATGATTGGGGT
+G"
+
+# Update the Sequence column in cleaned_sequences_df_new
+cleaned_sequences_df_new$Sequence[cleaned_sequences_df_new$Species == "Paenibacillus cucumis"] <- paenibacillus_cucumis_sequence
+
+# Verify the update
+print(cleaned_sequences_df_new[cleaned_sequences_df_new$Species == "Paenibacillus cucumis", ])
+
+# Provided sequence for Anaerostipes hominis
+anaerostipes_hominis_sequence <- "GATGAACGCTGGCGGCGTGCTTAACACATGCAAGTCGAACGAAGCATTTTGGAAGGAAGTTTTCGGATGG
+AATTCCTTAATGACTGAGTGGCGGACGGGTGAGTAACGCGTGGGGAACCTGCCCTATACAGGGGGATAAC
+AGCTGGAAACGGCTGCTAATACCGCATAAGCGCACAGAATCGCATGATTCGGTGTGAAAAGCTCCGGCAG
+TATAGGATGGTCCCGCGTCTGATTAGCTGGTTGGCGGGGTAACGGCCCACCAAGGCGACGATCAGTAGCC
+GGCTTGAGAGAGTGGACGGCCACATTGGGACTGAGACACGGCCCAAACTCCTACGGGAGGCAGCAGTGGG
+GAATATTGCACAATGGGGGAAACCCTGATGCAGCGACGCCGCGTGAGTGAAGAAGTATTTCGGTATGTAA
+AGCTCTATCAGCAGGGAAGAAAAAAGACGGTACCTGACTAAGAAGCCCCGGCTAACTACGTGCCAGCAGC
+CGCGGTAATACGTAGGGGGCAAGCGTTATCCGGAATTACTGGGTGTAAAGGGTGCGTAGGTGGCATGGTA
+AGTCAGAAGTGAAAGCCCGGGGCTTAACCCCGGGACTGCTTTTGAAACTGTCATGCTGGAGTGCAGGAGA
+GGTAAGCGGAATTCCTAGTGTAGCGGTGAAATGCGTAGATATTAGGAGGAACACCAGTGGCGAAGGCGGC
+TTACTGGACTGTCACTGACACTGATGCACGAAAGCGTGGGGAGCAAACAGGATTAGATACCCTGGTAGTC
+CACGCCGTAAACGATGAATACTAGGTGTCGGGGCCGTAGAGGCTTCGGTGCCGCAGCAAACGCAGTAAGT
+ATTCCACCTGGGGAGTACGTTCGCAAGAATGAAACTCAAAGGAATTGACGGGGACCCGCACAAGCGGTGG
+AGCATGTGGTTTAATTCGAAGCAACGCGAAGAACCTTACCTGGTCTTGACATCTAACTGACCGGTTCGTA
+ATGGGACCTTTCCTTCGGGACAGTTAAGACAGGTGGTGCATGGTTGTCGTCAGCTCGTGTCGTGAGATGT
+TGGGTTAAGTCCCGCAACGAGCGCAACCCCTATCTTTAGTAGCCAGCATATAAGGTGGGCACTCTAGAGA
+GACTGCCAGGGATAACCTGGAGGAAGGTGGGGACGACGTCAAATCATCATGCCCCTTATGGCCAGGGCTA
+CACACGTGCTACAATGGCGTAAACAAAGGGAAGCGAAGTCGTGAGGCGAAGCAAATCCCAGAAATAACGT
+CTCAGTTCGGATTGTAGTCTGCAACTCGACTACATGAAGCTGGAATCGCTAGTAATCGTGAATCAGAATG
+TCACGGTGAATACGTTCCCGGGTCTTGTACACACCGCCCGTCACACCATGGGAGTCAGTAACGCCCGAAG
+TCAGTGACCCAACCTTATAGGAGGGAGCTGCCGAAGGTGGGACCGATAACTGGGGTG"
+
+# Update the Sequence column in cleaned_sequences_df_new
+cleaned_sequences_df_new$Sequence[cleaned_sequences_df_new$Species == "Anaerostipes hominis"] <- anaerostipes_hominis_sequence
+
+# Verify the update
+print(cleaned_sequences_df_new[cleaned_sequences_df_new$Species == "Anaerostipes hominis", ])
+
+```
+
+```{r}
+##Let's now perform a multiple sequence alignment
+library(ape)
+library(msa)
+library(seqinr)
+library(ggtree)
+library(phangorn)
+
+# Function to clean and validate sequences
+clean_sequences <- function(sequence) {
+  sequence <- gsub("[^AGCTagct]", "", sequence) # Remove non-DNA characters
+  return(sequence)
+}
+
+# Apply the cleaning function to the Sequence column
+cleaned_sequences_df_new$Sequence <- sapply(cleaned_sequences_df_new$Sequence, clean_sequences)
+
+# Remove any rows with empty sequences
+cleaned_sequences_df_new <- cleaned_sequences_df_new[cleaned_sequences_df_new$Sequence != "", ]
+
+# Correct FASTA entry creation function
+create_fasta_entry <- function(row) {
+  header <- paste0(">", row["Species"])
+  sequence <- row["Sequence"]
+  return(paste(header, sequence, sep = "\n"))
+}
+
+# Convert data frame to FASTA format
+fasta_entries <- apply(cleaned_sequences_df_new, 1, create_fasta_entry)
+
+# Write the FASTA entries to a file
+fasta_file <- "/Users/brett/Documents/sequences_corrected.fasta"
+writeLines(fasta_entries, con = fasta_file)
+
+# Read the sequences from the FASTA file
+sequences <- readDNAStringSet(fasta_file, format = "fasta")
+
+# Verify the sequences before alignment
+print(sequences)
+
+# Perform multiple sequence alignment
+alignment <- msaMuscle(inputSeqs = sequences, 
+                        cluster = "upgma", 
+                        maxiters = 12, 
+                        substitutionMatrix = "default",
+                        type = "default", 
+                        order = "aligned",
+                        verbose = TRUE)
+  #msa(sequences, method = "ClustalW")
+
+# Convert alignment to a phyDat object
+alignment_phyDat <- as.phyDat(alignment)
+
+# Construct the phylogenetic tree using neighbor-joining method
+distance_matrix <- dist.ml(alignment_phyDat)
+phylo_tree <- nj(distance_matrix)
+
+# Perform bootstrapping
+bootstrap_replicates <- 1000  # Number of bootstrap replicates
+
+# Function to generate a tree from bootstrap sample
+bootstrap_trees <- bootstrap.phyDat(alignment_phyDat, FUN = function(x) {
+  dist_matrix <- dist.ml(x)
+  nj(dist_matrix)
+}, bs = bootstrap_replicates)
+
+# Compute the bootstrap values
+bootstrap_values <- prop.clades(phylo_tree, bootstrap_trees)
+
+
+# Save the tree in Newick format
+tree_file <- "/Users/brett/Documents/phylo_tree.nwk"
+write.tree(phylo_tree, file = tree_file)
+
+tree.1 <- ggtree(phylo_tree, layout="fan", ignore.negative.edge=TRUE)
+
+tree.2 <- ggtree(phylo_tree, layout="equal_angle", ignore.negative.edge=TRUE)
+
+```
+
+```{r}
+# Create new metadata object
+metadata_df_family <- data.frame(Species = phylo_tree$tip.label, stringsAsFactors = FALSE) %>%
+  left_join(taxonomy_df, by = "Species") %>%
+  left_join(final_df.3, by = "Species") %>%
+  dplyr::select(Species, Family, everything()) %>%
+  mutate(
+    Family = gsub("\\[|\\]", "", Family),
+    Family = ifelse(Family == "" | is.na(Family), "Unknown", Family)
+  )
+
+# Assign Family names as rownames
+rownames(metadata_df_family) <- metadata_df_family$Species
+metadata_df_family <- metadata_df_family[phylo_tree$tip.label, ]
+
+# Define family color palette (same as stacked barplot)
+custom_family_colors <- c(
+  "Carnobacteriaceae"   = "#fcfdbf",
+  "Lactobacillaceae"    = "#febb81",
+  "Staphylococcaceae"   = "#f8765c",
+  "Dermabacteraceae"    = "#d3436e",
+  "Nocardiopsaceae"     = "#982d80",
+  "Bacillaceae"         = "#5f187f",
+  "Micrococcaceae"      = "#221150",
+  "<5% abund."          = "#000004"
+)
+
+# Replace low abundance families with "<5% abund." (ensure consistent handling)
+metadata_df_family <- metadata_df_family %>%
+  mutate(Family = ifelse(!Family %in% names(custom_family_colors)[custom_family_colors != "#000004"], "<5% abund.", Family))
+
+# Generate tree plot with tips colored by Family
+tree_family <- ggtree(phylo_tree, layout = "equal_angle", 
+                      aes(color = Family), ignore.negative.edge = TRUE, size = 0.5) %<+% metadata_df_family +
+  scale_color_manual(values = custom_family_colors) +
+  theme(legend.position = 'none')
+
+# Save the figure
+ggsave("phylogenetic_tree_by_family.png", tree_family, width = 4, height = 4, units = "in", dpi = 900)
+
+```
+
+```{r}
+##Let's add the tree to the phyloseq object
+
+# Merge raw (unnormalized phyloseq object with the phylogenetic tree) 
+physeq_decontam_no_neg_with_tree <- merge_phyloseq(physeq_decontam_no_neg, phylo_tree)
+
+```

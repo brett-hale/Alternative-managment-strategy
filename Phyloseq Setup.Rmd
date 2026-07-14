@@ -1,0 +1,209 @@
+---
+title: "Phyloseq Setup"
+author: "BH"
+date: "2025-07-29"
+output: html_document
+---
+```{r}
+##load packages
+library(colorspace)
+library(stringi)
+library(rhdf5)
+#library(zlibbioc)
+library(S4Vectors)
+library(phyloseq)
+library(Biostrings)
+library(yaml)
+library(colorspace)
+library(ggplot2)
+library(tibble)
+library(indicspecies)
+library(vegan)
+library(tidyr)
+library(MetBrewer)
+library(devtools)
+library(dplyr)
+library(ggpubr)
+library(stringr)
+library(Maaslin2)
+library(microbiome)
+library(metagenomeSeq)
+library(ComplexHeatmap)
+library(ggh4x)
+library(glmmTMB)
+library(ggside)
+library(car)
+library(MASS)
+library(DHARMa)
+```
+
+```{r}
+##Let's import the species-level information
+abundance_table_species <- read.delim("~/Downloads/abundance_table_species.tsv")
+
+##Let's split column 'tax' into true taxonomy columns
+# Split the 'tax' column into multiple new columns
+abundance_table_species.2 <- abundance_table_species %>%
+  separate(col = tax,
+           into = c("Domain", "Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species"),
+           sep = ";",
+           remove = TRUE, # Set to FALSE if you want to keep the original 'tax' column
+           extra = "merge", # Ensures that if there are more than 8 splits, they are merged into the 'Species' column
+           fill = "right")
+
+##We can now use this to create taxonomy and count files
+###First, taxonomy###
+taxonomy_df <- abundance_table_species.2 %>% 
+  select(Domain, Kingdom, Phylum, Class, Order, Family, Genus, Species)
+
+##We will need row names to create the phyloseq object. Since we do not have ASVs/OTUs but unique species, we will use species as rownames
+row.names(taxonomy_df) <- taxonomy_df$Species
+
+###Now, let's create the count file###
+count_df <- abundance_table_species.2
+
+##set row names
+row.names(count_df) <- count_df$Species
+
+##Remove the first eight taxonomy columns including the 'Species' column to clean up the dataframe
+count_df <- count_df %>%
+  select(-Domain, -Kingdom, -Phylum, -Class, -Order, -Family, -Genus, -Species)
+
+##Replace 'X5080' with 'Sample' in the column names
+colnames(count_df) <- gsub("X5080_", "Sample_", colnames(count_df))
+
+##Now for sample data
+sample_df <- read.csv("~/Documents/DeQueen_Litter/sample_df.csv")
+
+##Modify the sample_df dataframe
+names(sample_df)[names(sample_df) == "Treat"] <- "Treatment"
+
+##Add 'Sample_' prefix to every row in 'Sample.ID'
+sample_df$Sample.ID <- paste("Sample_", sample_df$Sample.ID, sep = "")
+
+##Replace values in 'Treatment' column
+sample_df$Treatment <- ifelse(sample_df$Treatment == "LT", "IndigoLT", sample_df$Treatment)
+sample_df$Treatment <- ifelse(sample_df$Treatment == "CON", "Control", sample_df$Treatment)
+
+##Remove Sample 15 (did not sequence), change Sample 15-2 to Sample 15 (to match taxonomy and count files), and remove blank rows
+# Remove rows where 'Sample.ID' is 'Sample_15' or 'Sample_'
+sample_df <- sample_df[!(sample_df$Sample.ID %in% c("Sample_15", "Sample_")), ]
+
+# Rename 'Sample_15-2' to 'Sample_15'
+sample_df$Sample.ID <- ifelse(sample_df$Sample.ID == "Sample_15-2", "Sample_15", sample_df$Sample.ID)
+
+##Set row names based on the 'Sample.ID' column
+rownames(sample_df) <- sample_df$Sample.ID
+
+# Add the 'bio_or_control' column based on conditions in 'Treatment'
+sample_df <- sample_df %>%
+  mutate(bio_or_control = ifelse(Treatment %in% c("IndigoLT", "Control"), "biological", "control"))
+
+```
+
+```{r}
+##We can now create the phyloseq object
+# Convert sample_df to a sample_data object
+sample_data_ps <- sample_data(sample_df)
+
+# Convert count_df to an OTU table (make sure counts are integers)
+otu_table_ps <- otu_table(as.matrix(count_df), taxa_are_rows = TRUE)
+
+# Convert taxonomy_df to a tax_table object
+taxonomy_table_ps <- tax_table(as.matrix(taxonomy_df))
+
+# Combine into a phyloseq object
+physeq <- phyloseq(otu_table_ps, sample_data_ps, taxonomy_table_ps)
+
+```
+
+```{r}
+##Let's decontaminate with the decontam package
+##https://link.springer.com/article/10.1186/s40168-018-0605-2
+##Based on code from soybean manuscript
+
+#library(decontam)
+
+##Assign negative control
+sample_data(physeq)$is.neg <- sample_data(physeq)$bio_or_control == "control"
+
+##Create a presence-absence phyloseq object
+physeq.pa <- transform_sample_counts(physeq, function(abund) 1*(abund>0))
+physeq.pa.neg <- prune_samples(sample_data(physeq.pa)$bio_or_control == "control", physeq.pa)
+physeq.pa.pos <- prune_samples(sample_data(physeq.pa)$bio_or_control == "biological", physeq.pa)
+
+##Perform decontamination with different prevalence thresholds
+
+##Threshold 0.1
+contamdf.prev01 <- isContaminant(physeq, method="prevalence", neg="is.neg", threshold=0.1)
+
+# Create data.frame of prevalence in positive and negative samples
+df.pa01 <- data.frame(pa.pos=taxa_sums(physeq.pa.pos), pa.neg=taxa_sums(physeq.pa.neg),
+                      contaminant=contamdf.prev01$contaminant)
+
+# Plot the results for threshold 0.1
+ggplot(data=df.pa01, aes(x=pa.neg, y=pa.pos, color=contaminant)) + 
+  geom_jitter(size=2.5, alpha = 0.75) +
+  xlab("Prevalence (Negative Controls)") + 
+  ylab("Prevalence (True Samples)") +
+  theme_bw() +
+  theme(axis.text = element_text(size=16),
+        axis.title = element_text(size = 16),
+        legend.title = element_text(face = "bold", size = 10),
+        legend.text = element_text(face = "bold", size = 10)) +  
+  scale_color_manual(name = "Contaminant", labels = c("False", "True"), values = c("#2f357c","#bf3729")) +
+  ggtitle("Prevalence threshold = 0.1")
+
+#ggsave("Decontam_prevalence_threshold_0.1.png", width = 10, height = 10, units = "in", dpi = 900)
+
+##Threshold 0.5
+contamdf.prev05 <- isContaminant(physeq, method="prevalence", neg="is.neg", threshold=0.5)
+
+# Create data.frame of prevalence in positive and negative samples
+df.pa05 <- data.frame(pa.pos=taxa_sums(physeq.pa.pos), pa.neg=taxa_sums(physeq.pa.neg),
+                      contaminant=contamdf.prev05$contaminant)
+
+# Plot the results for threshold 0.5
+ggplot(data=df.pa05, aes(x=pa.neg, y=pa.pos, color=contaminant)) + 
+  geom_jitter(size=2.5, alpha = 0.75) +
+  xlab("Prevalence (Negative Controls)") + 
+  ylab("Prevalence (True Samples)") +
+  theme_bw() +
+  theme(axis.text = element_text(size=16),
+        axis.title = element_text(size = 16),
+        legend.title = element_text(face = "bold", size = 10),
+        legend.text = element_text(face = "bold", size = 10)) +  
+  scale_color_manual(name = "Contaminant", labels = c("False", "True"), values = c("#2f357c","#bf3729")) +
+  ggtitle("Prevalence threshold = 0.5")
+
+#ggsave("Decontam_prevalence_threshold_0.5.png", width = 10, height = 10, units = "in", dpi = 900)
+
+# Write out the results for final analysis
+#write.csv(df.pa05, "./DecontamResults_prev05.csv")
+
+# Remove contaminants identified with a threshold of 0.5
+physeq_decontam <- prune_taxa(!contamdf.prev05$contaminant, physeq)
+
+```
+
+```{r}
+##We will now prune the negative controls and get busy with analyses
+##Remove negative controls from the physeq_decontam object
+physeq_decontam_no_neg <- prune_samples(sample_data(physeq_decontam)$bio_or_control == "biological", physeq_decontam)
+
+##Convert Growout and House to character in the sample data
+# Extract sample data as a dataframe
+sample_data_df <- as(sample_data(physeq_decontam_no_neg), "data.frame")
+
+# Check the class of sample_data_df to confirm it is a dataframe
+print(class(sample_data_df))
+
+# Convert Growout and House to character
+sample_data_df <- sample_data_df %>%
+  mutate(Growout = as.character(Growout),
+         House = as.character(House))
+
+# Convert the dataframe back to sample_data object
+sample_data(physeq_decontam_no_neg) <- sample_data(sample_data_df)
+
+```

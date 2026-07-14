@@ -1,0 +1,2326 @@
+---
+title: "Network analysis"
+author: "BH"
+date: "2025-09-04"
+output: html_document
+---
+
+```{r}
+##Will start with physeq_decontam_norm and filter to desired combinations
+
+##network-specific libraries
+#install_github("zdk123/SpiecEasi")
+
+library(rnetcarto)
+library(SpiecEasi)
+library(igraph)
+library(qgraph)
+
+```
+
+
+```{r}
+##We will now attempt to build microbial networks for Treatment-Growout combinations
+
+# Ensure that Growout and Treatment columns are factors
+sample_data(physeq_decontam_norm)$Growout <- as.factor(sample_data(physeq_decontam_norm)$Growout)
+sample_data(physeq_decontam_norm)$Treatment <- as.factor(sample_data(physeq_decontam_norm)$Treatment)
+
+# Define a function to filter the phyloseq object by both Growout and Treatment
+filter_phyloseq <- function(physeq, growout, treatment) {
+  subset_samples(physeq, Growout == growout & Treatment == treatment)
+}
+
+# Create phyloseq objects for each Growout-Treatment combination
+physeq_G1_C <- subset_samples(physeq_decontam_norm, Growout == "1" & Treatment == "Control")
+physeq_G1_I <- subset_samples(physeq_decontam_norm, Growout == "1" & Treatment == "IndigoLT")
+physeq_G2_C <- subset_samples(physeq_decontam_norm, Growout == "2" & Treatment == "Control")
+physeq_G2_I <- subset_samples(physeq_decontam_norm, Growout == "2" & Treatment == "IndigoLT")
+physeq_G3_C <- subset_samples(physeq_decontam_norm, Growout == "3" & Treatment == "Control")
+physeq_G3_I <- subset_samples(physeq_decontam_norm, Growout == "3" & Treatment == "IndigoLT")
+
+# Verify the filtering by checking the sample metadata of the filtered phyloseq objects
+sampleData(physeq_G1_C)
+
+```
+
+```{r}
+##Let's start with the first network
+
+# Extract the count data matrix from the phyloseq object (assuming physeq_G1_C is one of your filtered objects)
+count_matrix <- as.data.frame(otu_table(physeq_G1_C))
+
+##Let's apply a 0.2 prevalence threshold to reduce sparsity
+# Remove rows where the row name is 'Unknown'
+count_matrix <- count_matrix[rownames(count_matrix) != "Unknown", ]
+# Define the prevalence threshold
+prevalence_threshold <- 0.2
+# Calculate the number of non-zero entries required per row
+required_nonzero <- prevalence_threshold * ncol(count_matrix)
+# Filter rows based on the prevalence threshold
+count_matrix <- count_matrix[rowSums(count_matrix != 0) >= required_nonzero, ]
+
+##Must transpose
+count_matrix <- t(as.matrix(count_matrix))
+
+# Define SparCC parameters
+sparcc_params <- list(iter = 20, inner_iter = 10, th = 0.1)
+
+# Perform SparCC inference
+sparcc_result <- sparcc(count_matrix, iter = 20, inner_iter = 10, th = 0.1)
+
+# Perform bootstrapping for SparCC
+bootstrapped_sparcc <- sparccboot(
+  count_matrix,
+  R = 500,
+  sparcc.params = sparcc_params,
+  statisticboot = function(data, indices) triu(do.call("sparcc", c(list(data[indices, , drop = FALSE]), sparcc_params))$Cor),
+  statisticperm = function(data, indices) triu(do.call("sparcc", c(list(apply(data[indices, ], 2, sample)), sparcc_params))$Cor),
+  ncpus = 4
+)
+
+# Extract the SparCC correlation matrix
+sparcc_correlation <- sparcc_result$Cor
+
+# Assign the original taxon names to the correlation matrix
+taxa_names <- colnames(count_matrix)
+rownames(sparcc_correlation) <- taxa_names
+colnames(sparcc_correlation) <- taxa_names
+
+# Calculate p-values from bootstrapped results
+bootstrapped_correlations <- bootstrapped_sparcc$Cor
+
+
+# Extract bootstrapped correlations
+bootstrapped_correlations <- bootstrapped_sparcc$t
+
+# Reshape the bootstrapped correlations into a 3D array if needed
+n <- nrow(sparcc_correlation)
+R <- nrow(bootstrapped_correlations)
+bootstrapped_correlations <- array(bootstrapped_correlations, dim = c(R, n, n))
+
+# Initialize the p-value matrix
+sparcc_pvals <- matrix(NA, nrow = nrow(sparcc_correlation), ncol = ncol(sparcc_correlation))
+rownames(sparcc_pvals) <- taxa_names
+colnames(sparcc_pvals) <- taxa_names
+
+# Calculate p-values
+for (i in 1:(nrow(sparcc_correlation) - 1)) {
+  for (j in (i + 1):ncol(sparcc_correlation)) {
+    pval <- mean(abs(bootstrapped_correlations[, i, j]) >= abs(sparcc_correlation[i, j]), na.rm = TRUE)
+    sparcc_pvals[i, j] <- pval
+    sparcc_pvals[j, i] <- pval  # Symmetric matrix
+  }
+}
+
+# Initialize lists to store the data
+taxon1 <- c()
+taxon2 <- c()
+association_values <- c()
+p_values <- c()
+
+# Populate the lists with non-redundant upper triangular values
+for (i in 1:(nrow(sparcc_correlation) - 1)) {
+  for (j in (i + 1):ncol(sparcc_correlation)) {
+    taxon1 <- c(taxon1, rownames(sparcc_correlation)[i])
+    taxon2 <- c(taxon2, colnames(sparcc_correlation)[j])
+    association_values <- c(association_values, sparcc_correlation[i, j])
+    p_values <- c(p_values, sparcc_pvals[i, j])
+  }
+}
+
+# Create a data frame
+sparcc_results_df <- data.frame(
+  Taxon1 = taxon1,
+  Taxon2 = taxon2,
+  AssociationValue = association_values,
+  PValue = p_values
+)
+
+# Filter the dataframe based on p-value and association value
+sparcc_results_df.2 <- subset(sparcc_results_df, abs(AssociationValue) > 0.5 & PValue < 0.05)
+
+# Extract the taxonomy table
+tax_table <- as.data.frame(tax_table(physeq_G1_C))
+
+# Ensure that the rownames of tax_table are the taxon names
+tax_table$Species <- rownames(tax_table)
+
+# Extract only the Family and Species columns
+family_info <- tax_table[, c("Family", "Species")]
+
+# Families to keep (everything else -> "Other")
+keep_families <- c(
+  "Carnobacteriaceae", "Lactobacillaceae", "Staphylococcaceae",
+  "Dermabacteraceae", "Nocardiopsaceae", "Bacillaceae", "Micrococcaceae"
+)
+
+# Replace non-specified families with "Other"
+family_info$Family <- ifelse(
+  !is.na(family_info$Family) & family_info$Family %in% keep_families,
+  family_info$Family,
+  "Other"
+)
+
+# Updated color palette (renamed "<5% abund." -> "Other")
+family_colors <- c(
+  "Carnobacteriaceae" = "#fcfdbf",
+  "Lactobacillaceae"  = "#febb81",
+  "Staphylococcaceae" = "#f8765c",
+  "Dermabacteraceae"  = "#d3436e",
+  "Nocardiopsaceae"   = "#982d80",
+  "Bacillaceae"       = "#5f187f",
+  "Micrococcaceae"    = "#221150",
+  "Other"             = "#000004"
+)
+
+# Extract vertex names from the graph
+vertex_names <- V(sparcc_graph)$name
+
+# Create a color vector for vertices based on their Family
+vertex_colors <- family_info$Family[match(vertex_names, family_info$Species)]
+vertex_colors <- family_colors[vertex_colors]
+
+# Create edge color vector based on association values
+edge_colors <- ifelse(sparcc_results_df.2$AssociationValue < 0, 
+                      rgb(1, 0, 0, alpha = 0.5),  # Red with 20% opacity
+                      rgb(0, 0, 0, alpha = 0.5))  # Black with 20% opacity
+
+##Let's now assign node/vertex roles
+# Define the node.role function
+node.role <- function(graph_object) {
+  # Get adjacency matrix without considering weights
+  net_adj = get.adjacency(graph_object, sparse = FALSE)
+  
+  # Run the netcarto function to get node roles
+  roles <- netcarto(net_adj)
+  
+  # Return the roles
+  return(roles)
+}
+
+# Calculate node roles using the node.role function
+roles <- node.role(sparcc_graph)
+
+# Extract the data frame from the roles list
+roles_df <- roles[[1]]
+
+# Create a data frame with the desired information
+node_roles_df <- data.frame(
+  Node = roles_df$name,
+  WithinModuleDegree = roles_df$connectivity,
+  AmongModuleConnectivity = roles_df$participation,
+  Role = roles_df$role
+)
+
+
+##Define a size mapping for each role- will start with what is present in this network, will expand to all categories
+##if presented in other networks
+#role_sizes <- c(
+  #"Ultra peripheral" = 2,
+  #"Peripheral" = 4,
+  #"Non-hub Connector" = 6,
+  #"Non-hub Kinless" = 8,
+  #"Provincial hub" = 10,
+  #"Connector hub" = 12,
+  #"Kinless hub" = 14)
+
+role_sizes <- c( "Kinless" = 2.5,
+  "Ultra peripheral" = 5,
+  "Peripheral" = 7,
+  "Connector" = 9,
+  "Connector hub" = 11)
+
+
+  
+## Map vertex sizes based on role and ensure names
+vertex_sizes <- setNames(role_sizes[as.character(node_roles_df$Role)], node_roles_df$Node)
+vertex_sizes <- vertex_sizes[V(sparcc_graph)$name]
+# Ensure all vertex sizes are finite
+vertex_sizes <- ifelse(is.finite(vertex_sizes), vertex_sizes, 2.5)
+
+# Get edge list
+e <- get.edgelist(sparcc_graph, names = FALSE)
+
+# Adjusted layout parameters to reduce edge overlap
+l <- qgraph.layout.fruchtermanreingold(e, vcount = vcount(sparcc_graph), 
+                                       area = 1000 * (vcount(sparcc_graph)^2), 
+                                       repulse.rad = (vcount(sparcc_graph)^4),
+                                       niter = 2000)
+
+# Plot the network using the adjusted layout and colored vertices
+plot(sparcc_graph, layout = l, vertex.size = vertex_sizes, vertex.label = NA, vertex.color = vertex_colors, edge.color = edge_colors)
+
+# Adjusting legends- we will come back and do this last for the final figure
+# Legend for Family
+legend("bottom", 
+       legend = names(family_colors), 
+       fill = family_colors, 
+       title = "Family", 
+       #horiz = TRUE, 
+       cex = 0.8, inset = c(0, -0.1),
+       bty = "n", ncol = 2) # Splitting into two lines
+
+plot(sparcc_graph, layout = l, vertex.size = vertex_sizes, vertex.label = NA, vertex.color = vertex_colors, edge.color = edge_colors)
+
+# Legend for Edge colors
+legend("right", 
+       legend = c("Positive Association", "Negative Association"), 
+       col = c("black", "red"), 
+       lty = 1, 
+       lwd = 2, 
+       #horiz = TRUE, 
+       cex = 0.8, inset = c(0, 0.2))
+
+png("sparcc_graph.g1.c.png", width = 4, height = 4, units = "in", res = 900, bg = "white")
+par(mar = c(0, 0, 0, 0))
+plot(sparcc_graph, layout = l, vertex.size = vertex_sizes, vertex.label = NA, vertex.color = vertex_colors, edge.color = edge_colors)
+dev.off()
+
+# Legend for Node Role
+legend("bottom", 
+       legend = names(role_sizes), 
+       pt.cex = role_sizes / 5, 
+       pch = 21, 
+       pt.bg = "grey", 
+       title = "Node Role", 
+       #horiz = TRUE, 
+       cex = 0.8, inset = c(0, -0.3), ncol = 2)
+
+
+##Let's extract network properties for comparison
+centralization_degree <- centralization.degree(sparcc_graph)$centralization
+cluster_count <- clusters(sparcc_graph)$no
+connectance <- edge_density(sparcc_graph)
+edge_count <- gsize(sparcc_graph)
+node_count <- gorder(sparcc_graph)
+mean_degree <- mean(degree(sparcc_graph))
+positive_edges <- sum(sparcc_results_df.2$AssociationValue > 0)
+negative_edges <- sum(sparcc_results_df.2$AssociationValue < 0)
+average_path_length <- mean_distance(sparcc_graph, directed = FALSE)
+
+# Detect communities for modularity calculation
+communities <- cluster_walktrap(sparcc_graph)
+modularity_value <- modularity(communities)
+
+# Compile network properties into a data frame
+network_properties_df <- data.frame(
+  CentralizationDegree = centralization_degree,
+  ClusterCount = cluster_count,
+  Connectance = connectance,
+  EdgeCount = edge_count,
+  NodeCount = node_count,
+  MeanDegree = mean_degree,
+  PositiveEdges = positive_edges,
+  NegativeEdges = negative_edges,
+  PercentPositiveEdges = positive_edges / edge_count * 100,
+  PercentNegativeEdges = negative_edges / edge_count * 100,
+  AveragePathLength = average_path_length,
+  Modularity = modularity_value,
+  Growout = '1',
+  Treatment = 'Control'
+)
+
+```
+
+```{r}
+
+##Network for physeq_G1_I
+# Extract the count data matrix from the phyloseq object
+count_matrix_G1_I <- as.data.frame(otu_table(physeq_G1_I))
+
+# Apply a 0.2 prevalence threshold to reduce sparsity
+# Remove rows where the row name is 'Unknown'
+count_matrix_G1_I <- count_matrix_G1_I[rownames(count_matrix_G1_I) != "Unknown", ]
+# Define the prevalence threshold
+prevalence_threshold <- 0.2
+# Calculate the number of non-zero entries required per row
+required_nonzero <- prevalence_threshold * ncol(count_matrix_G1_I)
+# Filter rows based on the prevalence threshold
+count_matrix_G1_I <- count_matrix_G1_I[rowSums(count_matrix_G1_I != 0) >= required_nonzero, ]
+
+# Transpose the count matrix
+count_matrix_G1_I <- t(as.matrix(count_matrix_G1_I))
+
+# Define SparCC parameters
+sparcc_params <- list(iter = 20, inner_iter = 10, th = 0.1)
+
+# Perform SparCC inference
+sparcc_result_G1_I <- sparcc(count_matrix_G1_I, iter = 20, inner_iter = 10, th = 0.1)
+
+# Perform bootstrapping for SparCC
+bootstrapped_sparcc_G1_I <- sparccboot(
+  count_matrix_G1_I,
+  R = 500,
+  sparcc.params = sparcc_params,
+  statisticboot = function(data, indices) triu(do.call("sparcc", c(list(data[indices, , drop = FALSE]), sparcc_params))$Cor),
+  statisticperm = function(data, indices) triu(do.call("sparcc", c(list(apply(data[indices, ], 2, sample)), sparcc_params))$Cor),
+  ncpus = 4
+)
+
+# Extract the SparCC correlation matrix
+sparcc_correlation_G1_I <- sparcc_result_G1_I$Cor
+
+# Assign the original taxon names to the correlation matrix
+taxa_names_G1_I <- colnames(count_matrix_G1_I)
+rownames(sparcc_correlation_G1_I) <- taxa_names_G1_I
+colnames(sparcc_correlation_G1_I) <- taxa_names_G1_I
+
+# Calculate p-values from bootstrapped results
+bootstrapped_correlations_G1_I <- bootstrapped_sparcc_G1_I$Cor
+bootstrapped_correlations_G1_I <- bootstrapped_sparcc_G1_I$t
+
+# Reshape the bootstrapped correlations into a 3D array if needed
+n_G1_I <- nrow(sparcc_correlation_G1_I)
+R_G1_I <- nrow(bootstrapped_correlations_G1_I)
+bootstrapped_correlations_G1_I <- array(bootstrapped_correlations_G1_I, dim = c(R_G1_I, n_G1_I, n_G1_I))
+
+# Initialize the p-value matrix
+sparcc_pvals_G1_I <- matrix(NA, nrow = nrow(sparcc_correlation_G1_I), ncol = ncol(sparcc_correlation_G1_I))
+rownames(sparcc_pvals_G1_I) <- taxa_names_G1_I
+colnames(sparcc_pvals_G1_I) <- taxa_names_G1_I
+
+# Calculate p-values
+for (i in 1:(nrow(sparcc_correlation_G1_I) - 1)) {
+  for (j in (i + 1):ncol(sparcc_correlation_G1_I)) {
+    pval_G1_I <- mean(abs(bootstrapped_correlations_G1_I[, i, j]) >= abs(sparcc_correlation_G1_I[i, j]), na.rm = TRUE)
+    sparcc_pvals_G1_I[i, j] <- pval_G1_I
+    sparcc_pvals_G1_I[j, i] <- pval_G1_I  # Symmetric matrix
+  }
+}
+
+# Initialize lists to store the data
+taxon1_G1_I <- c()
+taxon2_G1_I <- c()
+association_values_G1_I <- c()
+p_values_G1_I <- c()
+
+# Populate the lists with non-redundant upper triangular values
+for (i in 1:(nrow(sparcc_correlation_G1_I) - 1)) {
+  for (j in (i + 1):ncol(sparcc_correlation_G1_I)) {
+    taxon1_G1_I <- c(taxon1_G1_I, rownames(sparcc_correlation_G1_I)[i])
+    taxon2_G1_I <- c(taxon2_G1_I, colnames(sparcc_correlation_G1_I)[j])
+    association_values_G1_I <- c(association_values_G1_I, sparcc_correlation_G1_I[i, j])
+    p_values_G1_I <- c(p_values_G1_I, sparcc_pvals_G1_I[i, j])
+  }
+}
+
+# Create a data frame
+sparcc_results_df_G1_I <- data.frame(
+  Taxon1 = taxon1_G1_I,
+  Taxon2 = taxon2_G1_I,
+  AssociationValue = association_values_G1_I,
+  PValue = p_values_G1_I
+)
+
+# Filter the dataframe based on p-value and association value
+sparcc_results_df_G1_I.2 <- subset(sparcc_results_df_G1_I, abs(AssociationValue) > 0.5 & PValue < 0.05)
+
+# Extract the taxonomy table
+tax_table_G1_I <- as.data.frame(tax_table(physeq_G1_I))
+
+# Ensure that the rownames of tax_table are the taxon names
+tax_table_G1_I$Species <- rownames(tax_table_G1_I)
+
+# Extract only the Family and Species columns
+family_info_G1_I <- tax_table_G1_I[, c("Family", "Species")]
+
+# Update the Family information to replace non-specified families with 'Other'
+families_keep <- c("Carnobacteriaceae","Lactobacillaceae","Staphylococcaceae",
+                   "Dermabacteraceae","Nocardiopsaceae","Bacillaceae","Micrococcaceae")
+family_info_G1_I$Family <- ifelse(family_info_G1_I$Family %in% families_keep,
+                                  family_info_G1_I$Family, "Other")
+
+# Create igraph object from the filtered SparCC results
+sparcc_graph_G1_I <- graph_from_data_frame(sparcc_results_df_G1_I.2, directed = FALSE)
+
+# Assign vertex colors based on the Family information
+# (assumes 'family_colors' is your palette with "Other" included)
+vertex_colors_G1_I <- family_info_G1_I$Family[
+  match(V(sparcc_graph_G1_I)$name, family_info_G1_I$Species)
+]
+vertex_colors_G1_I <- family_colors[vertex_colors_G1_I]
+
+# Assign edge colors based on the association values
+edge_colors_G1_I <- ifelse(sparcc_results_df_G1_I.2$AssociationValue < 0, rgb(1, 0, 0, alpha = 0.5), rgb(0, 0, 0, alpha = 0.5))
+
+# Calculate node roles 
+roles_G1_I <- node.role(sparcc_graph_G1_I)
+roles_df_G1_I <- roles_G1_I[[1]]
+
+# Create a data frame with the desired information
+node_roles_df_G1_I <- data.frame(
+  Node = roles_df_G1_I$name,
+  WithinModuleDegree = roles_df_G1_I$connectivity,
+  AmongModuleConnectivity = roles_df_G1_I$participation,
+  Role = roles_df_G1_I$role
+)
+
+# Define vertex sizes based on node roles
+vertex_sizes_G1_I <- setNames(role_sizes[as.character(node_roles_df_G1_I$Role)], node_roles_df_G1_I$Node)
+vertex_sizes_G1_I <- vertex_sizes_G1_I[V(sparcc_graph_G1_I)$name]
+vertex_sizes_G1_I <- ifelse(is.finite(vertex_sizes_G1_I), vertex_sizes_G1_I, 2.5)
+
+# Adjust layout parameters
+e_G1_I <- get.edgelist(sparcc_graph_G1_I, names = FALSE)
+l_G1_I <- qgraph.layout.fruchtermanreingold(e_G1_I, vcount = vcount(sparcc_graph_G1_I), 
+                                            area = 1000 * (vcount(sparcc_graph_G1_I)^2), 
+                                            repulse.rad = (vcount(sparcc_graph_G1_I)^4),
+                                            niter = 2000)
+
+# Plot the network
+png("sparcc_graph.g1.i.png", width = 4, height = 4, units = "in", res = 900, bg = "white")
+par(mar = c(0, 0, 0, 0))
+plot(sparcc_graph_G1_I, layout = l_G1_I, vertex.size = vertex_sizes_G1_I, vertex.label = NA, vertex.color = vertex_colors_G1_I, edge.color = edge_colors_G1_I)
+dev.off()
+
+# Calculate network properties
+centralization_degree_G1_I <- centralization.degree(sparcc_graph_G1_I)$centralization
+cluster_count_G1_I <- clusters(sparcc_graph_G1_I)$no
+connectance_G1_I <- edge_density(sparcc_graph_G1_I)
+edge_count_G1_I <- gsize(sparcc_graph_G1_I)
+node_count_G1_I <- gorder(sparcc_graph_G1_I)
+mean_degree_G1_I <- mean(degree(sparcc_graph_G1_I))
+positive_edges_G1_I <- sum(sparcc_results_df_G1_I.2$AssociationValue > 0)
+negative_edges_G1_I <- sum(sparcc_results_df_G1_I.2$AssociationValue < 0)
+average_path_length_G1_I <-  mean_distance(sparcc_graph_G1_I, directed = FALSE)
+
+# Detect communities for modularity calculation
+communities_G1_I <- cluster_walktrap(sparcc_graph_G1_I)
+modularity_value_G1_I <- modularity(communities_G1_I)
+
+# Compile network properties into a data frame
+network_properties_df_G1_I <- data.frame(
+  CentralizationDegree = centralization_degree_G1_I,
+  ClusterCount = cluster_count_G1_I,
+  Connectance = connectance_G1_I,
+  EdgeCount = edge_count_G1_I,
+  NodeCount = node_count_G1_I,
+  MeanDegree = mean_degree_G1_I,
+  PositiveEdges = positive_edges_G1_I,
+  NegativeEdges = negative_edges_G1_I,
+  PercentPositiveEdges = positive_edges_G1_I / edge_count_G1_I * 100,
+  PercentNegativeEdges = negative_edges_G1_I / edge_count_G1_I * 100,
+  AveragePathLength = average_path_length_G1_I,
+  Modularity = modularity_value_G1_I,
+  Growout = '1',
+  Treatment = 'IndigoLT'
+)
+
+# Print the network properties
+print(network_properties_df_G1_I)
+
+```
+
+```{r}
+##Network for physeq_G2_C
+# Extract the count data matrix from the phyloseq object (assuming physeq_G2_C is one of your filtered objects)
+count_matrix_G2_C <- as.data.frame(otu_table(physeq_G2_C))
+
+# Apply a 0.2 prevalence threshold to reduce sparsity
+# Remove rows where the row name is 'Unknown'
+count_matrix_G2_C <- count_matrix_G2_C[rownames(count_matrix_G2_C) != "Unknown", ]
+# Define the prevalence threshold
+prevalence_threshold <- 0.2
+# Calculate the number of non-zero entries required per row
+required_nonzero <- prevalence_threshold * ncol(count_matrix_G2_C)
+# Filter rows based on the prevalence threshold
+count_matrix_G2_C <- count_matrix_G2_C[rowSums(count_matrix_G2_C != 0) >= required_nonzero, ]
+
+# Transpose the count matrix
+count_matrix_G2_C <- t(as.matrix(count_matrix_G2_C))
+
+# Define SparCC parameters
+sparcc_params_G2_C <- list(iter = 20, inner_iter = 10, th = 0.1)
+
+# Perform SparCC inference
+sparcc_result_G2_C <- sparcc(count_matrix_G2_C, iter = 20, inner_iter = 10, th = 0.1)
+
+# Perform bootstrapping for SparCC
+bootstrapped_sparcc_G2_C <- sparccboot(
+  count_matrix_G2_C,
+  R = 500,
+  sparcc.params = sparcc_params_G2_C,
+  statisticboot = function(data, indices) triu(do.call("sparcc", c(list(data[indices, , drop = FALSE]), sparcc_params_G2_C))$Cor),
+  statisticperm = function(data, indices) triu(do.call("sparcc", c(list(apply(data[indices, ], 2, sample)), sparcc_params_G2_C))$Cor),
+  ncpus = 4
+)
+
+# Extract the SparCC correlation matrix
+sparcc_correlation_G2_C <- sparcc_result_G2_C$Cor
+
+# Assign the original taxon names to the correlation matrix
+taxa_names_G2_C <- colnames(count_matrix_G2_C)
+rownames(sparcc_correlation_G2_C) <- taxa_names_G2_C
+colnames(sparcc_correlation_G2_C) <- taxa_names_G2_C
+
+# Calculate p-values from bootstrapped results
+bootstrapped_correlations_G2_C <- bootstrapped_sparcc_G2_C$t
+
+# Reshape the bootstrapped correlations into a 3D array if needed
+n_G2_C <- nrow(sparcc_correlation_G2_C)
+R_G2_C <- nrow(bootstrapped_correlations_G2_C)
+bootstrapped_correlations_G2_C <- array(bootstrapped_correlations_G2_C, dim = c(R_G2_C, n_G2_C, n_G2_C))
+
+# Initialize the p-value matrix
+sparcc_pvals_G2_C <- matrix(NA, nrow = nrow(sparcc_correlation_G2_C), ncol = ncol(sparcc_correlation_G2_C))
+rownames(sparcc_pvals_G2_C) <- taxa_names_G2_C
+colnames(sparcc_pvals_G2_C) <- taxa_names_G2_C
+
+# Calculate p-values
+for (i in 1:(nrow(sparcc_correlation_G2_C) - 1)) {
+  for (j in (i + 1):ncol(sparcc_correlation_G2_C)) {
+    pval <- mean(abs(bootstrapped_correlations_G2_C[, i, j]) >= abs(sparcc_correlation_G2_C[i, j]), na.rm = TRUE)
+    sparcc_pvals_G2_C[i, j] <- pval
+    sparcc_pvals_G2_C[j, i] <- pval  # Symmetric matrix
+  }
+}
+
+# Initialize lists to store the data
+taxon1_G2_C <- c()
+taxon2_G2_C <- c()
+association_values_G2_C <- c()
+p_values_G2_C <- c()
+
+# Populate the lists with non-redundant upper triangular values
+for (i in 1:(nrow(sparcc_correlation_G2_C) - 1)) {
+  for (j in (i + 1):ncol(sparcc_correlation_G2_C)) {
+    taxon1_G2_C <- c(taxon1_G2_C, rownames(sparcc_correlation_G2_C)[i])
+    taxon2_G2_C <- c(taxon2_G2_C, colnames(sparcc_correlation_G2_C)[j])
+    association_values_G2_C <- c(association_values_G2_C, sparcc_correlation_G2_C[i, j])
+    p_values_G2_C <- c(p_values_G2_C, sparcc_pvals_G2_C[i, j])
+  }
+}
+
+# Create a data frame
+sparcc_results_df_G2_C <- data.frame(
+  Taxon1 = taxon1_G2_C,
+  Taxon2 = taxon2_G2_C,
+  AssociationValue = association_values_G2_C,
+  PValue = p_values_G2_C
+)
+
+# Filter the dataframe based on p-value and association value
+sparcc_results_df_G2_C_filtered <- subset(sparcc_results_df_G2_C, abs(AssociationValue) > 0.5 & PValue < 0.05)
+
+# Extract the taxonomy table
+tax_table_G2_C <- as.data.frame(tax_table(physeq_G2_C))
+
+# Ensure that the rownames of tax_table are the taxon names
+tax_table_G2_C$Species <- rownames(tax_table_G2_C)
+
+# Extract only the Family and Species columns
+family_info_G2_C <- tax_table_G2_C[, c("Family", "Species")]
+
+# Update the Family information to replace non-specified families with 'Other'
+family_info_G2_C$Family <- ifelse(family_info_G2_C$Family %in% c(
+  "Carnobacteriaceae","Lactobacillaceae","Staphylococcaceae",
+  "Dermabacteraceae","Nocardiopsaceae","Bacillaceae","Micrococcaceae"
+), family_info_G2_C$Family, "Other")
+
+# Create an igraph object
+sparcc_graph_G2_C <- graph_from_data_frame(sparcc_results_df_G2_C_filtered, directed = FALSE)
+
+# Extract vertex names from the graph
+vertex_names_G2_C <- V(sparcc_graph_G2_C)$name
+
+# Create a color vector for vertices based on their Family
+vertex_colors_G2_C <- family_info_G2_C$Family[match(vertex_names_G2_C, family_info_G2_C$Species)]
+vertex_colors_G2_C <- family_colors[vertex_colors_G2_C]
+
+# Create edge color vector based on association values
+edge_colors_G2_C <- ifelse(sparcc_results_df_G2_C_filtered$AssociationValue < 0, 
+                           rgb(1, 0, 0, alpha = 0.5),  # Red with 20% opacity
+                           rgb(0, 0, 0, alpha = 0.5))  # Black with 20% opacity
+
+# Assign node/vertex roles
+roles_G2_C <- node.role(sparcc_graph_G2_C)
+
+# Extract the data frame from the roles list
+roles_df_G2_C <- roles_G2_C[[1]]
+
+# Create a data frame with the desired information
+node_roles_df_G2_C <- data.frame(
+  Node = roles_df_G2_C$name,
+  WithinModuleDegree = roles_df_G2_C$connectivity,
+  AmongModuleConnectivity = roles_df_G2_C$participation,
+  Role = roles_df_G2_C$role
+)
+
+# Define role sizes
+role_sizes <- c( "Kinless" = 2.5,
+  "Ultra peripheral" = 5,
+  "Peripheral" = 7,
+  "Connector" = 9,
+  "Connector hub" = 11)
+
+# Map vertex sizes based on role and ensure names
+vertex_sizes_G2_C <- setNames(role_sizes[as.character(node_roles_df_G2_C$Role)], node_roles_df_G2_C$Node)
+vertex_sizes_G2_C <- vertex_sizes_G2_C[V(sparcc_graph_G2_C)$name]
+# Ensure all vertex sizes are finite
+vertex_sizes_G2_C <- ifelse(is.finite(vertex_sizes_G2_C), vertex_sizes_G2_C, 2.5)
+
+# Get edge list
+e_G2_C <- get.edgelist(sparcc_graph_G2_C, names = FALSE)
+
+# Adjusted layout parameters to reduce edge overlap
+l_G2_C <- qgraph.layout.fruchtermanreingold(e_G2_C, vcount = vcount(sparcc_graph_G2_C), 
+                                            area = 1000 * (vcount(sparcc_graph_G2_C)^2), 
+                                            repulse.rad = (vcount(sparcc_graph_G2_C)^4),
+                                            niter = 2000)
+
+# Plot the network using the adjusted layout and colored vertices
+png("sparcc_graph.g2.c.png", width = 4, height = 4, units = "in", res = 900, bg = "white")
+par(mar = c(0, 0, 0, 0))
+plot(sparcc_graph_G2_C, layout = l_G2_C, vertex.size = vertex_sizes_G2_C, vertex.label = NA, vertex.color = vertex_colors_G2_C, edge.color = edge_colors_G2_C)
+dev.off()
+
+# Calculate network properties
+centralization_degree_G2_C <- centralization.degree(sparcc_graph_G2_C)$centralization
+cluster_count_G2_C <- clusters(sparcc_graph_G2_C)$no
+connectance_G2_C <- edge_density(sparcc_graph_G2_C)
+edge_count_G2_C <- gsize(sparcc_graph_G2_C)
+node_count_G2_C <- gorder(sparcc_graph_G2_C)
+mean_degree_G2_C <- mean(degree(sparcc_graph_G2_C))
+positive_edges_G2_C <- sum(sparcc_results_df_G2_C_filtered$AssociationValue > 0)
+negative_edges_G2_C <- sum(sparcc_results_df_G2_C_filtered$AssociationValue < 0)
+average_path_length_G2_C <- mean_distance(sparcc_graph_G2_C, directed = FALSE)
+
+# Detect communities for modularity calculation
+communities_G2_C <- cluster_walktrap(sparcc_graph_G2_C)
+modularity_value_G2_C <- modularity(communities_G2_C)
+
+# Calculate percent positive and negative edges
+percent_positive_edges_G2_C <- positive_edges_G2_C / edge_count_G2_C * 100
+percent_negative_edges_G2_C <- negative_edges_G2_C / edge_count_G2_C * 100
+
+# Compile network properties into a data frame
+network_properties_df_G2_C <- data.frame(
+  CentralizationDegree = centralization_degree_G2_C,
+  ClusterCount = cluster_count_G2_C,
+  Connectance = connectance_G2_C,
+  EdgeCount = edge_count_G2_C,
+  NodeCount = node_count_G2_C,
+  MeanDegree = mean_degree_G2_C,
+  PositiveEdges = positive_edges_G2_C,
+  NegativeEdges = negative_edges_G2_C,
+  PercentPositiveEdges = percent_positive_edges_G2_C,
+  PercentNegativeEdges = percent_negative_edges_G2_C,
+  AveragePathLength = average_path_length_G2_C,
+  Modularity = modularity_value_G2_C,
+  Growout = '2',
+  Treatment = 'Control'
+)
+
+
+```
+
+```{r}
+
+##Network for physeq_G2_I
+# Extract the count data matrix from the phyloseq object for G2_I
+count_matrix_G2_I <- as.data.frame(otu_table(physeq_G2_I))
+
+# Apply a 0.2 prevalence threshold to reduce sparsity
+count_matrix_G2_I <- count_matrix_G2_I[rownames(count_matrix_G2_I) != "Unknown", ]
+prevalence_threshold <- 0.2
+required_nonzero <- prevalence_threshold * ncol(count_matrix_G2_I)
+count_matrix_G2_I <- count_matrix_G2_I[rowSums(count_matrix_G2_I != 0) >= required_nonzero, ]
+
+# Transpose the count matrix
+count_matrix_G2_I <- t(as.matrix(count_matrix_G2_I))
+
+# Define SparCC parameters
+sparcc_params_G2_I <- list(iter = 20, inner_iter = 10, th = 0.1)
+
+# Perform SparCC inference
+sparcc_result_G2_I <- sparcc(count_matrix_G2_I, iter = 20, inner_iter = 10, th = 0.1)
+
+# Perform bootstrapping for SparCC
+bootstrapped_sparcc_G2_I <- sparccboot(
+  count_matrix_G2_I,
+  R = 500,
+  sparcc.params = sparcc_params_G2_I,
+  statisticboot = function(data, indices) triu(do.call("sparcc", c(list(data[indices, , drop = FALSE]), sparcc_params_G2_I))$Cor),
+  statisticperm = function(data, indices) triu(do.call("sparcc", c(list(apply(data[indices, ], 2, sample)), sparcc_params_G2_I))$Cor),
+  ncpus = 4
+)
+
+# Extract the SparCC correlation matrix
+sparcc_correlation_G2_I <- sparcc_result_G2_I$Cor
+
+# Assign the original taxon names to the correlation matrix
+taxa_names_G2_I <- colnames(count_matrix_G2_I)
+rownames(sparcc_correlation_G2_I) <- taxa_names_G2_I
+colnames(sparcc_correlation_G2_I) <- taxa_names_G2_I
+
+# Calculate p-values from bootstrapped results
+bootstrapped_correlations_G2_I <- bootstrapped_sparcc_G2_I$t
+
+# Reshape the bootstrapped correlations into a 3D array if needed
+n_G2_I <- nrow(sparcc_correlation_G2_I)
+R_G2_I <- nrow(bootstrapped_correlations_G2_I)
+bootstrapped_correlations_G2_I <- array(bootstrapped_correlations_G2_I, dim = c(R_G2_I, n_G2_I, n_G2_I))
+
+# Initialize the p-value matrix
+sparcc_pvals_G2_I <- matrix(NA, nrow = nrow(sparcc_correlation_G2_I), ncol = ncol(sparcc_correlation_G2_I))
+rownames(sparcc_pvals_G2_I) <- taxa_names_G2_I
+colnames(sparcc_pvals_G2_I) <- taxa_names_G2_I
+
+# Calculate p-values
+for (i in 1:(nrow(sparcc_correlation_G2_I) - 1)) {
+  for (j in (i + 1):ncol(sparcc_correlation_G2_I)) {
+    pval_G2_I <- mean(abs(bootstrapped_correlations_G2_I[, i, j]) >= abs(sparcc_correlation_G2_I[i, j]), na.rm = TRUE)
+    sparcc_pvals_G2_I[i, j] <- pval_G2_I
+    sparcc_pvals_G2_I[j, i] <- pval_G2_I  # Symmetric matrix
+  }
+}
+
+# Initialize lists to store the data
+taxon1_G2_I <- c()
+taxon2_G2_I <- c()
+association_values_G2_I <- c()
+p_values_G2_I <- c()
+
+# Populate the lists with non-redundant upper triangular values
+for (i in 1:(nrow(sparcc_correlation_G2_I) - 1)) {
+  for (j in (i + 1):ncol(sparcc_correlation_G2_I)) {
+    taxon1_G2_I <- c(taxon1_G2_I, rownames(sparcc_correlation_G2_I)[i])
+    taxon2_G2_I <- c(taxon2_G2_I, colnames(sparcc_correlation_G2_I)[j])
+    association_values_G2_I <- c(association_values_G2_I, sparcc_correlation_G2_I[i, j])
+    p_values_G2_I <- c(p_values_G2_I, sparcc_pvals_G2_I[i, j])
+  }
+}
+
+# Create a data frame
+sparcc_results_df_G2_I <- data.frame(
+  Taxon1 = taxon1_G2_I,
+  Taxon2 = taxon2_G2_I,
+  AssociationValue = association_values_G2_I,
+  PValue = p_values_G2_I
+)
+
+# Filter the dataframe based on p-value and association value
+sparcc_results_df_G2_I_filtered <- subset(sparcc_results_df_G2_I, abs(AssociationValue) > 0.5 & PValue < 0.05)
+
+# Extract the taxonomy table
+tax_table_G2_I <- as.data.frame(tax_table(physeq_G2_I))
+
+# Ensure that the rownames of tax_table are the taxon names
+tax_table_G2_I$Species <- rownames(tax_table_G2_I)
+
+# Extract only the Family and Species columns
+family_info_G2_I <- tax_table_G2_I[, c("Family", "Species")]
+
+# Update the Family information to replace non-specified families with 'Other'
+family_info_G2_I$Family <- ifelse(
+  family_info_G2_I$Family %in% c(
+    "Carnobacteriaceae","Lactobacillaceae","Staphylococcaceae",
+    "Dermabacteraceae","Nocardiopsaceae","Bacillaceae","Micrococcaceae"
+  ),
+  family_info_G2_I$Family, "Other"
+)
+
+# Create an igraph object
+sparcc_graph_G2_I <- graph_from_data_frame(sparcc_results_df_G2_I_filtered, directed = FALSE)
+
+# Extract vertex names from the graph
+vertex_names_G2_I <- V(sparcc_graph_G2_I)$name
+
+# Create a color vector for vertices based on their Family
+vertex_colors_G2_I <- family_info_G2_I$Family[match(vertex_names_G2_I, family_info_G2_I$Species)]
+vertex_colors_G2_I <- family_colors[vertex_colors_G2_I]
+
+# Create edge color vector based on association values
+edge_colors_G2_I <- ifelse(sparcc_results_df_G2_I_filtered$AssociationValue < 0, 
+                      rgb(1, 0, 0, alpha = 0.5),  # Red with 20% opacity
+                      rgb(0, 0, 0, alpha = 0.5))  # Black with 20% opacity
+
+##Let's now assign node/vertex roles
+# Define the node.role function
+node.role_G2_I <- function(graph_object) {
+  # Get adjacency matrix without considering weights
+  net_adj_G2_I = get.adjacency(graph_object, sparse = FALSE)
+  
+  # Run the netcarto function to get node roles
+  roles_G2_I <- netcarto(net_adj_G2_I)
+  
+  # Return the roles
+  return(roles_G2_I)
+}
+
+# Calculate node roles using the node.role function
+roles_G2_I <- node.role_G2_I(sparcc_graph_G2_I)
+
+# Extract the data frame from the roles list
+roles_df_G2_I <- roles_G2_I[[1]]
+
+# Create a data frame with the desired information
+node_roles_df_G2_I <- data.frame(
+  Node = roles_df_G2_I$name,
+  WithinModuleDegree = roles_df_G2_I$connectivity,
+  AmongModuleConnectivity = roles_df_G2_I$participation,
+  Role = roles_df_G2_I$role
+)
+
+# Define role sizes
+role_sizes_G2_I <- c( "Kinless" = 2.5,
+  "Ultra peripheral" = 5,
+  "Peripheral" = 7,
+  "Connector" = 9,
+  "Connector hub" = 11)
+
+## Map vertex sizes based on role and ensure names
+vertex_sizes_G2_I <- setNames(role_sizes_G2_I[as.character(node_roles_df_G2_I$Role)], node_roles_df_G2_I$Node)
+vertex_sizes_G2_I <- vertex_sizes_G2_I[V(sparcc_graph_G2_I)$name]
+# Ensure all vertex sizes are finite
+vertex_sizes_G2_I <- ifelse(is.finite(vertex_sizes_G2_I), vertex_sizes_G2_I, 2.5)
+
+# Get edge list
+e_G2_I <- get.edgelist(sparcc_graph_G2_I, names = FALSE)
+
+# Adjusted layout parameters to reduce edge overlap
+l_G2_I <- qgraph.layout.fruchtermanreingold(e_G2_I, vcount = vcount(sparcc_graph_G2_I), 
+                                       area = 1000 * (vcount(sparcc_graph_G2_I)^2), 
+                                       repulse.rad = (vcount(sparcc_graph_G2_I)^4),
+                                       niter = 2000)
+
+# Plot the network using the adjusted layout and colored vertices
+png("sparcc_graph.g2.i.png", width = 4, height = 4, units = "in", res = 900, bg = "white")
+par(mar = c(0, 0, 0, 0))
+plot(sparcc_graph_G2_I, layout = l_G2_I, vertex.size = vertex_sizes_G2_I, vertex.label = NA, vertex.color = vertex_colors_G2_I, edge.color = edge_colors_G2_I)
+dev.off()
+
+# Calculate network properties
+centralization_degree_G2_I <- centralization.degree(sparcc_graph_G2_I)$centralization
+cluster_count_G2_I <- clusters(sparcc_graph_G2_I)$no
+connectance_G2_I <- edge_density(sparcc_graph_G2_I)
+edge_count_G2_I <- gsize(sparcc_graph_G2_I)
+node_count_G2_I <- gorder(sparcc_graph_G2_I)
+mean_degree_G2_I <- mean(degree(sparcc_graph_G2_I))
+positive_edges_G2_I <- sum(sparcc_results_df_G2_I_filtered$AssociationValue > 0)
+negative_edges_G2_I <- sum(sparcc_results_df_G2_I_filtered$AssociationValue < 0)
+average_path_length_G2_I <- mean_distance(sparcc_graph_G2_I, directed = FALSE)
+
+# Detect communities for modularity calculation
+communities_G2_I <- cluster_walktrap(sparcc_graph_G2_I)
+modularity_value_G2_I <- modularity(communities_G2_I)
+
+# Compile network properties into a data frame
+network_properties_df_G2_I <- data.frame(
+  CentralizationDegree = centralization_degree_G2_I,
+  ClusterCount = cluster_count_G2_I,
+  Connectance = connectance_G2_I,
+  EdgeCount = edge_count_G2_I,
+  NodeCount = node_count_G2_I,
+  MeanDegree = mean_degree_G2_I,
+  PositiveEdges = positive_edges_G2_I,
+  NegativeEdges = negative_edges_G2_I,
+  PercentPositiveEdges = positive_edges_G2_I / edge_count_G2_I * 100,
+  PercentNegativeEdges = negative_edges_G2_I / edge_count_G2_I * 100,
+  AveragePathLength = average_path_length_G2_I,
+  Modularity = modularity_value_G2_I,
+  Growout = '2',
+  Treatment = 'IndigoLT'
+)
+
+```
+
+```{r}
+##We will now explore network topology
+# Combine the data frames into a single data frame
+global_network_properties.new <- rbind(
+  network_properties_df,
+  network_properties_df_G1_I,
+  network_properties_df_G2_I,
+  network_properties_df_G2_C)
+
+# Convert the data frame to long format
+global_network_properties_long.new <- global_network_properties.new %>%
+  pivot_longer(
+    cols = 1:12,
+    names_to = "metric",
+    values_to = "value"
+  )
+
+# Rename variables in the 'metric' column
+global_network_properties_long.new <- global_network_properties_long.new %>%
+  mutate(metric = case_when(
+    metric == "CentralizationDegree" ~ "Centralization degree",
+    metric == "ClusterCount" ~ "Cluster count",
+    metric == "EdgeCount" ~ "Edge count",
+    metric == "NodeCount" ~ "Node count",
+    metric == "MeanDegree" ~ "Mean degree",
+    metric == "PositiveEdges" ~ "Positive edges",
+    metric == "NegativeEdges" ~ "Negative edges",
+    metric == "PercentPositiveEdges" ~ "% pos edges",
+    metric == "PercentNegativeEdges" ~ "% neg edges",
+    metric == "AveragePathLength" ~ "Mean path length",
+    TRUE ~ metric
+  ))
+
+##Plot
+ggplot(global_network_properties_long.new, aes(x = Growout, y = value, color = Treatment, fill = Treatment, group = interaction(Treatment, metric))) +
+  geom_line(aes(linetype = Treatment), position = position_dodge(width = 0.3), size = 1.5, show.legend = FALSE) + 
+  geom_point(shape = 21, color = 'black', position = position_dodge(width = 0.3), size = 3.5) +
+  facet_wrap(~metric, scales = 'free_y', ncol = 2) +
+  theme_bw() +
+  theme(
+    legend.position = 'top',
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text = element_text(size=12),
+    strip.text = element_text(size = 11),
+    strip.background = element_blank(),
+    axis.text = element_text(color = 'black'),
+    axis.title.x = element_text(face = "bold", size = 12),
+    axis.title.y = element_blank()) +
+  scale_color_manual(values = c("Control" = "#f8765c80", "IndigoLT" = "#22115080")) +
+  scale_fill_manual(values = c("Control" = "#f8765c", "IndigoLT" = "#221150"))
+
+ggsave("network.topology.new.2.png", width = 4.2, height = 9.5, units = "in", dpi = 900)
+
+```
+
+
+```{r}
+
+##For the figure, let's try to make a network nicer legend manually
+
+# Create a data frame for the Family legend
+family_legend_df <- data.frame(
+  Family = factor(names(family_colors), levels = names(family_colors))
+)
+
+# Create the Family legend plot
+ggplot(family_legend_df, aes(x = Family, fill = Family)) +
+  geom_bar(color = 'black') +
+  scale_fill_manual(values = family_colors) +
+  theme_void() +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text = element_text(size = 12)
+  ) +
+  guides(fill = guide_legend(title = "Family"))
+
+ggsave("family.legend.png", width = 10, height = 4, units = "in", dpi = 900)
+
+### 2. Legend for Edge colors
+# Create a data frame for the edge legend
+edge_legend_df <- data.frame(
+  Association = c("Positive Association", "Negative Association")
+)
+
+# Create the edge legend plot
+ggplot(edge_legend_df, aes(x = Association, y = 1, color = Association)) +
+  geom_segment(aes(x = 0.5, xend = 1.5, y = 1, yend = 1), size = 2) +
+  scale_color_manual(values = c('red', 'black')) +
+  theme_void() +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text = element_text(size = 12)
+  ) +
+  guides(color = guide_legend(title = "Edge Color"))
+
+ggsave("edge.legend.png", width = 10, height = 4, units = "in", dpi = 900)
+
+### 3. Legend for Node Role
+# Create a data frame for the role legend
+
+role_legend_df <- data.frame(
+  Role = factor(names(role_sizes), levels = names(role_sizes)),
+  Size = role_sizes
+)
+
+# Create the role legend plot
+ggplot(role_legend_df, aes(x = Role, y = 1, size = Role)) +
+  geom_point(aes(size = as.factor(Role)), shape = 21, fill = "grey") +
+  scale_size_manual(values = setNames(role_sizes, names(role_sizes))) +
+  theme_void() +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text = element_text(size = 12)
+  ) +
+  guides(size = guide_legend(title = "Node Role"))
+
+ggsave("node.role.legend.png", width = 10, height = 4, units = "in", dpi = 900)
+
+```
+
+```{r}
+
+##To go a step further, let's look at shared nodes and edges across the first and second growouts
+##we can use global_node_role to create the node venn diagram
+
+# Create intermediate data frames for each Growout_Treatment level (G1 and G2 only)
+G1_Control_nodes <- global_node_role %>% filter(Growout_Treatment == "1.Control") %>% pull(Node)
+G1_IndigoLT_nodes <- global_node_role %>% filter(Growout_Treatment == "1.IndigoLT") %>% pull(Node)
+G2_Control_nodes <- global_node_role %>% filter(Growout_Treatment == "2.Control") %>% pull(Node)
+G2_IndigoLT_nodes <- global_node_role %>% filter(Growout_Treatment == "2.IndigoLT") %>% pull(Node)
+
+# Create a list with the nodes for each level of Growout_Treatment (G1 and G2 only)
+node_list <- list(
+  "Growout 1-Control" = G1_Control_nodes,
+  "Growout 1-IndigoLT" = G1_IndigoLT_nodes,
+  "Growout 2-Control" = G2_Control_nodes,
+  "Growout 2-IndigoLT" = G2_IndigoLT_nodes
+)
+
+# Define distinct colors for each group
+venn_colors <- c("#7866D8", "#009681", "#767F00", "#CC476B")
+
+# Create the Venn diagram for G1 and G2 only
+ggvenn(node_list, show_percentage = TRUE, fill_color = venn_colors, fill_alpha = 0.7,
+       stroke_linetype = 'dashed', text_size = 4.5)
+
+ggsave("network.node.venn.png", width = 7, height = 4, units = "in", dpi = 900)
+
+##Now, for associations
+# Create unique identifiers for each association
+create_association_id <- function(df) {
+  df %>% 
+    mutate(AssociationID = ifelse(Taxon1 < Taxon2, 
+                                  paste(Taxon1, Taxon2, sep = "-"), 
+                                  paste(Taxon2, Taxon1, sep = "-")))
+}
+
+# Apply the function to each data frame
+sparcc_results_df.2 <- create_association_id(sparcc_results_df.2)
+sparcc_results_df_G1_I.2 <- create_association_id(sparcc_results_df_G1_I.2)
+sparcc_results_df_G2_C_filtered <- create_association_id(sparcc_results_df_G2_C_filtered)
+sparcc_results_df_G2_I_filtered <- create_association_id(sparcc_results_df_G2_I_filtered)
+
+# Extract the unique association IDs
+G1_Control_associations <- sparcc_results_df.2$AssociationID
+G1_IndigoLT_associations <- sparcc_results_df_G1_I.2$AssociationID
+G2_Control_associations <- sparcc_results_df_G2_C_filtered$AssociationID
+G2_IndigoLT_associations <- sparcc_results_df_G2_I_filtered$AssociationID
+
+# Create a list with the associations for each level of Growout_Treatment
+association_list <- list(
+  "Growout 1-Control" = G1_Control_associations,
+  "Growout 1-IndigoLT" = G1_IndigoLT_associations,
+  "Growout 2-Control" = G2_Control_associations,
+  "Growout 2-IndigoLT" = G2_IndigoLT_associations
+)
+
+# Create the Venn diagram
+ggvenn(association_list, show_percentage = TRUE, fill_color = venn_colors, fill_alpha = 0.7,
+       stroke_linetype = 'dashed', text_size = 4.5)
+
+```
+
+```{r}
+##Let's now make upset plots as a replacement for venn diagrams
+##Starting with associations (edges)
+
+## =========================================================
+## Manual UpSet (reversed): MATRIX LEFT, BARS RIGHT
+## - Dots filled by Treatment (black border)
+## - Background shading by Growout in matrix
+## - Abbreviated network labels: Ctrl-1, LT-1, Ctrl-2, LT-2
+## - Largest intersections at TOP
+## - Very tight gap between panels; aligned heights
+## Requires: association_list = named list of character vectors
+## =========================================================
+
+stopifnot(is.list(association_list), length(association_list) >= 2)
+sets <- names(association_list)
+
+## ---- Parse set name into Growout & Treatment ----
+.parse_set <- function(s) {
+  parts <- strsplit(s, "-", fixed = TRUE)[[1]]
+  gpart <- if (length(parts) >= 1) parts[1] else s
+  tpart <- if (length(parts) >= 2) parts[2] else ""
+  growout   <- trimws(sub("^Growout\\s*", "", gpart))
+  treatment <- trimws(tpart)
+  list(Growout = growout, Treatment = treatment)
+}
+parsed <- lapply(sets, .parse_set)
+set_df <- data.frame(
+  set       = sets,
+  Growout   = vapply(parsed, `[[`, "", "Growout"),
+  Treatment = vapply(parsed, `[[`, "", "Treatment"),
+  stringsAsFactors = FALSE
+)
+set_df$set_x <- seq_len(nrow(set_df))
+
+## Abbreviated x-axis labels
+abbr_trt <- function(tr) ifelse(tr == "Control", "Ctrl", ifelse(tr == "IndigoLT", "LT", tr))
+set_df$set_label <- paste0(abbr_trt(set_df$Treatment), "-", set_df$Growout)
+
+## Treatment fill colors (adjust if needed)
+trt_cols <- c("Control" = "#f8765c", "IndigoLT" = "#221150")
+
+## Background colors for Growout bands (subtle)
+grow_cols <- c("1" = "#dbe9ff", "2" = "#ffe8d5")  # light blue, light peach
+if (!all(unique(set_df$Growout) %in% names(grow_cols))) {
+  # fallback grey if unexpected growouts
+  ug <- setdiff(unique(set_df$Growout), names(grow_cols))
+  grow_cols <- c(grow_cols, setNames(rep("#f2f2f2", length(ug)), ug))
+}
+
+## ---- 1) Items × sets presence matrix ----
+all_items  <- sort(unique(unlist(association_list)))
+present_df <- data.frame(item = all_items, stringsAsFactors = FALSE)
+for (s in sets) present_df[[s]] <- present_df$item %in% association_list[[s]]
+
+## ---- 2) Combination label per item ----
+present_df$combo_label <- apply(present_df[sets], 1, function(row) {
+  on <- sets[as.logical(row)]
+  if (length(on) == 0) "(none)" else paste(on, collapse = " ∩ ")
+})
+
+## ---- 3) Intersection sizes (descending) -> put largest on TOP ----
+combo_sizes <- present_df |>
+  dplyr::count(combo_label, name = "size") |>
+  dplyr::arrange(dplyr::desc(size))
+
+combo_levels_desc <- combo_sizes$combo_label
+combo_levels_plot <- rev(combo_levels_desc)  # reverse so top = largest
+
+present_df$combo_label <- factor(present_df$combo_label, levels = combo_levels_plot)
+
+## ---- 4) Long form (sets on X, combos on Y) ----
+long_mat <- present_df |>
+  tidyr::pivot_longer(
+    cols = dplyr::all_of(sets),
+    names_to = "set",
+    values_to = "present"
+  ) |>
+  dplyr::left_join(set_df, by = "set") |>
+  dplyr::mutate(
+    set         = factor(set, levels = sets),
+    combo_label = factor(combo_label, levels = combo_levels_plot),
+    Treatment   = factor(Treatment, levels = c("Control", "IndigoLT")),
+    Growout     = factor(Growout,   levels = sort(unique(set_df$Growout)))
+  )
+
+## ---- 5) Connector segments for each combo ----
+seg_df <- long_mat |>
+  dplyr::filter(present) |>
+  dplyr::group_by(combo_label) |>
+  dplyr::summarise(
+    x_min = min(set_x),
+    x_max = max(set_x),
+    .groups = "drop"
+  )
+
+## ---- 6) Background rectangles spanning each Growout group ----
+bg_df <- set_df |>
+  dplyr::group_by(Growout) |>
+  dplyr::summarise(
+    xmin = min(set_x) - 0.5,
+    xmax = max(set_x) + 0.5,
+    .groups = "drop"
+  ) |>
+  dplyr::mutate(fill = grow_cols[Growout])
+
+## ---- 7) Dot/line MATRIX (LEFT panel) ----
+p_matrix <- ggplot2::ggplot() +
+  # growout background bands
+  ggplot2::geom_rect(
+    data = bg_df,
+    ggplot2::aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf, fill = Growout),
+    inherit.aes = FALSE, alpha = 0.50
+  ) +
+  # connectors
+  ggplot2::geom_segment(
+    data = seg_df,
+    ggplot2::aes(y = combo_label, yend = combo_label, x = x_min, xend = x_max),
+    linewidth = 0.7, color = "grey20"
+  ) +
+  # background dots (absent)
+  ggplot2::geom_point(
+    data = long_mat,
+    ggplot2::aes(x = set_x, y = combo_label),
+    shape = 21, size = 4.5, color = "black", fill = "white", stroke = 0.3,
+    show.legend = FALSE
+  ) +
+  # present dots filled by Treatment
+  ggplot2::geom_point(
+    data = dplyr::filter(long_mat, present),
+    ggplot2::aes(x = set_x, y = combo_label, fill = Treatment),
+    shape = 21, size = 4.5, color = "black", stroke = 0.3,
+    show.legend = FALSE
+  ) +
+  # x scale with abbreviated labels
+  ggplot2::scale_x_continuous(
+    breaks = set_df$set_x,
+    labels = set_df$set_label,
+    limits = c(min(set_df$set_x) - 0.5, max(set_df$set_x) + 0.5),
+    expand = c(0, 0)
+  ) +
+  # fill scales (growout bands & treatment dots)
+  ggplot2::scale_fill_manual(
+    values = c(trt_cols, grow_cols),
+    breaks = NULL   # suppress legend
+  ) +
+  ggplot2::coord_cartesian(clip = "off") +
+  ggplot2::labs(x = "Network", y = NULL) +
+  ggplot2::theme_bw() +
+  ggplot2::theme(
+    legend.position = "none",
+    axis.title.x    = ggplot2::element_text(face = "bold"),
+    axis.text.x     = ggplot2::element_text(color = "black"),
+    axis.ticks.x    = ggplot2::element_line(color = "black"),
+    axis.text.y     = ggplot2::element_blank(),
+    axis.ticks.y    = ggplot2::element_blank(),
+    axis.title.y    = ggplot2::element_blank(),
+    panel.border    = ggplot2::element_rect(color = "black", fill = NA),
+    # VERY tight right margin to bring panels closer
+    plot.margin     = grid::unit(c(5, 1, 5, 5), "pt")
+  )
+
+## ---- 8) Horizontal BARS (RIGHT panel), same reversed order ----
+bars_df <- combo_sizes
+bars_df$combo_label <- factor(bars_df$combo_label, levels = combo_levels_plot)
+
+p_bars <- ggplot2::ggplot(bars_df, ggplot2::aes(y = combo_label, x = size)) +
+  ggplot2::geom_col(width = 0.6, fill = "grey25", color = "black") +
+  ggplot2::labs(x = "Intersection size", y = NULL) +
+  ggplot2::coord_cartesian(clip = "off") +
+  ggplot2::theme_bw() +
+  ggplot2::theme(
+    axis.title.x   = ggplot2::element_text(face = "bold"),
+    axis.text.x     = ggplot2::element_text(color = "black"),
+    axis.text.y    = ggplot2::element_blank(),
+    axis.ticks.y   = ggplot2::element_blank(),
+    axis.title.y   = ggplot2::element_blank(),
+    panel.border   = ggplot2::element_rect(color = "black", fill = NA),
+    # VERY tight left margin to bring panels closer
+    plot.margin    = grid::unit(c(5, 5, 5, 1), "pt")
+  )
+
+## ---- 9) Arrange: MATRIX LEFT (slightly narrower), BARS RIGHT (wider) ----
+upset.association <- if (requireNamespace("gridExtra", quietly = TRUE)) {
+  gridExtra::grid.arrange(p_matrix, p_bars, ncol = 2, widths = c(0.30, 0.70))
+} else {
+  print(p_matrix); print(p_bars)
+}
+
+ggsave("upset.ass.1.png", upset.association, width = 4.5, height = 6.5, units = "in", dpi = 900)
+
+```
+
+```{r}
+##Now for nodes
+## =========================================================
+## Manual UpSet (reversed) for NODES: MATRIX LEFT, BARS RIGHT
+## - Dots filled by Treatment (black border)
+## - Background shading by Growout in matrix
+## - Abbreviated network labels: Ctrl-1, LT-1, Ctrl-2, LT-2
+## - Largest intersections at TOP
+## - Very tight gap between panels; aligned heights
+## Requires: node_list = named list of character vectors
+## =========================================================
+
+stopifnot(is.list(node_list), length(node_list) >= 2)
+node_sets <- names(node_list)
+
+## ---- Parse set name into Growout & Treatment (nodes) ----
+.parse_set_nodes <- function(s) {
+  parts <- strsplit(s, "-", fixed = TRUE)[[1]]
+  gpart <- if (length(parts) >= 1) parts[1] else s
+  tpart <- if (length(parts) >= 2) parts[2] else ""
+  growout   <- trimws(sub("^Growout\\s*", "", gpart))
+  treatment <- trimws(tpart)
+  list(Growout = growout, Treatment = treatment)
+}
+parsed_nodes <- lapply(node_sets, .parse_set_nodes)
+node_set_df <- data.frame(
+  set       = node_sets,
+  Growout   = vapply(parsed_nodes, `[[`, "", "Growout"),
+  Treatment = vapply(parsed_nodes, `[[`, "", "Treatment"),
+  stringsAsFactors = FALSE
+)
+node_set_df$set_x <- seq_len(nrow(node_set_df))
+
+## Abbreviated x-axis labels (nodes)
+abbr_trt_nodes <- function(tr) ifelse(tr == "Control", "Ctrl", ifelse(tr == "IndigoLT", "LT", tr))
+node_set_df$set_label <- paste0(abbr_trt_nodes(node_set_df$Treatment), "-", node_set_df$Growout)
+
+## Colors (use existing if present; otherwise define locals so we don't overwrite)
+trt_cols_nodes  <- if (exists("trt_cols")) trt_cols else c("Control" = "#f8765c", "IndigoLT" = "#221150")
+grow_cols_nodes <- if (exists("grow_cols")) grow_cols else c("1" = "#dbe9ff", "2" = "#ffe8d5")
+
+if (!all(unique(node_set_df$Growout) %in% names(grow_cols_nodes))) {
+  ug <- setdiff(unique(node_set_df$Growout), names(grow_cols_nodes))
+  grow_cols_nodes <- c(grow_cols_nodes, setNames(rep("#f2f2f2", length(ug)), ug))
+}
+
+## ---- 1) Items × sets presence matrix (nodes) ----
+all_items_nodes  <- sort(unique(unlist(node_list)))
+node_present_df <- data.frame(item = all_items_nodes, stringsAsFactors = FALSE)
+for (s in node_sets) node_present_df[[s]] <- node_present_df$item %in% node_list[[s]]
+
+## ---- 2) Combination label per item (nodes) ----
+node_present_df$combo_label <- apply(node_present_df[node_sets], 1, function(row) {
+  on <- node_sets[as.logical(row)]
+  if (length(on) == 0) "(none)" else paste(on, collapse = " ∩ ")
+})
+
+## ---- 3) Intersection sizes (descending) -> largest on TOP (nodes) ----
+combo_sizes_nodes <- node_present_df |>
+  dplyr::count(combo_label, name = "size") |>
+  dplyr::arrange(dplyr::desc(size))
+
+combo_levels_desc_nodes <- combo_sizes_nodes$combo_label
+combo_levels_plot_nodes <- rev(combo_levels_desc_nodes)
+
+node_present_df$combo_label <- factor(node_present_df$combo_label, levels = combo_levels_plot_nodes)
+
+## ---- 4) Long form (sets on X, combos on Y) (nodes) ----
+long_mat_nodes <- node_present_df |>
+  tidyr::pivot_longer(
+    cols = dplyr::all_of(node_sets),
+    names_to = "set",
+    values_to = "present"
+  ) |>
+  dplyr::left_join(node_set_df, by = "set") |>
+  dplyr::mutate(
+    set         = factor(set, levels = node_sets),
+    combo_label = factor(combo_label, levels = combo_levels_plot_nodes),
+    Treatment   = factor(Treatment, levels = c("Control", "IndigoLT")),
+    Growout     = factor(Growout,   levels = sort(unique(node_set_df$Growout)))
+  )
+
+## ---- 5) Connector segments for each combo (nodes) ----
+seg_df_nodes <- long_mat_nodes |>
+  dplyr::filter(present) |>
+  dplyr::group_by(combo_label) |>
+  dplyr::summarise(
+    x_min = min(set_x),
+    x_max = max(set_x),
+    .groups = "drop"
+  )
+
+## ---- 6) Background rectangles spanning each Growout group (nodes) ----
+bg_df_nodes <- node_set_df |>
+  dplyr::group_by(Growout) |>
+  dplyr::summarise(
+    xmin = min(set_x) - 0.5,
+    xmax = max(set_x) + 0.5,
+    .groups = "drop"
+  ) |>
+  dplyr::mutate(fill = grow_cols_nodes[Growout])
+
+## ---- 7) Dot/line MATRIX (LEFT panel) (nodes) ----
+p_matrix_nodes <- ggplot2::ggplot() +
+  # growout background bands
+  ggplot2::geom_rect(
+    data = bg_df_nodes,
+    ggplot2::aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf, fill = Growout),
+    inherit.aes = FALSE, alpha = 0.50
+  ) +
+  # connectors
+  ggplot2::geom_segment(
+    data = seg_df_nodes,
+    ggplot2::aes(y = combo_label, yend = combo_label, x = x_min, xend = x_max),
+    linewidth = 0.7, color = "grey20"
+  ) +
+  # background dots (absent)
+  ggplot2::geom_point(
+    data = long_mat_nodes,
+    ggplot2::aes(x = set_x, y = combo_label),
+    shape = 21, size = 4.5, color = "black", fill = "white", stroke = 0.3,
+    show.legend = FALSE
+  ) +
+  # present dots filled by Treatment
+  ggplot2::geom_point(
+    data = dplyr::filter(long_mat_nodes, present),
+    ggplot2::aes(x = set_x, y = combo_label, fill = Treatment),
+    shape = 21, size = 4.5, color = "black", stroke = 0.3,
+    show.legend = FALSE
+  ) +
+  # x scale with abbreviated labels
+  ggplot2::scale_x_continuous(
+    breaks = node_set_df$set_x,
+    labels = node_set_df$set_label,
+    limits = c(min(node_set_df$set_x) - 0.5, max(node_set_df$set_x) + 0.5),
+    expand = c(0, 0)
+  ) +
+  # fill scales (growout bands & treatment dots)
+  ggplot2::scale_fill_manual(
+    values = c(trt_cols_nodes, grow_cols_nodes),
+    breaks = NULL
+  ) +
+  ggplot2::coord_cartesian(clip = "off") +
+  ggplot2::labs(x = "Network", y = NULL) +
+  ggplot2::theme_bw() +
+  ggplot2::theme(
+    legend.position = "none",
+    axis.title.x    = ggplot2::element_text(face = "bold"),
+    axis.text.x     = ggplot2::element_text(color = "black"),
+    axis.ticks.x    = ggplot2::element_line(color = "black"),
+    axis.text.y     = ggplot2::element_blank(),
+    axis.ticks.y    = ggplot2::element_blank(),
+    axis.title.y    = ggplot2::element_blank(),
+    panel.border    = ggplot2::element_rect(color = "black", fill = NA),
+    plot.margin     = grid::unit(c(5, 1, 5, 5), "pt")
+  )
+
+## ---- 8) Horizontal BARS (RIGHT panel), same reversed order (nodes) ----
+bars_df_nodes <- combo_sizes_nodes
+bars_df_nodes$combo_label <- factor(bars_df_nodes$combo_label, levels = combo_levels_plot_nodes)
+
+p_bars_nodes <- ggplot2::ggplot(bars_df_nodes, ggplot2::aes(y = combo_label, x = size)) +
+  ggplot2::geom_col(width = 0.6, fill = "grey25", color = "black") +
+  ggplot2::labs(x = "Intersection size", y = NULL) +
+  ggplot2::coord_cartesian(clip = "off") +
+  ggplot2::theme_bw() +
+  ggplot2::theme(
+    axis.title.x   = ggplot2::element_text(face = "bold"),
+    axis.text.x    = ggplot2::element_text(color = "black"),
+    axis.text.y    = ggplot2::element_blank(),
+    axis.ticks.y   = ggplot2::element_blank(),
+    axis.title.y   = ggplot2::element_blank(),
+    panel.border   = ggplot2::element_rect(color = "black", fill = NA),
+    plot.margin    = grid::unit(c(5, 5, 5, 1), "pt")
+  )
+
+## ---- 9) Arrange: MATRIX LEFT (slightly narrower), BARS RIGHT (wider) ----
+upset.nodes <- if (requireNamespace("gridExtra", quietly = TRUE)) {
+  gridExtra::grid.arrange(p_matrix_nodes, p_bars_nodes, ncol = 2, widths = c(0.30, 0.70))
+} else {
+  print(p_matrix_nodes); print(p_bars_nodes)
+}
+
+ggplot2::ggsave("upset.nodes.1.png", upset.nodes, width = 4.5, height = 6.5, units = "in", dpi = 900)
+
+```
+
+```{r}
+##Let's generate hub scores and craft a heatmap
+
+## ========= 1) Hub scores per network (aligned across nodes) =========
+
+# Put graphs in a named list (rename the first if needed)
+graphs_hub_list <- list(
+  "Growout 1-Control"   = sparcc_graph,     
+  "Growout 1-IndigoLT"  = sparcc_graph_G1_I,
+  "Growout 2-Control"   = sparcc_graph_G2_C,
+  "Growout 2-IndigoLT"  = sparcc_graph_G2_I
+)
+
+# Union of all node names across networks
+all_nodes_hub <- sort(unique(unlist(lapply(graphs_hub_list, function(g) igraph::V(g)$name))))
+
+# Helper: hub score (use |weight| if present, otherwise unweighted)
+.hub_vec_for_graph <- function(g, all_nodes) {
+  w <- igraph::E(g)$weight
+  if (is.null(w) || !is.numeric(w)) {
+    w_use <- NULL
+  } else {
+    w_use <- abs(w)
+    w_use[is.na(w_use)] <- 0
+  }
+  hs <- igraph::hub_score(g, weights = w_use, scale = TRUE)$vector  # max = 1 in this graph
+  v  <- rep(NA_real_, length(all_nodes)); names(v) <- all_nodes
+  v[names(hs)] <- hs
+  v
+}
+
+# Row-bind into a matrix: rows = networks, cols = nodes
+hub_mat <- do.call(rbind, lapply(graphs_hub_list, .hub_vec_for_graph, all_nodes = all_nodes_hub))
+rownames(hub_mat) <- names(graphs_hub_list)
+
+## ========= 2) Column annotation: Family (collapse to focused list + "Other") =========
+
+# focused families + "Other"
+families_keep <- c(
+  "Carnobacteriaceae","Lactobacillaceae","Staphylococcaceae",
+  "Dermabacteraceae","Nocardiopsaceae","Bacillaceae","Micrococcaceae"
+)
+
+# palette (with "Other")
+custom_family_colors <- c(
+  "Carnobacteriaceae" = "#fcfdbf",
+  "Lactobacillaceae"  = "#febb81",
+  "Staphylococcaceae" = "#f8765c",
+  "Dermabacteraceae"  = "#d3436e",
+  "Nocardiopsaceae"   = "#982d80",
+  "Bacillaceae"       = "#5f187f",
+  "Micrococcaceae"    = "#221150",
+  "Other"             = "#000004"
+)
+
+# Gather available Family↔Species lookups already created
+.family_sources <- Filter(Negate(is.null), list(
+  get0("family_info",      ifnotfound = NULL),
+  get0("family_info_G1_I", ifnotfound = NULL),
+  get0("family_info_G2_C", ifnotfound = NULL),
+  get0("family_info_G2_I", ifnotfound = NULL)
+))
+
+if (length(.family_sources) == 0) {
+  stop("No family_info data frames found. Please provide a Species↔Family table.")
+}
+
+family_info_all <- do.call(rbind, lapply(.family_sources, function(df) {
+  df[, c("Species","Family")]
+}))
+# Prefer first occurrence per Species
+family_info_all <- family_info_all[!duplicated(family_info_all$Species), , drop = FALSE]
+
+# Align to all node columns; collapse to the focused families + "Other"
+node_family <- family_info_all$Family[match(all_nodes_hub, family_info_all$Species)]
+node_family[is.na(node_family)] <- "Other"
+node_family <- ifelse(node_family %in% families_keep, node_family, "Other")
+node_family <- factor(node_family, levels = names(custom_family_colors))
+
+# Column (top) annotation
+top_anno <- ComplexHeatmap::HeatmapAnnotation(
+  df  = data.frame(Family = node_family),
+  col = list(Family = custom_family_colors),
+  show_legend = FALSE, simple_anno_size = unit(0.2, "cm"),
+  show_annotation_name = FALSE)
+
+##right annotation
+## ---- Row (left) annotation for networks: Growout + Treatment ----
+# Parse rownames(hub_mat) like "Growout 1-Control" -> Growout="1", Treatment="Control"
+.parse_row_net <- function(s) {
+  parts <- strsplit(s, "-", fixed = TRUE)[[1]]
+  gpart <- if (length(parts) >= 1) parts[1] else s
+  tpart <- if (length(parts) >= 2) parts[2] else ""
+  growout   <- trimws(sub("^Growout\\s*", "", gpart))
+  treatment <- trimws(tpart)
+  c(Growout = growout, Treatment = treatment)
+}
+
+rnets <- rownames(hub_mat)
+pr    <- t(vapply(rnets, .parse_row_net, character(2)))
+row_df <- data.frame(
+  Growout   = factor(pr[,"Growout"],   levels = sort(unique(pr[,"Growout"]))),
+  Treatment = factor(pr[,"Treatment"], levels = c("Control","IndigoLT")),
+  row.names = rnets,
+  check.names = FALSE
+)
+
+# Colors: reuse if already defined; otherwise set defaults used in UpSet/plots
+grow_cols_use <- if (exists("grow_cols")) grow_cols else c("1"="#dbe9ff","2"="#ffe8d5")
+trt_cols_use  <- if (exists("trt_cols"))  trt_cols  else c("Control"="#f8765c","IndigoLT"="#221150")
+
+network_anno <- ComplexHeatmap::rowAnnotation(
+  df  = row_df,
+  col = list(Growout = grow_cols_use,
+             Treatment = trt_cols_use),
+  show_legend = TRUE,
+  show_annotation_name = FALSE,
+  simple_anno_size = unit(0.2, "cm"),
+  gp = gpar(col = "black"),
+  annotation_legend_param = list(border = TRUE)
+)
+
+
+
+## ========= 3) Heatmap (rows = networks, columns = nodes) =========
+
+# Blue gradient for hub score (0..1)
+col_fun_hub <- circlize::colorRamp2(c(0, 1), c("#f7fbff", "orange3")) #"orange3"
+
+lgd_list.hub <- list(
+  title = "Hub Score",         
+  title_gp = gpar(fontsize = 12, fontface = "bold"),
+  labels_gp = gpar(fontsize = 10),
+  border = "black", lwd = 1,
+  direction = "horizontal",
+  title_position = "topcenter",
+  at = c(0, 0.2, 0.4, 0.6, 0.8, 1),
+  labels = c("0", "0.2", "0.4", "0.6", "0.8", "1"),
+  legend_width = unit(5, "cm"),
+  legend_height = unit(5, "cm"),
+  x = unit(0.5, "cm"), y = unit(0.5, "cm"),
+  legend_gp = gpar(col = "black", lwd = 2)
+)
+
+ht_hub <- ComplexHeatmap::Heatmap(
+  hub_mat,
+  name            = "Hub score",
+  col             = col_fun_hub,
+  na_col          = "gray",
+  top_annotation  = top_anno,
+  right_annotation = network_anno,
+  #cluster_rows    = FALSE,
+  cluster_columns = FALSE,
+  show_row_names  = FALSE,
+  show_column_names = FALSE,
+  row_title       = NULL,
+  column_title    = NULL,
+  border_gp = gpar(col = "black", lwd = 1.5),
+  heatmap_legend_param = lgd_list.hub
+)
+
+# Draw to screen
+png("hub.2.png", width = 9, height = 2, units = "in", res = 900, bg = "transparent")
+ComplexHeatmap::draw(ht_hub, heatmap_legend_side = "bottom")
+dev.off()
+
+```
+
+```{r}
+##Let's now update network node sizes to reflect hub score instead of modularity role
+##This will be cleaner to visualize
+
+## --- Hub-score → vertex size helper (0..1 → min..max) ---
+hub_sizes_for <- function(graph, hub_mat, row_key, min_size = 5, max_size = 11) {
+  stopifnot(row_key %in% rownames(hub_mat))
+  nm  <- igraph::V(graph)$name
+  hs  <- as.numeric(hub_mat[row_key, nm])           # align to graph vertex order
+  hs[!is.finite(hs)] <- 0                           # missing → 0
+  sz  <- min_size + (max_size - min_size) * hs
+  names(sz) <- nm
+  sz
+}
+
+## === Build size vectors for each network (no plotting changes here) ===
+vertex_sizes_g1_ctrl <- hub_sizes_for(sparcc_graph,        hub_mat, "Growout 1-Control")
+vertex_sizes_g1_lt   <- hub_sizes_for(sparcc_graph_G1_I,   hub_mat, "Growout 1-IndigoLT")
+vertex_sizes_g2_ctrl <- hub_sizes_for(sparcc_graph_G2_C,   hub_mat, "Growout 2-Control")
+vertex_sizes_g2_lt   <- hub_sizes_for(sparcc_graph_G2_I,   hub_mat, "Growout 2-IndigoLT")
+
+
+## Growout 1 – Control
+vertex_sizes <- vertex_sizes_g1_ctrl
+png("sparcc_graph.g1.c.hub.png", width = 4, height = 4, units = "in", res = 900, bg = "white")
+par(mar = c(0,0,0,0))
+plot(sparcc_graph, layout = l, vertex.size = vertex_sizes,
+     vertex.label = NA, vertex.color = vertex_colors, edge.color = edge_colors)
+dev.off()
+
+## Growout 1 – IndigoLT
+vertex_sizes <- vertex_sizes_g1_lt
+png("sparcc_graph.g1.i.hub.png", width = 4, height = 4, units = "in", res = 900, bg = "white")
+par(mar = c(0,0,0,0))
+plot(sparcc_graph_G1_I, layout = l, vertex.size = vertex_sizes,
+     vertex.label = NA, vertex.color = vertex_colors_G1_I, edge.color = edge_colors_G1_I)
+dev.off()
+
+## Growout 2 – Control
+vertex_sizes <- vertex_sizes_g2_ctrl
+png("sparcc_graph.g2.c.hub.png", width = 4, height = 4, units = "in", res = 900, bg = "white")
+par(mar = c(0,0,0,0))
+plot(sparcc_graph_G2_C, layout = l, vertex.size = vertex_sizes,
+     vertex.label = NA, vertex.color = vertex_colors_G2_C, edge.color = edge_colors_G2_C)
+dev.off()
+
+## Growout 2 – IndigoLT
+vertex_sizes <- vertex_sizes_g2_lt
+png("sparcc_graph.g2.i.hub.png", width = 4, height = 4, units = "in", res = 900, bg = "white")
+par(mar = c(0,0,0,0))
+plot(sparcc_graph_G2_I, layout = l, vertex.size = vertex_sizes,
+     vertex.label = NA, vertex.color = vertex_colors_G2_I, edge.color = edge_colors_G2_I)
+dev.off()
+
+
+```
+
+```{r}
+##Let's look at hub info more closely
+
+# Convert to matrix just to be safe
+hub_mat_num <- as.matrix(hub_mat)
+
+# Per-network summaries (row-wise)
+hub_summary <- data.frame(
+  Network          = rownames(hub_mat_num),
+  mean_hub         = apply(hub_mat_num, 1, function(x) mean(x, na.rm = TRUE)),
+  sd_hub           = apply(hub_mat_num, 1, function(x) sd(x, na.rm = TRUE)),
+  n_nonNA          = apply(hub_mat_num, 1, function(x) sum(!is.na(x))),
+  n_hub_gt_0.2     = apply(hub_mat_num, 1, function(x) sum(x > 0.2, na.rm = TRUE)),
+  stringsAsFactors = FALSE
+)
+
+hub_summary$prop_hub_gt_0.2 <- hub_summary$n_hub_gt_0.2 / hub_summary$n_nonNA
+
+hub_summary
+
+```
+
+```{r}
+##Network properties- renamed IndigoLT to Alternative
+
+global_network_properties_long.new <- global_network_properties_long.new %>%
+  mutate(
+    Treatment = dplyr::recode(Treatment, "IndigoLT" = "Alternative"),
+    Treatment = factor(Treatment, levels = c("Control", "Alternative"))
+  )
+
+ggplot(global_network_properties_long.new, aes(x = Growout, y = value, color = Treatment, fill = Treatment, group = interaction(Treatment, metric))) +
+  geom_line(aes(linetype = Treatment), position = position_dodge(width = 0.3), size = 1.5, show.legend = FALSE) + 
+  geom_point(shape = 21, color = 'black', position = position_dodge(width = 0.3), size = 3.5) +
+  facet_wrap(~metric, scales = 'free_y', ncol = 2) +
+  theme_bw() +
+  theme(
+    legend.position = 'top',
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text = element_text(size=12),
+    strip.text = element_text(size = 11),
+    strip.background = element_blank(),
+    axis.text = element_text(color = 'black'),
+    axis.title.x = element_text(face = "bold", size = 12),
+    axis.title.y = element_blank()) +
+  scale_color_manual(values = c("Control" = "#f8765c80", "Alternative" = "#22115080")) +
+  scale_fill_manual(values = c("Control" = "#f8765c", "Alternative" = "#221150"))
+
+ggsave("network.topology.new.3.png", width = 4.2, height = 9.5, units = "in", dpi = 900)
+
+```
+
+```{r}
+##Now to update upset plot naming
+
+##Now for nodes
+## =========================================================
+## Manual UpSet (reversed) for NODES: MATRIX LEFT, BARS RIGHT
+## - Dots filled by Treatment (black border)
+## - Background shading by Growout in matrix
+## - Abbreviated network labels: Ctrl-1, LT-1, Ctrl-2, LT-2
+## - Largest intersections at TOP
+## - Very tight gap between panels; aligned heights
+## Requires: node_list = named list of character vectors
+## =========================================================
+
+stopifnot(is.list(node_list), length(node_list) >= 2)
+node_sets <- names(node_list)
+
+## ---- Parse set name into Growout & Treatment (nodes) ----
+.parse_set_nodes <- function(s) {
+  parts <- strsplit(s, "-", fixed = TRUE)[[1]]
+  gpart <- if (length(parts) >= 1) parts[1] else s
+  tpart <- if (length(parts) >= 2) parts[2] else ""
+  growout   <- trimws(sub("^Growout\\s*", "", gpart))
+  treatment <- trimws(tpart)
+  list(Growout = growout, Treatment = treatment)
+}
+parsed_nodes <- lapply(node_sets, .parse_set_nodes)
+node_set_df <- data.frame(
+  set       = node_sets,
+  Growout   = vapply(parsed_nodes, `[[`, "", "Growout"),
+  Treatment = vapply(parsed_nodes, `[[`, "", "Treatment"),
+  stringsAsFactors = FALSE
+)
+node_set_df$set_x <- seq_len(nrow(node_set_df))
+
+## Abbreviated x-axis labels (nodes)
+abbr_trt_nodes <- function(tr) ifelse(tr == "Control", "Ctrl", ifelse(tr == "IndigoLT", "Alt", tr))
+node_set_df$set_label <- paste0(abbr_trt_nodes(node_set_df$Treatment), "-", node_set_df$Growout)
+
+## Colors (use existing if present; otherwise define locals so we don't overwrite)
+trt_cols_nodes  <- if (exists("trt_cols")) trt_cols else c("Control" = "#f8765c", "IndigoLT" = "#221150")
+grow_cols_nodes <- if (exists("grow_cols")) grow_cols else c("1" = "#dbe9ff", "2" = "#ffe8d5")
+
+if (!all(unique(node_set_df$Growout) %in% names(grow_cols_nodes))) {
+  ug <- setdiff(unique(node_set_df$Growout), names(grow_cols_nodes))
+  grow_cols_nodes <- c(grow_cols_nodes, setNames(rep("#f2f2f2", length(ug)), ug))
+}
+
+## ---- 1) Items × sets presence matrix (nodes) ----
+all_items_nodes  <- sort(unique(unlist(node_list)))
+node_present_df <- data.frame(item = all_items_nodes, stringsAsFactors = FALSE)
+for (s in node_sets) node_present_df[[s]] <- node_present_df$item %in% node_list[[s]]
+
+## ---- 2) Combination label per item (nodes) ----
+node_present_df$combo_label <- apply(node_present_df[node_sets], 1, function(row) {
+  on <- node_sets[as.logical(row)]
+  if (length(on) == 0) "(none)" else paste(on, collapse = " ∩ ")
+})
+
+## ---- 3) Intersection sizes (descending) -> largest on TOP (nodes) ----
+combo_sizes_nodes <- node_present_df |>
+  dplyr::count(combo_label, name = "size") |>
+  dplyr::arrange(dplyr::desc(size))
+
+combo_levels_desc_nodes <- combo_sizes_nodes$combo_label
+combo_levels_plot_nodes <- rev(combo_levels_desc_nodes)
+
+node_present_df$combo_label <- factor(node_present_df$combo_label, levels = combo_levels_plot_nodes)
+
+## ---- 4) Long form (sets on X, combos on Y) (nodes) ----
+long_mat_nodes <- node_present_df |>
+  tidyr::pivot_longer(
+    cols = dplyr::all_of(node_sets),
+    names_to = "set",
+    values_to = "present"
+  ) |>
+  dplyr::left_join(node_set_df, by = "set") |>
+  dplyr::mutate(
+    set         = factor(set, levels = node_sets),
+    combo_label = factor(combo_label, levels = combo_levels_plot_nodes),
+    Treatment   = factor(Treatment, levels = c("Control", "IndigoLT")),
+    Growout     = factor(Growout,   levels = sort(unique(node_set_df$Growout)))
+  )
+
+## ---- 5) Connector segments for each combo (nodes) ----
+seg_df_nodes <- long_mat_nodes |>
+  dplyr::filter(present) |>
+  dplyr::group_by(combo_label) |>
+  dplyr::summarise(
+    x_min = min(set_x),
+    x_max = max(set_x),
+    .groups = "drop"
+  )
+
+## ---- 6) Background rectangles spanning each Growout group (nodes) ----
+bg_df_nodes <- node_set_df |>
+  dplyr::group_by(Growout) |>
+  dplyr::summarise(
+    xmin = min(set_x) - 0.5,
+    xmax = max(set_x) + 0.5,
+    .groups = "drop"
+  ) |>
+  dplyr::mutate(fill = grow_cols_nodes[Growout])
+
+## ---- 7) Dot/line MATRIX (LEFT panel) (nodes) ----
+p_matrix_nodes <- ggplot2::ggplot() +
+  # growout background bands
+  ggplot2::geom_rect(
+    data = bg_df_nodes,
+    ggplot2::aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf, fill = Growout),
+    inherit.aes = FALSE, alpha = 0.50
+  ) +
+  # connectors
+  ggplot2::geom_segment(
+    data = seg_df_nodes,
+    ggplot2::aes(y = combo_label, yend = combo_label, x = x_min, xend = x_max),
+    linewidth = 0.7, color = "grey20"
+  ) +
+  # background dots (absent)
+  ggplot2::geom_point(
+    data = long_mat_nodes,
+    ggplot2::aes(x = set_x, y = combo_label),
+    shape = 21, size = 4.5, color = "black", fill = "white", stroke = 0.3,
+    show.legend = FALSE
+  ) +
+  # present dots filled by Treatment
+  ggplot2::geom_point(
+    data = dplyr::filter(long_mat_nodes, present),
+    ggplot2::aes(x = set_x, y = combo_label, fill = Treatment),
+    shape = 21, size = 4.5, color = "black", stroke = 0.3,
+    show.legend = FALSE
+  ) +
+  # x scale with abbreviated labels
+  ggplot2::scale_x_continuous(
+    breaks = node_set_df$set_x,
+    labels = node_set_df$set_label,
+    limits = c(min(node_set_df$set_x) - 0.5, max(node_set_df$set_x) + 0.5),
+    expand = c(0, 0)
+  ) +
+  # fill scales (growout bands & treatment dots)
+  ggplot2::scale_fill_manual(
+    values = c(trt_cols_nodes, grow_cols_nodes),
+    breaks = NULL
+  ) +
+  ggplot2::coord_cartesian(clip = "off") +
+  ggplot2::labs(x = "Network", y = NULL) +
+  ggplot2::theme_bw() +
+  ggplot2::theme(
+    legend.position = "none",
+    axis.title.x    = ggplot2::element_text(face = "bold"),
+    axis.text.x     = ggplot2::element_text(color = "black"),
+    axis.ticks.x    = ggplot2::element_line(color = "black"),
+    axis.text.y     = ggplot2::element_blank(),
+    axis.ticks.y    = ggplot2::element_blank(),
+    axis.title.y    = ggplot2::element_blank(),
+    panel.border    = ggplot2::element_rect(color = "black", fill = NA),
+    plot.margin     = grid::unit(c(5, 1, 5, 5), "pt")
+  )
+
+## ---- 8) Horizontal BARS (RIGHT panel), same reversed order (nodes) ----
+bars_df_nodes <- combo_sizes_nodes
+bars_df_nodes$combo_label <- factor(bars_df_nodes$combo_label, levels = combo_levels_plot_nodes)
+
+p_bars_nodes <- ggplot2::ggplot(bars_df_nodes, ggplot2::aes(y = combo_label, x = size)) +
+  ggplot2::geom_col(width = 0.6, fill = "grey25", color = "black") +
+  ggplot2::labs(x = "Intersection size", y = NULL) +
+  ggplot2::coord_cartesian(clip = "off") +
+  ggplot2::theme_bw() +
+  ggplot2::theme(
+    axis.title.x   = ggplot2::element_text(face = "bold"),
+    axis.text.x    = ggplot2::element_text(color = "black"),
+    axis.text.y    = ggplot2::element_blank(),
+    axis.ticks.y   = ggplot2::element_blank(),
+    axis.title.y   = ggplot2::element_blank(),
+    panel.border   = ggplot2::element_rect(color = "black", fill = NA),
+    plot.margin    = grid::unit(c(5, 5, 5, 1), "pt")
+  )
+
+## ---- 9) Arrange: MATRIX LEFT (slightly narrower), BARS RIGHT (wider) ----
+upset.nodes <- if (requireNamespace("gridExtra", quietly = TRUE)) {
+  gridExtra::grid.arrange(p_matrix_nodes, p_bars_nodes, ncol = 2, widths = c(0.30, 0.70))
+} else {
+  print(p_matrix_nodes); print(p_bars_nodes)
+}
+
+ggplot2::ggsave("upset.nodes.2.png", upset.nodes, width = 4.5, height = 6.5, units = "in", dpi = 900)
+
+```
+
+```{r}
+##Update edge naming
+
+##Starting with associations (edges)
+
+## =========================================================
+## Manual UpSet (reversed): MATRIX LEFT, BARS RIGHT
+## - Dots filled by Treatment (black border)
+## - Background shading by Growout in matrix
+## - Abbreviated network labels: Ctrl-1, LT-1, Ctrl-2, LT-2
+## - Largest intersections at TOP
+## - Very tight gap between panels; aligned heights
+## Requires: association_list = named list of character vectors
+## =========================================================
+
+stopifnot(is.list(association_list), length(association_list) >= 2)
+sets <- names(association_list)
+
+## ---- Parse set name into Growout & Treatment ----
+.parse_set <- function(s) {
+  parts <- strsplit(s, "-", fixed = TRUE)[[1]]
+  gpart <- if (length(parts) >= 1) parts[1] else s
+  tpart <- if (length(parts) >= 2) parts[2] else ""
+  growout   <- trimws(sub("^Growout\\s*", "", gpart))
+  treatment <- trimws(tpart)
+  list(Growout = growout, Treatment = treatment)
+}
+parsed <- lapply(sets, .parse_set)
+set_df <- data.frame(
+  set       = sets,
+  Growout   = vapply(parsed, `[[`, "", "Growout"),
+  Treatment = vapply(parsed, `[[`, "", "Treatment"),
+  stringsAsFactors = FALSE
+)
+set_df$set_x <- seq_len(nrow(set_df))
+
+## Abbreviated x-axis labels
+abbr_trt <- function(tr) ifelse(tr == "Control", "Ctrl", ifelse(tr == "IndigoLT", "Alt", tr))
+set_df$set_label <- paste0(abbr_trt(set_df$Treatment), "-", set_df$Growout)
+
+## Treatment fill colors (adjust if needed)
+trt_cols <- c("Control" = "#f8765c", "IndigoLT" = "#221150")
+
+## Background colors for Growout bands (subtle)
+grow_cols <- c("1" = "#dbe9ff", "2" = "#ffe8d5")  # light blue, light peach
+if (!all(unique(set_df$Growout) %in% names(grow_cols))) {
+  # fallback grey if unexpected growouts
+  ug <- setdiff(unique(set_df$Growout), names(grow_cols))
+  grow_cols <- c(grow_cols, setNames(rep("#f2f2f2", length(ug)), ug))
+}
+
+## ---- 1) Items × sets presence matrix ----
+all_items  <- sort(unique(unlist(association_list)))
+present_df <- data.frame(item = all_items, stringsAsFactors = FALSE)
+for (s in sets) present_df[[s]] <- present_df$item %in% association_list[[s]]
+
+## ---- 2) Combination label per item ----
+present_df$combo_label <- apply(present_df[sets], 1, function(row) {
+  on <- sets[as.logical(row)]
+  if (length(on) == 0) "(none)" else paste(on, collapse = " ∩ ")
+})
+
+## ---- 3) Intersection sizes (descending) -> put largest on TOP ----
+combo_sizes <- present_df |>
+  dplyr::count(combo_label, name = "size") |>
+  dplyr::arrange(dplyr::desc(size))
+
+combo_levels_desc <- combo_sizes$combo_label
+combo_levels_plot <- rev(combo_levels_desc)  # reverse so top = largest
+
+present_df$combo_label <- factor(present_df$combo_label, levels = combo_levels_plot)
+
+## ---- 4) Long form (sets on X, combos on Y) ----
+long_mat <- present_df |>
+  tidyr::pivot_longer(
+    cols = dplyr::all_of(sets),
+    names_to = "set",
+    values_to = "present"
+  ) |>
+  dplyr::left_join(set_df, by = "set") |>
+  dplyr::mutate(
+    set         = factor(set, levels = sets),
+    combo_label = factor(combo_label, levels = combo_levels_plot),
+    Treatment   = factor(Treatment, levels = c("Control", "IndigoLT")),
+    Growout     = factor(Growout,   levels = sort(unique(set_df$Growout)))
+  )
+
+## ---- 5) Connector segments for each combo ----
+seg_df <- long_mat |>
+  dplyr::filter(present) |>
+  dplyr::group_by(combo_label) |>
+  dplyr::summarise(
+    x_min = min(set_x),
+    x_max = max(set_x),
+    .groups = "drop"
+  )
+
+## ---- 6) Background rectangles spanning each Growout group ----
+bg_df <- set_df |>
+  dplyr::group_by(Growout) |>
+  dplyr::summarise(
+    xmin = min(set_x) - 0.5,
+    xmax = max(set_x) + 0.5,
+    .groups = "drop"
+  ) |>
+  dplyr::mutate(fill = grow_cols[Growout])
+
+## ---- 7) Dot/line MATRIX (LEFT panel) ----
+p_matrix <- ggplot2::ggplot() +
+  # growout background bands
+  ggplot2::geom_rect(
+    data = bg_df,
+    ggplot2::aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf, fill = Growout),
+    inherit.aes = FALSE, alpha = 0.50
+  ) +
+  # connectors
+  ggplot2::geom_segment(
+    data = seg_df,
+    ggplot2::aes(y = combo_label, yend = combo_label, x = x_min, xend = x_max),
+    linewidth = 0.7, color = "grey20"
+  ) +
+  # background dots (absent)
+  ggplot2::geom_point(
+    data = long_mat,
+    ggplot2::aes(x = set_x, y = combo_label),
+    shape = 21, size = 4.5, color = "black", fill = "white", stroke = 0.3,
+    show.legend = FALSE
+  ) +
+  # present dots filled by Treatment
+  ggplot2::geom_point(
+    data = dplyr::filter(long_mat, present),
+    ggplot2::aes(x = set_x, y = combo_label, fill = Treatment),
+    shape = 21, size = 4.5, color = "black", stroke = 0.3,
+    show.legend = FALSE
+  ) +
+  # x scale with abbreviated labels
+  ggplot2::scale_x_continuous(
+    breaks = set_df$set_x,
+    labels = set_df$set_label,
+    limits = c(min(set_df$set_x) - 0.5, max(set_df$set_x) + 0.5),
+    expand = c(0, 0)
+  ) +
+  # fill scales (growout bands & treatment dots)
+  ggplot2::scale_fill_manual(
+    values = c(trt_cols, grow_cols),
+    breaks = NULL   # suppress legend
+  ) +
+  ggplot2::coord_cartesian(clip = "off") +
+  ggplot2::labs(x = "Network", y = NULL) +
+  ggplot2::theme_bw() +
+  ggplot2::theme(
+    legend.position = "none",
+    axis.title.x    = ggplot2::element_text(face = "bold"),
+    axis.text.x     = ggplot2::element_text(color = "black"),
+    axis.ticks.x    = ggplot2::element_line(color = "black"),
+    axis.text.y     = ggplot2::element_blank(),
+    axis.ticks.y    = ggplot2::element_blank(),
+    axis.title.y    = ggplot2::element_blank(),
+    panel.border    = ggplot2::element_rect(color = "black", fill = NA),
+    # VERY tight right margin to bring panels closer
+    plot.margin     = grid::unit(c(5, 1, 5, 5), "pt")
+  )
+
+## ---- 8) Horizontal BARS (RIGHT panel), same reversed order ----
+bars_df <- combo_sizes
+bars_df$combo_label <- factor(bars_df$combo_label, levels = combo_levels_plot)
+
+p_bars <- ggplot2::ggplot(bars_df, ggplot2::aes(y = combo_label, x = size)) +
+  ggplot2::geom_col(width = 0.6, fill = "grey25", color = "black") +
+  ggplot2::labs(x = "Intersection size", y = NULL) +
+  ggplot2::coord_cartesian(clip = "off") +
+  ggplot2::theme_bw() +
+  ggplot2::theme(
+    axis.title.x   = ggplot2::element_text(face = "bold"),
+    axis.text.x     = ggplot2::element_text(color = "black"),
+    axis.text.y    = ggplot2::element_blank(),
+    axis.ticks.y   = ggplot2::element_blank(),
+    axis.title.y   = ggplot2::element_blank(),
+    panel.border   = ggplot2::element_rect(color = "black", fill = NA),
+    # VERY tight left margin to bring panels closer
+    plot.margin    = grid::unit(c(5, 5, 5, 1), "pt")
+  )
+
+## ---- 9) Arrange: MATRIX LEFT (slightly narrower), BARS RIGHT (wider) ----
+upset.association <- if (requireNamespace("gridExtra", quietly = TRUE)) {
+  gridExtra::grid.arrange(p_matrix, p_bars, ncol = 2, widths = c(0.30, 0.70))
+} else {
+  print(p_matrix); print(p_bars)
+}
+
+ggsave("upset.ass.2.png", upset.association, width = 4.5, height = 6.5, units = "in", dpi = 900)
+
+```
+
+```{r}
+##Update heatmap naming
+## ========= 1) Hub scores per network (aligned across nodes) =========
+
+# Put your graphs in a named list
+graphs_hub_list <- list(
+  "Growout 1-Control"      = sparcc_graph,     
+  "Growout 1-IndigoLT"     = sparcc_graph_G1_I,
+  "Growout 2-Control"      = sparcc_graph_G2_C,
+  "Growout 2-IndigoLT"     = sparcc_graph_G2_I
+)
+
+# Union of all node names across networks
+all_nodes_hub <- sort(unique(unlist(lapply(graphs_hub_list, function(g) igraph::V(g)$name))))
+
+# Helper: hub score (use |weight| if present, otherwise unweighted)
+.hub_vec_for_graph <- function(g, all_nodes) {
+  w <- igraph::E(g)$weight
+  if (is.null(w) || !is.numeric(w)) {
+    w_use <- NULL
+  } else {
+    w_use <- abs(w)
+    w_use[is.na(w_use)] <- 0
+  }
+  hs <- igraph::hub_score(g, weights = w_use, scale = TRUE)$vector
+  v  <- rep(NA_real_, length(all_nodes)); names(v) <- all_nodes
+  v[names(hs)] <- hs
+  v
+}
+
+# Row-bind into a matrix: rows = networks, cols = nodes
+hub_mat <- do.call(rbind, lapply(graphs_hub_list, .hub_vec_for_graph, all_nodes = all_nodes_hub))
+rownames(hub_mat) <- names(graphs_hub_list)
+
+## ========= 2) Column annotation: Family =========
+
+families_keep <- c(
+  "Carnobacteriaceae","Lactobacillaceae","Staphylococcaceae",
+  "Dermabacteraceae","Nocardiopsaceae","Bacillaceae","Micrococcaceae"
+)
+
+custom_family_colors <- c(
+  "Carnobacteriaceae" = "#fcfdbf",
+  "Lactobacillaceae"  = "#febb81",
+  "Staphylococcaceae" = "#f8765c",
+  "Dermabacteraceae"  = "#d3436e",
+  "Nocardiopsaceae"   = "#982d80",
+  "Bacillaceae"       = "#5f187f",
+  "Micrococcaceae"    = "#221150",
+  "Other"             = "#000004"
+)
+
+.family_sources <- Filter(Negate(is.null), list(
+  get0("family_info",      ifnotfound = NULL),
+  get0("family_info_G1_I", ifnotfound = NULL),
+  get0("family_info_G2_C", ifnotfound = NULL),
+  get0("family_info_G2_I", ifnotfound = NULL)
+))
+
+if (length(.family_sources) == 0) {
+  stop("No family_info data frames found. Please provide a Species↔Family table.")
+}
+
+family_info_all <- do.call(rbind, lapply(.family_sources, function(df) {
+  df[, c("Species","Family")]
+}))
+
+family_info_all <- family_info_all[!duplicated(family_info_all$Species), , drop = FALSE]
+
+node_family <- family_info_all$Family[match(all_nodes_hub, family_info_all$Species)]
+node_family[is.na(node_family)] <- "Other"
+node_family <- ifelse(node_family %in% families_keep, node_family, "Other")
+node_family <- factor(node_family, levels = names(custom_family_colors))
+
+top_anno <- ComplexHeatmap::HeatmapAnnotation(
+  df  = data.frame(Family = node_family),
+  col = list(Family = custom_family_colors),
+  show_legend = FALSE,
+  simple_anno_size = unit(0.2, "cm"),
+  show_annotation_name = FALSE
+)
+
+## ========= Row annotation: Growout + Treatment =========
+
+.parse_row_net <- function(s) {
+  parts <- strsplit(s, "-", fixed = TRUE)[[1]]
+  gpart <- if (length(parts) >= 1) parts[1] else s
+  tpart <- if (length(parts) >= 2) parts[2] else ""
+  growout   <- trimws(sub("^Growout\\s*", "", gpart))
+  treatment <- trimws(tpart)
+  c(Growout = growout, Treatment = treatment)
+}
+
+rnets <- rownames(hub_mat)
+pr    <- t(vapply(rnets, .parse_row_net, character(2)))
+
+row_df <- data.frame(
+  Growout   = factor(pr[, "Growout"], levels = sort(unique(pr[, "Growout"]))),
+  Treatment = dplyr::recode(pr[, "Treatment"], "IndigoLT" = "Alternative"),
+  row.names = rnets,
+  check.names = FALSE
+)
+
+row_df$Treatment <- factor(row_df$Treatment, levels = c("Control", "Alternative"))
+
+grow_cols_use <- if (exists("grow_cols")) {
+  grow_cols
+} else {
+  c("1" = "#dbe9ff", "2" = "#ffe8d5")
+}
+
+trt_cols_use <- c(
+  "Control"     = "#f8765c",
+  "Alternative" = "#221150"
+)
+
+network_anno <- ComplexHeatmap::rowAnnotation(
+  df  = row_df,
+  col = list(
+    Growout   = grow_cols_use,
+    Treatment = trt_cols_use
+  ),
+  show_legend = TRUE,
+  show_annotation_name = FALSE,
+  simple_anno_size = unit(0.2, "cm"),
+  gp = gpar(col = "black"),
+  annotation_legend_param = list(border = TRUE)
+)
+
+## ========= 3) Heatmap =========
+
+col_fun_hub <- circlize::colorRamp2(c(0, 1), c("#f7fbff", "orange3"))
+
+lgd_list.hub <- list(
+  title = "Hub Score",         
+  title_gp = gpar(fontsize = 12, fontface = "bold"),
+  labels_gp = gpar(fontsize = 10),
+  border = "black",
+  lwd = 1,
+  direction = "horizontal",
+  title_position = "topcenter",
+  at = c(0, 0.2, 0.4, 0.6, 0.8, 1),
+  labels = c("0", "0.2", "0.4", "0.6", "0.8", "1"),
+  legend_width = unit(5, "cm"),
+  legend_height = unit(5, "cm"),
+  x = unit(0.5, "cm"),
+  y = unit(0.5, "cm"),
+  legend_gp = gpar(col = "black", lwd = 2)
+)
+
+ht_hub <- ComplexHeatmap::Heatmap(
+  hub_mat,
+  name              = "Hub score",
+  col               = col_fun_hub,
+  na_col            = "gray",
+  top_annotation    = top_anno,
+  right_annotation  = network_anno,
+  cluster_columns   = FALSE,
+  show_row_names    = FALSE,
+  show_column_names = FALSE,
+  row_title         = NULL,
+  column_title      = NULL,
+  border_gp         = gpar(col = "black", lwd = 1.5),
+  heatmap_legend_param = lgd_list.hub
+)
+
+png("hub.heat.png", width = 9, height = 2, units = "in", res = 900, bg = "transparent")
+ComplexHeatmap::draw(ht_hub, heatmap_legend_side = "bottom")
+dev.off()
+
+```
+
