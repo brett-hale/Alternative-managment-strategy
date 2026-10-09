@@ -1,0 +1,744 @@
+---
+title: "read discrepancy"
+author: "BH"
+date: "2026-10-09"
+output: html_document
+---
+
+```{r}
+library(dplyr)
+
+# Final reads represented in phyloseq
+phy_reads <- tibble(
+  sample_id_phylo = names(sample_sums(physeq_no_growout3)),
+  final_reads = as.numeric(sample_sums(physeq_no_growout3))
+) %>%
+  mutate(
+    sample_num = as.integer(sub(".*_(\\d+)$", "\\1", sample_id_phylo))
+  )
+
+# Reads from FASTQ files after 800-2000 bp length filtering
+fastq_reads <- per_sample_length_summary_filt_1_60 %>%
+  mutate(
+    sample_num = as.integer(sub(".*_(\\d+)$", "\\1", sample_id))
+  ) %>%
+  select(sample_num, fastq_reads = n_reads)
+
+# Compare stages
+read_comparison <- inner_join(fastq_reads, phy_reads, by = "sample_num") %>%
+  mutate(
+    retained_fraction = final_reads / fastq_reads,
+    retained_percent = 100 * retained_fraction
+  )
+
+# Summary
+read_comparison %>%
+  summarise(
+    n_samples = n(),
+    
+    fastq_total = sum(fastq_reads),
+    fastq_mean = mean(fastq_reads),
+    fastq_sd = sd(fastq_reads),
+    fastq_min = min(fastq_reads),
+    fastq_max = max(fastq_reads),
+    
+    final_total = sum(final_reads),
+    final_mean = mean(final_reads),
+    final_sd = sd(final_reads),
+    final_min = min(final_reads),
+    final_max = max(final_reads),
+    
+    mean_retained_percent = mean(retained_percent)
+  )
+
+# Inspect sample-by-sample
+read_comparison %>%
+  arrange(sample_num)
+
+```
+
+```{r}
+# ==============================================================
+# Updated sequencing summary figure
+#
+# IMPORTANT CHANGE:
+#   - "Read count" now uses reads retained in the FINAL processed
+#     phyloseq dataset (physeq_no_growout3), matching the value
+#     reported in the manuscript.
+#
+#   - "OTU count" remains the observed number of taxa per sample
+#     in the final phyloseq dataset.
+#
+#   - "Read length (bp)" continues to use the previously generated
+#     800-2000 bp filtered FASTQ read-length summary.
+#
+# Figure order is preserved as:
+#   OTU count -> Read count -> Read length (bp)
+#
+# Does NOT overwrite existing objects.
+# ==============================================================
+
+library(phyloseq)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(ggplot2)
+library(viridis)
+library(grid)
+
+# ==============================================================
+# 1. OTUs per sample from final phyloseq object
+# ==============================================================
+
+otu_mat_suppfig2 <- as(
+  phyloseq::otu_table(physeq_no_growout3),
+  "matrix"
+)
+
+otus_per_sample_suppfig2 <- if (
+  phyloseq::taxa_are_rows(physeq_no_growout3)
+) {
+  colSums(otu_mat_suppfig2 > 0)
+} else {
+  rowSums(otu_mat_suppfig2 > 0)
+}
+
+otus_df_suppfig2 <- tibble::tibble(
+  sample_id_phylo = names(otus_per_sample_suppfig2),
+  otus = as.numeric(otus_per_sample_suppfig2)
+) %>%
+  dplyr::mutate(
+    sample_num = as.integer(
+      sub(".*_(\\d+)$", "\\1", sample_id_phylo)
+    )
+  ) %>%
+  dplyr::filter(
+    !is.na(sample_num),
+    sample_num >= 1L,
+    sample_num <= 60L
+  )
+
+# ==============================================================
+# 2. Final processed read counts from phyloseq
+# ==============================================================
+
+final_reads_df_suppfig2 <- tibble::tibble(
+  sample_id_phylo = names(
+    phyloseq::sample_sums(physeq_no_growout3)
+  ),
+  final_reads = as.numeric(
+    phyloseq::sample_sums(physeq_no_growout3)
+  )
+) %>%
+  dplyr::mutate(
+    sample_num = as.integer(
+      sub(".*_(\\d+)$", "\\1", sample_id_phylo)
+    )
+  ) %>%
+  dplyr::filter(
+    !is.na(sample_num),
+    sample_num >= 1L,
+    sample_num <= 60L
+  ) %>%
+  dplyr::select(
+    sample_num,
+    final_reads
+  )
+
+# ==============================================================
+# 3. Mean read length from previous 800-2000 bp FASTQ summary
+# ==============================================================
+
+read_lengths_df_suppfig2 <- per_sample_length_summary_filt_1_60 %>%
+  dplyr::mutate(
+    sample_num = as.integer(
+      sub(".*_(\\d+)$", "\\1", sample_id)
+    )
+  ) %>%
+  dplyr::filter(
+    !is.na(sample_num),
+    sample_num >= 1L,
+    sample_num <= 60L
+  ) %>%
+  dplyr::select(
+    sample_num,
+    mean_len
+  )
+
+# ==============================================================
+# 4. Join metrics by sample
+# ==============================================================
+
+plot_df_suppfig2 <- final_reads_df_suppfig2 %>%
+  dplyr::inner_join(
+    otus_df_suppfig2 %>%
+      dplyr::select(sample_num, otus),
+    by = "sample_num"
+  ) %>%
+  dplyr::inner_join(
+    read_lengths_df_suppfig2,
+    by = "sample_num"
+  ) %>%
+  dplyr::transmute(
+    sample_num,
+    `OTU count` = otus,
+    `Read count` = final_reads,
+    `Read length (bp)` = mean_len
+  ) %>%
+  tidyr::pivot_longer(
+    cols = -sample_num,
+    names_to = "Metric",
+    values_to = "Value"
+  ) %>%
+  dplyr::mutate(
+    Metric = factor(
+      Metric,
+      levels = c(
+        "OTU count",
+        "Read count",
+        "Read length (bp)"
+      )
+    )
+  )
+
+# Guard against failed joins
+if (nrow(plot_df_suppfig2) == 0) {
+  stop(
+    "No overlapping samples after harmonizing IDs. Check sample naming."
+  )
+}
+
+# Sanity check: should be 60 observations per metric
+table(plot_df_suppfig2$Metric)
+
+# ==============================================================
+# 5. Per-facet summary statistics
+# ==============================================================
+
+stats_df_suppfig2 <- plot_df_suppfig2 %>%
+  dplyr::group_by(Metric) %>%
+  dplyr::summarise(
+    mean = mean(Value, na.rm = TRUE),
+    q1 = stats::quantile(
+      Value,
+      0.25,
+      na.rm = TRUE
+    ),
+    q3 = stats::quantile(
+      Value,
+      0.75,
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  )
+
+stats_df_suppfig2
+
+# ==============================================================
+# 6. Updated figure
+# ==============================================================
+
+sequencing_summary_plot_suppfig2 <- ggplot(
+  plot_df_suppfig2,
+  aes(
+    x = Value,
+    fill = Metric
+  )
+) +
+  geom_density(
+    alpha = 0.8
+  ) +
+  geom_vline(
+    data = stats_df_suppfig2,
+    aes(xintercept = mean),
+    linewidth = 0.7
+  ) +
+  geom_vline(
+    data = stats_df_suppfig2,
+    aes(xintercept = q1),
+    linetype = "dashed",
+    linewidth = 0.6
+  ) +
+  geom_vline(
+    data = stats_df_suppfig2,
+    aes(xintercept = q3),
+    linetype = "dashed",
+    linewidth = 0.6
+  ) +
+  facet_wrap(
+    ~ Metric,
+    scales = "free",
+    nrow = 1
+  ) +
+  scale_fill_viridis_d(
+    option = "magma"
+  ) +
+  labs(
+    x = NULL,
+    y = "Density"
+  ) +
+  guides(
+    fill = "none"
+  ) +
+  theme_bw() +
+  theme(
+    axis.title = element_text(size = 12),
+    axis.text.x = element_text(
+      size = 9,
+      color = "black"
+    ),
+    axis.text.y = element_text(
+      size = 12,
+      color = "black"
+    ),
+    strip.text = element_text(size = 12),
+    strip.background = element_blank(),
+    panel.spacing = unit(1, "lines")
+  )
+
+sequencing_summary_plot_suppfig2
+
+# ==============================================================
+# 7. Save under a NEW filename
+# ==============================================================
+
+ggsave(
+  filename = "sequencing.summary.final_processed_reads.png",
+  plot = sequencing_summary_plot_suppfig2,
+  width = 9,
+  height = 3.5,
+  units = "in",
+  dpi = 900
+)
+
+```
+
+```{r}
+# ==============================================================
+# Sequencing read-count audit
+# Does NOT overwrite existing objects
+# ==============================================================
+
+library(ShortRead)
+library(phyloseq)
+library(dplyr)
+
+# --------------------------------------------------------------
+# 1. Reads BEFORE the 800-2000 bp length filter
+#    Uses the same FASTQ files previously selected for samples 1-60
+# --------------------------------------------------------------
+
+raw_read_counts_audit <- vapply(
+  fastq_pass_files_1_60,
+  function(fq) {
+    fq_obj <- ShortRead::readFastq(fq)
+    length(fq_obj)
+  },
+  integer(1)
+)
+
+raw_reads_total_audit <- sum(raw_read_counts_audit)
+
+raw_reads_total_audit
+
+
+# --------------------------------------------------------------
+# 2. Reads AFTER the 800-2000 bp length filter
+# --------------------------------------------------------------
+
+filtered_reads_total_audit <- total_reads_filtered_1_60
+
+filtered_reads_total_audit
+
+
+# --------------------------------------------------------------
+# 3. Reads represented in final phyloseq object
+# --------------------------------------------------------------
+
+analyzed_reads_total_audit <- sum(
+  phyloseq::sample_sums(physeq_no_growout3)
+)
+
+analyzed_reads_total_audit
+
+
+# --------------------------------------------------------------
+# 4. Inspect taxonomy completeness in final object
+# --------------------------------------------------------------
+
+tax_audit <- as.data.frame(
+  phyloseq::tax_table(physeq_no_growout3),
+  stringsAsFactors = FALSE
+)
+
+tax_assignment_summary_audit <- data.frame(
+  Rank = colnames(tax_audit),
+  Assigned_taxa = vapply(
+    tax_audit,
+    function(x) sum(!is.na(x) & x != ""),
+    integer(1)
+  ),
+  Total_taxa = nrow(tax_audit)
+)
+
+tax_assignment_summary_audit
+
+```
+
+```{r}
+# ==============================================================
+# Supplementary File 1
+# Per-sample sequencing read counts across processing stages
+#
+# Samples included:
+#   1-60 and 91-93
+#
+# Columns:
+#   Raw_reads
+#     = reads in the per-sample FASTQ files before the
+#       800-2000 bp length filter
+#
+#   Filtered_reads
+#     = reads retained after the 800-2000 bp length filter
+#
+#   Classified_reads
+#     = length-filtered reads receiving a taxonomic classification
+#       in the Epi2Me wf-16s output
+#
+#   Analyzed_reads
+#     = reads retained in the final phyloseq object used for
+#       downstream biological analyses
+#
+# Does NOT overwrite existing objects.
+# ==============================================================
+
+library(ShortRead)
+library(phyloseq)
+library(dplyr)
+library(tibble)
+
+# ==============================================================
+# 1. Define samples to include
+# ==============================================================
+
+supp1_sample_numbers <- c(1:60, 91:93)
+
+
+# ==============================================================
+# 2. Locate FASTQ files
+# ==============================================================
+
+# Root directory for sequencing run
+supp1_root_dir <- "/Users/brett/Documents/DeQueen_Litter/5080"
+
+# Find all gzipped FASTQ files
+supp1_all_fastq_files <- list.files(
+  path = supp1_root_dir,
+  pattern = "\\.fastq\\.gz$",
+  recursive = TRUE,
+  full.names = TRUE
+)
+
+# Retain sequencing-pass files
+supp1_fastq_pass_files <- supp1_all_fastq_files[
+  grepl("fastq_pass", supp1_all_fastq_files)
+]
+
+# Extract sample ID from directory name
+supp1_sample_ids <- vapply(
+  supp1_fastq_pass_files,
+  function(path) basename(dirname(path)),
+  character(1)
+)
+
+# Extract numeric sample number
+supp1_sample_nums <- as.integer(
+  sub(".*_", "", supp1_sample_ids)
+)
+
+# Keep samples 1-60 and 91-93
+supp1_keep <- !is.na(supp1_sample_nums) &
+  supp1_sample_nums %in% supp1_sample_numbers
+
+supp1_fastq_files_keep <- supp1_fastq_pass_files[supp1_keep]
+supp1_sample_ids_keep <- supp1_sample_ids[supp1_keep]
+supp1_sample_nums_keep <- supp1_sample_nums[supp1_keep]
+
+
+# ==============================================================
+# 3. Calculate raw/input and length-filtered reads per sample
+# ==============================================================
+
+supp1_fastq_counts <- lapply(
+  supp1_sample_numbers,
+  function(samp_num) {
+
+    supp1_files_this_sample <- supp1_fastq_files_keep[
+      supp1_sample_nums_keep == samp_num
+    ]
+
+    # If no FASTQ file is found, return NA
+    if (length(supp1_files_this_sample) == 0) {
+      return(
+        data.frame(
+          Sample = samp_num,
+          Raw_reads = NA_real_,
+          Filtered_reads_FASTQ = NA_real_
+        )
+      )
+    }
+
+    supp1_raw_total <- 0
+    supp1_filtered_total <- 0
+
+    for (fq in supp1_files_this_sample) {
+
+      supp1_fq_obj <- ShortRead::readFastq(fq)
+
+      supp1_lengths <- width(
+        ShortRead::sread(supp1_fq_obj)
+      )
+
+      # Reads before the 800-2000 bp filter
+      supp1_raw_total <- supp1_raw_total +
+        length(supp1_lengths)
+
+      # Reads retained after the 800-2000 bp filter
+      supp1_filtered_total <- supp1_filtered_total +
+        sum(
+          supp1_lengths >= 800 &
+          supp1_lengths <= 2000
+        )
+    }
+
+    data.frame(
+      Sample = samp_num,
+      Raw_reads = supp1_raw_total,
+      Filtered_reads_FASTQ = supp1_filtered_total
+    )
+  }
+) %>%
+  dplyr::bind_rows()
+
+
+# ==============================================================
+# 4. Obtain filtered and classified reads from Epi2Me output
+# ==============================================================
+
+# Identify sample columns
+supp1_abundance_sample_cols <- grep(
+  "^X5080_[0-9]+$",
+  colnames(abundance_table_species),
+  value = TRUE
+)
+
+supp1_abundance_sample_info <- data.frame(
+  sample_col = supp1_abundance_sample_cols,
+  Sample = as.integer(
+    sub("^X5080_", "", supp1_abundance_sample_cols)
+  )
+) %>%
+  dplyr::filter(
+    Sample %in% supp1_sample_numbers
+  ) %>%
+  dplyr::arrange(Sample)
+
+# Identify explicit Unclassified row
+supp1_unclassified_row <- grepl(
+  "^Unclassified;",
+  abundance_table_species$tax
+)
+
+# Confirm exactly one Unclassified row exists
+if (sum(supp1_unclassified_row) != 1) {
+  stop(
+    "Expected exactly one explicit Unclassified row in abundance_table_species."
+  )
+}
+
+# Total filtered reads represented in Epi2Me output
+supp1_filtered_epi2me <- colSums(
+  abundance_table_species[
+    ,
+    supp1_abundance_sample_info$sample_col,
+    drop = FALSE
+  ],
+  na.rm = TRUE
+)
+
+# Unclassified reads
+supp1_unclassified_epi2me <- as.numeric(
+  abundance_table_species[
+    supp1_unclassified_row,
+    supp1_abundance_sample_info$sample_col,
+    drop = FALSE
+  ]
+)
+
+# Classified reads
+supp1_classified_epi2me <-
+  supp1_filtered_epi2me -
+  supp1_unclassified_epi2me
+
+supp1_classification_counts <- data.frame(
+  Sample = supp1_abundance_sample_info$Sample,
+  Filtered_reads_Epi2Me = as.numeric(
+    supp1_filtered_epi2me
+  ),
+  Classified_reads = as.numeric(
+    supp1_classified_epi2me
+  )
+)
+
+
+# ==============================================================
+# 5. Obtain analyzed reads from final phyloseq object
+# ==============================================================
+
+supp1_analyzed_counts <- tibble::tibble(
+  sample_id_phylo = names(
+    phyloseq::sample_sums(physeq_no_growout3)
+  ),
+  Analyzed_reads = as.numeric(
+    phyloseq::sample_sums(physeq_no_growout3)
+  )
+) %>%
+  dplyr::mutate(
+    Sample = as.integer(
+      sub(".*_(\\d+)$", "\\1", sample_id_phylo)
+    )
+  ) %>%
+  dplyr::filter(
+    Sample %in% supp1_sample_numbers
+  ) %>%
+  dplyr::select(
+    Sample,
+    Analyzed_reads
+  )
+
+
+# ==============================================================
+# 6. Assemble Supplementary File 1
+# ==============================================================
+
+supplementary_file1_reads <- data.frame(
+  Sample = supp1_sample_numbers
+) %>%
+  dplyr::left_join(
+    supp1_fastq_counts,
+    by = "Sample"
+  ) %>%
+  dplyr::left_join(
+    supp1_classification_counts,
+    by = "Sample"
+  ) %>%
+  dplyr::left_join(
+    supp1_analyzed_counts,
+    by = "Sample"
+  ) %>%
+  dplyr::arrange(Sample)
+
+
+# ==============================================================
+# 7. Check that independently calculated filtered counts agree
+# ==============================================================
+
+supp1_filtered_check <- supplementary_file1_reads %>%
+  dplyr::filter(
+    !is.na(Filtered_reads_FASTQ),
+    !is.na(Filtered_reads_Epi2Me)
+  ) %>%
+  dplyr::mutate(
+    difference =
+      Filtered_reads_FASTQ -
+      Filtered_reads_Epi2Me
+  )
+
+# Print any discrepancies
+supp1_filtered_check %>%
+  dplyr::filter(difference != 0)
+
+# Warn if discrepancies exist
+if (any(supp1_filtered_check$difference != 0)) {
+  warning(
+    "FASTQ-derived and Epi2Me-derived filtered read counts do not match for one or more samples."
+  )
+}
+
+
+# ==============================================================
+# 8. Create final clean table
+# ==============================================================
+
+# Use the Epi2Me filtered count in the final table because it is
+# directly tied to the taxonomic classification output.
+
+Supplementary_File_1 <- supplementary_file1_reads %>%
+  dplyr::transmute(
+    Sample = Sample,
+    Raw_reads = Raw_reads,
+    Filtered_reads = Filtered_reads_Epi2Me,
+    Classified_reads = Classified_reads,
+    Analyzed_reads = Analyzed_reads
+  )
+
+
+# ==============================================================
+# 9. Inspect final per-sample table
+# ==============================================================
+
+print(
+  Supplementary_File_1,
+  n = Inf
+)
+
+
+# ==============================================================
+# 10. Print overall totals for samples 1-60
+# ==============================================================
+
+Supplementary_File_1 %>%
+  dplyr::filter(Sample %in% 1:60) %>%
+  dplyr::summarise(
+    Raw_reads = sum(
+      Raw_reads,
+      na.rm = TRUE
+    ),
+    Filtered_reads = sum(
+      Filtered_reads,
+      na.rm = TRUE
+    ),
+    Classified_reads = sum(
+      Classified_reads,
+      na.rm = TRUE
+    ),
+    Analyzed_reads = sum(
+      Analyzed_reads,
+      na.rm = TRUE
+    )
+  )
+
+
+# ==============================================================
+# 11. Print samples 91-93 separately
+# ==============================================================
+
+Supplementary_File_1 %>%
+  dplyr::filter(
+    Sample %in% 91:93
+  )
+
+
+# ==============================================================
+# 12. Write Supplementary File 1
+# ==============================================================
+
+write.csv(
+  Supplementary_File_1,
+  file = "Supplementary File 1.csv",
+  row.names = FALSE,
+  na = "NA"
+)
+
+```
+
