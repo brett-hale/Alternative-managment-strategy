@@ -1,0 +1,2243 @@
+---
+title: "revision.alpha.diversity"
+author: "BH"
+date: "2026-10-12"
+output: html_document
+---
+
+```{r}
+# ==============================================================
+# α-DIVERSITY GLMM REANALYSIS
+# HOUSE RETAINED + HOUSE ICC
+#
+# Complete analysis from top to bottom.
+#
+# Does NOT overwrite previous analysis objects.
+#
+# Growout-specific models:
+#   Response ~ Treatment + Position + (1 | House)
+#
+# Global models:
+#   Response ~ Treatment * Growout + Position + (1 | House)
+#
+# House is ALWAYS retained regardless of estimated variance.
+#
+# Previously selected distributions are used.
+# Distribution screening is NOT repeated.
+#
+# House variability is reported as:
+#   - random-intercept variance
+#   - random-intercept SD
+#   - adjusted ICC
+#   - unadjusted ICC
+#   - adjusted ICC as %
+#   - unadjusted ICC as %
+#
+# Excel output:
+#   ONE workbook
+#   ONE worksheet
+#   ONE flat results table
+# ==============================================================
+
+
+# ==============================================================
+# 0. Packages
+# ==============================================================
+
+library(dplyr)
+library(glmmTMB)
+library(car)
+library(emmeans)
+library(DHARMa)
+library(performance)
+library(writexl)
+
+
+# ==============================================================
+# 1. Check required columns
+# ==============================================================
+
+alpha_house_icc_required <- c(
+  "Sample",
+  "Growout",
+  "Treatment",
+  "House",
+  "Position",
+  "Observed",
+  "Shannon",
+  "InvSimpson",
+  "Faith_PD"
+)
+
+alpha_house_icc_missing <- setdiff(
+  alpha_house_icc_required,
+  names(alpha_diversity_meta)
+)
+
+if (length(alpha_house_icc_missing) > 0) {
+  stop(
+    "alpha_diversity_meta is missing required columns: ",
+    paste(alpha_house_icc_missing, collapse = ", ")
+  )
+}
+
+
+# ==============================================================
+# 2. Prepare analysis dataframe
+#
+# Original alpha_diversity_meta is NOT modified.
+# Only Growouts 1 and 2 are included.
+# ==============================================================
+
+alpha_house_icc_df <- alpha_diversity_meta %>%
+  dplyr::filter(
+    as.character(Growout) %in% c("1", "2")
+  ) %>%
+  dplyr::mutate(
+    Growout = factor(Growout),
+    Treatment = factor(Treatment),
+    House = factor(House),
+    Position = factor(Position)
+  )
+
+
+# ==============================================================
+# 3. Previously selected distributions
+#
+# Using simple lookup tables rather than nested list indexing.
+# ==============================================================
+
+alpha_house_icc_pergo_lookup <- data.frame(
+  Metric = c(
+    "Observed",
+    "Observed",
+    "Shannon",
+    "Shannon",
+    "InvSimpson",
+    "InvSimpson",
+    "Faith_PD",
+    "Faith_PD"
+  ),
+  Growout = c(
+    "1", "2",
+    "1", "2",
+    "1", "2",
+    "1", "2"
+  ),
+  Family = c(
+    "gamma",
+    "normal",
+    "gamma",
+    "normal",
+    "lognorm",
+    "gamma",
+    "gamma",
+    "gamma"
+  ),
+  stringsAsFactors = FALSE
+)
+
+
+alpha_house_icc_global_lookup <- data.frame(
+  Metric = c(
+    "Observed",
+    "Shannon",
+    "InvSimpson",
+    "Faith_PD"
+  ),
+  Family = c(
+    "normal",
+    "gamma",
+    "lognorm",
+    "gamma"
+  ),
+  stringsAsFactors = FALSE
+)
+
+
+# ==============================================================
+# 4. Helper: model family
+# ==============================================================
+
+alpha_house_icc_get_family <- function(family_name) {
+
+  if (family_name == "normal") {
+    return(
+      stats::gaussian(link = "identity")
+    )
+  }
+
+  if (family_name == "gamma") {
+    return(
+      stats::Gamma(link = "log")
+    )
+  }
+
+  if (family_name == "lognorm") {
+    # Response is log-transformed before fitting
+    return(
+      stats::gaussian(link = "identity")
+    )
+  }
+
+  stop(
+    "Unsupported family: ",
+    family_name
+  )
+}
+
+
+# ==============================================================
+# 5. Helper: apply sum-to-zero contrasts
+#
+# Required for Type III tests.
+# ==============================================================
+
+alpha_house_icc_set_contrasts <- function(df, variables) {
+
+  for (v in variables) {
+
+    if (
+      is.factor(df[[v]]) &&
+      nlevels(df[[v]]) > 1
+    ) {
+
+      contrasts(df[[v]]) <- contr.sum(
+        nlevels(df[[v]])
+      )
+    }
+  }
+
+  return(df)
+}
+
+
+# ==============================================================
+# 6. Helper: House variance and SD
+# ==============================================================
+
+alpha_house_icc_get_variance <- function(model) {
+
+  vc <- glmmTMB::VarCorr(model)$cond
+
+  house_variance <- as.numeric(
+    vc$House[1, 1]
+  )
+
+  house_sd <- sqrt(
+    house_variance
+  )
+
+  return(
+    data.frame(
+      Variance = house_variance,
+      SD = house_sd
+    )
+  )
+}
+
+
+# ==============================================================
+# 7. Helper: House ICC
+#
+# performance::icc() is used because models include Gaussian,
+# Gamma, and lognormal specifications.
+#
+# Adjusted ICC:
+#   proportion of residual/model variance attributable to House
+#   after accounting for the fixed effects.
+#
+# Unadjusted ICC:
+#   proportion of overall modeled variance attributable to House,
+#   including variance explained by fixed effects.
+#
+# tolerance = 0 keeps very small random-effect estimates rather
+# than automatically discarding them as singular.
+# ==============================================================
+
+alpha_house_icc_get_icc <- function(model) {
+
+  icc_result <- suppressWarnings(
+    tryCatch(
+      performance::icc(
+        model,
+        tolerance = 0,
+        approximation = "lognormal"
+      ),
+      error = function(e) NULL
+    )
+  )
+
+  if (is.null(icc_result)) {
+
+    return(
+      data.frame(
+        ICC_adjusted = NA_real_,
+        ICC_unadjusted = NA_real_,
+        Percent_House_adjusted = NA_real_,
+        Percent_House_unadjusted = NA_real_
+      )
+    )
+  }
+
+  icc_adjusted <- tryCatch(
+    as.numeric(
+      icc_result$ICC_adjusted[1]
+    ),
+    error = function(e) NA_real_
+  )
+
+  icc_unadjusted <- tryCatch(
+    as.numeric(
+      icc_result$ICC_unadjusted[1]
+    ),
+    error = function(e) NA_real_
+  )
+
+  return(
+    data.frame(
+      ICC_adjusted = icc_adjusted,
+      ICC_unadjusted = icc_unadjusted,
+      Percent_House_adjusted =
+        icc_adjusted * 100,
+      Percent_House_unadjusted =
+        icc_unadjusted * 100
+    )
+  )
+}
+
+
+# ==============================================================
+# 8. Helper: DHARMa p-value
+# ==============================================================
+
+alpha_house_icc_get_dharma_p <- function(test_object) {
+
+  if (
+    is.null(test_object) ||
+    is.null(test_object$p.value)
+  ) {
+    return(NA_real_)
+  }
+
+  return(
+    as.numeric(
+      test_object$p.value[1]
+    )
+  )
+}
+
+
+# ==============================================================
+# 9. Helper: emmeans test statistic
+#
+# emmeans may return either t.ratio or z.ratio.
+# ==============================================================
+
+alpha_house_icc_get_emm_stat <- function(df) {
+
+  if ("t.ratio" %in% names(df)) {
+    return(
+      as.numeric(df$t.ratio)
+    )
+  }
+
+  if ("z.ratio" %in% names(df)) {
+    return(
+      as.numeric(df$z.ratio)
+    )
+  }
+
+  return(
+    rep(
+      NA_real_,
+      nrow(df)
+    )
+  )
+}
+
+
+# ==============================================================
+# 10. Fit ONE growout-specific model
+#
+# Response ~ Treatment + Position + (1 | House)
+# ==============================================================
+
+alpha_house_icc_fit_pergo <- function(
+  metric,
+  growout,
+  family_name,
+  n_sims = 1000
+) {
+
+  # ------------------------------------------------------------
+  # Subset
+  # ------------------------------------------------------------
+
+  df <- alpha_house_icc_df %>%
+    dplyr::filter(
+      as.character(Growout) == growout
+    ) %>%
+    droplevels()
+
+
+  # ------------------------------------------------------------
+  # Contrasts
+  # ------------------------------------------------------------
+
+  df <- alpha_house_icc_set_contrasts(
+    df,
+    c(
+      "Treatment",
+      "Position"
+    )
+  )
+
+
+  # ------------------------------------------------------------
+  # Response
+  # ------------------------------------------------------------
+
+  response_var <- metric
+  transform_name <- "none"
+
+  if (family_name == "lognorm") {
+
+    if (any(df[[metric]] <= 0, na.rm = TRUE)) {
+      stop(
+        metric,
+        " contains non-positive values and cannot be log-transformed."
+      )
+    }
+
+    response_var <- paste0(
+      "log_",
+      metric,
+      "_house_icc"
+    )
+
+    df[[response_var]] <- log(
+      df[[metric]]
+    )
+
+    transform_name <- "log"
+  }
+
+
+  # ------------------------------------------------------------
+  # Formula
+  # ------------------------------------------------------------
+
+  model_formula <- stats::as.formula(
+    paste0(
+      response_var,
+      " ~ Treatment + Position + (1 | House)"
+    )
+  )
+
+
+  # ------------------------------------------------------------
+  # Fit model
+  # ------------------------------------------------------------
+
+  model <- glmmTMB::glmmTMB(
+    formula = model_formula,
+    family = alpha_house_icc_get_family(
+      family_name
+    ),
+    data = df
+  )
+
+
+  # ------------------------------------------------------------
+  # Type III fixed effects
+  # ------------------------------------------------------------
+
+  anova3 <- car::Anova(
+    model,
+    type = 3
+  )
+
+
+  # ------------------------------------------------------------
+  # Treatment comparison
+  # ------------------------------------------------------------
+
+  emm <- emmeans::emmeans(
+    model,
+    ~ Treatment
+  )
+
+  pairs <- emmeans::contrast(
+    emm,
+    method = "pairwise",
+    adjust = "BH"
+  )
+
+
+  # ------------------------------------------------------------
+  # DHARMa
+  # ------------------------------------------------------------
+
+  sim <- DHARMa::simulateResiduals(
+    fittedModel = model,
+    n = n_sims
+  )
+
+  dispersion <- DHARMa::testDispersion(
+    sim
+  )
+
+  outliers <- DHARMa::testOutliers(
+    sim
+  )
+
+  quantiles <- DHARMa::testQuantiles(
+    sim
+  )
+
+
+  # ------------------------------------------------------------
+  # House variance
+  # ------------------------------------------------------------
+
+  variance_result <- alpha_house_icc_get_variance(
+    model
+  )
+
+
+  # ------------------------------------------------------------
+  # House ICC
+  # ------------------------------------------------------------
+
+  icc_result <- alpha_house_icc_get_icc(
+    model
+  )
+
+
+  # ------------------------------------------------------------
+  # Return
+  # ------------------------------------------------------------
+
+  return(
+    list(
+      metric = metric,
+      growout = growout,
+      family = family_name,
+      transform = transform_name,
+      n = stats::nobs(model),
+      model = model,
+      anova3 = anova3,
+      pairs = pairs,
+      variance = variance_result,
+      icc = icc_result,
+      dharma = list(
+        sim = sim,
+        dispersion = dispersion,
+        outliers = outliers,
+        quantiles = quantiles
+      )
+    )
+  )
+}
+
+
+# ==============================================================
+# 11. Fit ALL growout-specific models
+#
+# No nested indexing is used here.
+# ==============================================================
+
+set.seed(5080)
+
+alpha_house_icc_models_pergo <- list()
+
+for (
+  i in seq_len(
+    nrow(alpha_house_icc_pergo_lookup)
+  )
+) {
+
+  metric <- alpha_house_icc_pergo_lookup$Metric[i]
+
+  growout <- alpha_house_icc_pergo_lookup$Growout[i]
+
+  family_name <- alpha_house_icc_pergo_lookup$Family[i]
+
+  model_name <- paste0(
+    metric,
+    "_G",
+    growout
+  )
+
+  cat(
+    "\n========================================\n",
+    model_name,
+    " | ",
+    family_name,
+    " | random = (1 | House)\n",
+    "========================================\n",
+    sep = ""
+  )
+
+  alpha_house_icc_models_pergo[[model_name]] <-
+    alpha_house_icc_fit_pergo(
+      metric = metric,
+      growout = growout,
+      family_name = family_name,
+      n_sims = 1000
+    )
+}
+
+
+# ==============================================================
+# 12. Fit ONE global model
+#
+# Response ~ Treatment * Growout + Position + (1 | House)
+# ==============================================================
+
+alpha_house_icc_fit_global <- function(
+  metric,
+  family_name,
+  n_sims = 1000
+) {
+
+  df <- alpha_house_icc_df
+
+
+  # ------------------------------------------------------------
+  # Contrasts
+  # ------------------------------------------------------------
+
+  df <- alpha_house_icc_set_contrasts(
+    df,
+    c(
+      "Treatment",
+      "Growout",
+      "Position"
+    )
+  )
+
+
+  # ------------------------------------------------------------
+  # Response
+  # ------------------------------------------------------------
+
+  response_var <- metric
+  transform_name <- "none"
+
+  if (family_name == "lognorm") {
+
+    if (any(df[[metric]] <= 0, na.rm = TRUE)) {
+      stop(
+        metric,
+        " contains non-positive values and cannot be log-transformed."
+      )
+    }
+
+    response_var <- paste0(
+      "log_",
+      metric,
+      "_global_house_icc"
+    )
+
+    df[[response_var]] <- log(
+      df[[metric]]
+    )
+
+    transform_name <- "log"
+  }
+
+
+  # ------------------------------------------------------------
+  # Formula
+  # ------------------------------------------------------------
+
+  model_formula <- stats::as.formula(
+    paste0(
+      response_var,
+      " ~ Treatment * Growout + Position + (1 | House)"
+    )
+  )
+
+
+  # ------------------------------------------------------------
+  # Fit model
+  # ------------------------------------------------------------
+
+  model <- glmmTMB::glmmTMB(
+    formula = model_formula,
+    family = alpha_house_icc_get_family(
+      family_name
+    ),
+    data = df
+  )
+
+
+  # ------------------------------------------------------------
+  # Type III fixed effects
+  # ------------------------------------------------------------
+
+  anova3 <- car::Anova(
+    model,
+    type = 3
+  )
+
+
+  # ------------------------------------------------------------
+  # Treatment within Growout
+  # ------------------------------------------------------------
+
+  emm <- emmeans::emmeans(
+    model,
+    ~ Treatment | Growout
+  )
+
+  pairs <- emmeans::contrast(
+    emm,
+    method = "pairwise",
+    adjust = "BH"
+  )
+
+
+  # ------------------------------------------------------------
+  # DHARMa
+  # ------------------------------------------------------------
+
+  sim <- DHARMa::simulateResiduals(
+    fittedModel = model,
+    n = n_sims
+  )
+
+  dispersion <- DHARMa::testDispersion(
+    sim
+  )
+
+  outliers <- DHARMa::testOutliers(
+    sim
+  )
+
+  quantiles <- DHARMa::testQuantiles(
+    sim
+  )
+
+
+  # ------------------------------------------------------------
+  # House variance
+  # ------------------------------------------------------------
+
+  variance_result <- alpha_house_icc_get_variance(
+    model
+  )
+
+
+  # ------------------------------------------------------------
+  # House ICC
+  # ------------------------------------------------------------
+
+  icc_result <- alpha_house_icc_get_icc(
+    model
+  )
+
+
+  # ------------------------------------------------------------
+  # Return
+  # ------------------------------------------------------------
+
+  return(
+    list(
+      metric = metric,
+      family = family_name,
+      transform = transform_name,
+      n = stats::nobs(model),
+      model = model,
+      anova3 = anova3,
+      pairs = pairs,
+      variance = variance_result,
+      icc = icc_result,
+      dharma = list(
+        sim = sim,
+        dispersion = dispersion,
+        outliers = outliers,
+        quantiles = quantiles
+      )
+    )
+  )
+}
+
+
+# ==============================================================
+# 13. Fit ALL global models
+#
+# Again, no nested indexing.
+# ==============================================================
+
+alpha_house_icc_models_global <- list()
+
+for (
+  i in seq_len(
+    nrow(alpha_house_icc_global_lookup)
+  )
+) {
+
+  metric <- alpha_house_icc_global_lookup$Metric[i]
+
+  family_name <- alpha_house_icc_global_lookup$Family[i]
+
+  cat(
+    "\n========================================\n",
+    "GLOBAL ",
+    metric,
+    " | ",
+    family_name,
+    " | random = (1 | House)\n",
+    "========================================\n",
+    sep = ""
+  )
+
+  alpha_house_icc_models_global[[metric]] <-
+    alpha_house_icc_fit_global(
+      metric = metric,
+      family_name = family_name,
+      n_sims = 1000
+    )
+}
+
+
+# ==============================================================
+# 14. Helper: convert ONE fitted model to flat result rows
+#
+# This produces ordinary atomic columns only.
+# No list-columns are created.
+# ==============================================================
+
+alpha_house_icc_build_rows <- function(
+  x,
+  analysis_label
+) {
+
+  # ------------------------------------------------------------
+  # Fixed effects
+  # ------------------------------------------------------------
+
+  anova_df <- as.data.frame(
+    x$anova3
+  )
+
+  anova_df$Effect <- rownames(
+    anova_df
+  )
+
+  rownames(anova_df) <- NULL
+
+  anova_df <- anova_df[
+    anova_df$Effect != "(Intercept)",
+    ,
+    drop = FALSE
+  ]
+
+  if (analysis_label == "Global") {
+    fixed_growout <- rep(
+      "1 + 2",
+      nrow(anova_df)
+    )
+  } else {
+    fixed_growout <- rep(
+      x$growout,
+      nrow(anova_df)
+    )
+  }
+
+  fixed_rows <- data.frame(
+    Analysis = rep(
+      analysis_label,
+      nrow(anova_df)
+    ),
+    Metric = rep(
+      x$metric,
+      nrow(anova_df)
+    ),
+    Growout = fixed_growout,
+    Family = rep(
+      x$family,
+      nrow(anova_df)
+    ),
+    Transform = rep(
+      x$transform,
+      nrow(anova_df)
+    ),
+    N = rep(
+      x$n,
+      nrow(anova_df)
+    ),
+    Result_type = rep(
+      "Fixed effect - Type III Wald",
+      nrow(anova_df)
+    ),
+    Effect_or_contrast =
+      as.character(anova_df$Effect),
+    Estimate = rep(
+      NA_real_,
+      nrow(anova_df)
+    ),
+    SE = rep(
+      NA_real_,
+      nrow(anova_df)
+    ),
+    df =
+      as.numeric(anova_df$Df),
+    Test_statistic =
+      as.numeric(anova_df$Chisq),
+    P_value =
+      as.numeric(
+        anova_df[["Pr(>Chisq)"]]
+      ),
+    Variance = rep(
+      NA_real_,
+      nrow(anova_df)
+    ),
+    SD = rep(
+      NA_real_,
+      nrow(anova_df)
+    ),
+    ICC_adjusted = rep(
+      NA_real_,
+      nrow(anova_df)
+    ),
+    ICC_unadjusted = rep(
+      NA_real_,
+      nrow(anova_df)
+    ),
+    Percent_House_adjusted = rep(
+      NA_real_,
+      nrow(anova_df)
+    ),
+    Percent_House_unadjusted = rep(
+      NA_real_,
+      nrow(anova_df)
+    ),
+    stringsAsFactors = FALSE
+  )
+
+
+  # ------------------------------------------------------------
+  # emmeans treatment contrasts
+  # ------------------------------------------------------------
+
+  pair_df <- as.data.frame(
+    summary(x$pairs)
+  )
+
+  if (analysis_label == "Global") {
+
+    pair_growout <- as.character(
+      pair_df$Growout
+    )
+
+  } else {
+
+    pair_growout <- rep(
+      x$growout,
+      nrow(pair_df)
+    )
+  }
+
+  pair_rows <- data.frame(
+    Analysis = rep(
+      analysis_label,
+      nrow(pair_df)
+    ),
+    Metric = rep(
+      x$metric,
+      nrow(pair_df)
+    ),
+    Growout = pair_growout,
+    Family = rep(
+      x$family,
+      nrow(pair_df)
+    ),
+    Transform = rep(
+      x$transform,
+      nrow(pair_df)
+    ),
+    N = rep(
+      x$n,
+      nrow(pair_df)
+    ),
+    Result_type = rep(
+      "Treatment contrast - emmeans",
+      nrow(pair_df)
+    ),
+    Effect_or_contrast =
+      as.character(pair_df$contrast),
+    Estimate =
+      as.numeric(pair_df$estimate),
+    SE =
+      as.numeric(pair_df$SE),
+    df =
+      if ("df" %in% names(pair_df)) {
+        as.numeric(pair_df$df)
+      } else {
+        rep(
+          NA_real_,
+          nrow(pair_df)
+        )
+      },
+    Test_statistic =
+      alpha_house_icc_get_emm_stat(
+        pair_df
+      ),
+    P_value =
+      as.numeric(pair_df$p.value),
+    Variance = rep(
+      NA_real_,
+      nrow(pair_df)
+    ),
+    SD = rep(
+      NA_real_,
+      nrow(pair_df)
+    ),
+    ICC_adjusted = rep(
+      NA_real_,
+      nrow(pair_df)
+    ),
+    ICC_unadjusted = rep(
+      NA_real_,
+      nrow(pair_df)
+    ),
+    Percent_House_adjusted = rep(
+      NA_real_,
+      nrow(pair_df)
+    ),
+    Percent_House_unadjusted = rep(
+      NA_real_,
+      nrow(pair_df)
+    ),
+    stringsAsFactors = FALSE
+  )
+
+
+  # ------------------------------------------------------------
+  # Random effect + ICC
+  # ------------------------------------------------------------
+
+  if (analysis_label == "Global") {
+    random_growout <- "1 + 2"
+  } else {
+    random_growout <- x$growout
+  }
+
+  random_row <- data.frame(
+    Analysis = analysis_label,
+    Metric = x$metric,
+    Growout = random_growout,
+    Family = x$family,
+    Transform = x$transform,
+    N = x$n,
+    Result_type = "Random effect",
+    Effect_or_contrast = "House",
+    Estimate = NA_real_,
+    SE = NA_real_,
+    df = NA_real_,
+    Test_statistic = NA_real_,
+    P_value = NA_real_,
+    Variance =
+      as.numeric(
+        x$variance$Variance[1]
+      ),
+    SD =
+      as.numeric(
+        x$variance$SD[1]
+      ),
+    ICC_adjusted =
+      as.numeric(
+        x$icc$ICC_adjusted[1]
+      ),
+    ICC_unadjusted =
+      as.numeric(
+        x$icc$ICC_unadjusted[1]
+      ),
+    Percent_House_adjusted =
+      as.numeric(
+        x$icc$Percent_House_adjusted[1]
+      ),
+    Percent_House_unadjusted =
+      as.numeric(
+        x$icc$Percent_House_unadjusted[1]
+      ),
+    stringsAsFactors = FALSE
+  )
+
+
+  # ------------------------------------------------------------
+  # DHARMa diagnostics
+  # ------------------------------------------------------------
+
+  diagnostic_rows <- data.frame(
+    Analysis = rep(
+      analysis_label,
+      3
+    ),
+    Metric = rep(
+      x$metric,
+      3
+    ),
+    Growout = rep(
+      random_growout,
+      3
+    ),
+    Family = rep(
+      x$family,
+      3
+    ),
+    Transform = rep(
+      x$transform,
+      3
+    ),
+    N = rep(
+      x$n,
+      3
+    ),
+    Result_type = rep(
+      "DHARMa diagnostic",
+      3
+    ),
+    Effect_or_contrast = c(
+      "Dispersion",
+      "Outliers",
+      "Quantiles"
+    ),
+    Estimate = rep(
+      NA_real_,
+      3
+    ),
+    SE = rep(
+      NA_real_,
+      3
+    ),
+    df = rep(
+      NA_real_,
+      3
+    ),
+    Test_statistic = rep(
+      NA_real_,
+      3
+    ),
+    P_value = c(
+      alpha_house_icc_get_dharma_p(
+        x$dharma$dispersion
+      ),
+      alpha_house_icc_get_dharma_p(
+        x$dharma$outliers
+      ),
+      alpha_house_icc_get_dharma_p(
+        x$dharma$quantiles
+      )
+    ),
+    Variance = rep(
+      NA_real_,
+      3
+    ),
+    SD = rep(
+      NA_real_,
+      3
+    ),
+    ICC_adjusted = rep(
+      NA_real_,
+      3
+    ),
+    ICC_unadjusted = rep(
+      NA_real_,
+      3
+    ),
+    Percent_House_adjusted = rep(
+      NA_real_,
+      3
+    ),
+    Percent_House_unadjusted = rep(
+      NA_real_,
+      3
+    ),
+    stringsAsFactors = FALSE
+  )
+
+
+  # ------------------------------------------------------------
+  # Combine
+  # ------------------------------------------------------------
+
+  return(
+    dplyr::bind_rows(
+      fixed_rows,
+      pair_rows,
+      random_row,
+      diagnostic_rows
+    )
+  )
+}
+
+
+# ==============================================================
+# 15. Build growout-specific result table
+# ==============================================================
+
+alpha_house_icc_results_pergo <- dplyr::bind_rows(
+  lapply(
+    alpha_house_icc_models_pergo,
+    function(x) {
+
+      alpha_house_icc_build_rows(
+        x = x,
+        analysis_label = "Growout-specific"
+      )
+    }
+  )
+)
+
+
+# ==============================================================
+# 16. Build global result table
+# ==============================================================
+
+alpha_house_icc_results_global <- dplyr::bind_rows(
+  lapply(
+    alpha_house_icc_models_global,
+    function(x) {
+
+      alpha_house_icc_build_rows(
+        x = x,
+        analysis_label = "Global"
+      )
+    }
+  )
+)
+
+
+# ==============================================================
+# 17. Combine ALL results
+# ==============================================================
+
+alpha_house_icc_results <- dplyr::bind_rows(
+  alpha_house_icc_results_pergo,
+  alpha_house_icc_results_global
+)
+
+
+# ==============================================================
+# 18. Order rows for readability
+# ==============================================================
+
+alpha_house_icc_results <- alpha_house_icc_results %>%
+  dplyr::mutate(
+
+    Analysis_order = ifelse(
+      Analysis == "Growout-specific",
+      1,
+      2
+    ),
+
+    Metric_order = match(
+      Metric,
+      c(
+        "Observed",
+        "Shannon",
+        "InvSimpson",
+        "Faith_PD"
+      )
+    ),
+
+    Result_order = match(
+      Result_type,
+      c(
+        "Fixed effect - Type III Wald",
+        "Treatment contrast - emmeans",
+        "Random effect",
+        "DHARMa diagnostic"
+      )
+    )
+  ) %>%
+  dplyr::arrange(
+    Analysis_order,
+    Metric_order,
+    Growout,
+    Result_order
+  ) %>%
+  dplyr::select(
+    -Analysis_order,
+    -Metric_order,
+    -Result_order
+  )
+
+
+# ==============================================================
+# 19. Confirm output is completely flat
+#
+# Stops before Excel export if any list-column somehow exists.
+# ==============================================================
+
+alpha_house_icc_list_columns <- names(
+  alpha_house_icc_results
+)[
+  vapply(
+    alpha_house_icc_results,
+    is.list,
+    logical(1)
+  )
+]
+
+if (length(alpha_house_icc_list_columns) > 0) {
+
+  stop(
+    "List-columns remain: ",
+    paste(
+      alpha_house_icc_list_columns,
+      collapse = ", "
+    )
+  )
+}
+
+
+# ==============================================================
+# 20. Print complete results
+# ==============================================================
+
+print(
+  alpha_house_icc_results,
+  n = Inf
+)
+
+
+# ==============================================================
+# 21. Print House variance + ICC summary
+#
+# This is the table most directly relevant to the reviewer's
+# question about magnitude of between-house variability.
+# ==============================================================
+
+alpha_house_icc_summary <- alpha_house_icc_results %>%
+  dplyr::filter(
+    Result_type == "Random effect"
+  ) %>%
+  dplyr::select(
+    Analysis,
+    Metric,
+    Growout,
+    Family,
+    Variance,
+    SD,
+    ICC_adjusted,
+    ICC_unadjusted,
+    Percent_House_adjusted,
+    Percent_House_unadjusted
+  )
+
+cat(
+  "\n\n============================================================\n",
+  "HOUSE RANDOM-EFFECT VARIANCE AND ICC\n",
+  "============================================================\n",
+  sep = ""
+)
+
+print(
+  alpha_house_icc_summary,
+  n = Inf
+)
+
+
+# ==============================================================
+# 22. Print global fixed effects
+# ==============================================================
+
+cat(
+  "\n\n============================================================\n",
+  "GLOBAL FIXED-EFFECT TESTS\n",
+  "============================================================\n",
+  sep = ""
+)
+
+print(
+  alpha_house_icc_results %>%
+    dplyr::filter(
+      Analysis == "Global",
+      Result_type == "Fixed effect - Type III Wald"
+    ),
+  n = Inf
+)
+
+
+# ==============================================================
+# 23. Print global Treatment contrasts within Growout
+# ==============================================================
+
+cat(
+  "\n\n============================================================\n",
+  "GLOBAL TREATMENT CONTRASTS WITHIN GROWOUT\n",
+  "============================================================\n",
+  sep = ""
+)
+
+print(
+  alpha_house_icc_results %>%
+    dplyr::filter(
+      Analysis == "Global",
+      Result_type == "Treatment contrast - emmeans"
+    ),
+  n = Inf
+)
+
+
+# ==============================================================
+# 24. Print DHARMa diagnostics
+# ==============================================================
+
+cat(
+  "\n\n============================================================\n",
+  "DHARMa DIAGNOSTICS\n",
+  "============================================================\n",
+  sep = ""
+)
+
+print(
+  alpha_house_icc_results %>%
+    dplyr::filter(
+      Result_type == "DHARMa diagnostic"
+    ),
+  n = Inf
+)
+
+
+# ==============================================================
+# 25. Plot DHARMa diagnostics
+# ==============================================================
+
+invisible(
+  lapply(
+    alpha_house_icc_models_pergo,
+    function(x) {
+
+      plot(
+        x$dharma$sim,
+        main = paste0(
+          x$metric,
+          " - Growout ",
+          x$growout
+        )
+      )
+    }
+  )
+)
+
+invisible(
+  lapply(
+    alpha_house_icc_models_global,
+    function(x) {
+
+      plot(
+        x$dharma$sim,
+        main = paste0(
+          x$metric,
+          " - Global"
+        )
+      )
+    }
+  )
+)
+
+
+# ==============================================================
+# 26. Save ONE flat table to ONE Excel worksheet
+# ==============================================================
+
+alpha_house_icc_excel_file <-
+  "Alpha Diversity GLMM Summary - House Retained with ICC.xlsx"
+
+writexl::write_xlsx(
+  list(
+    "Alpha GLMM Results" = alpha_house_icc_results
+  ),
+  path = alpha_house_icc_excel_file
+)
+
+
+# ==============================================================
+# 27. Confirm saved file
+# ==============================================================
+
+cat(
+  "\nExcel file written to:\n",
+  normalizePath(
+    alpha_house_icc_excel_file,
+    mustWork = FALSE
+  ),
+  "\n"
+)
+
+```
+
+```{r}
+# ==============================================================
+# UPDATED ALPHA-DIVERSITY FIGURE
+#
+# Pairwise Treatment p-values come from the revised GLOBAL models:
+#   Response ~ Treatment * Growout + Position + (1 | House)
+#
+# Uses final formatting from the previous figure:
+#   - p-value position = 1.10 x maximum
+#   - expanded upper y-axis margin
+#   - width = 7.5 in
+#
+# Does NOT overwrite previous plotting objects.
+# ==============================================================
+
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(ggplot2)
+library(grid)
+
+
+# ==============================================================
+# 1. Helper to format p-values for plotmath
+# ==============================================================
+
+fmt_p_parse_house_icc <- function(p) {
+
+  if (is.na(p)) {
+    return("italic(p)==NA")
+  }
+
+  if (p < 1e-3) {
+    return(
+      sprintf(
+        "italic(p)==%s",
+        formatC(
+          p,
+          format = "e",
+          digits = 3
+        )
+      )
+    )
+  }
+
+  return(
+    sprintf(
+      "italic(p)==%.3f",
+      p
+    )
+  )
+}
+
+
+# ==============================================================
+# 2. Build long plotting dataframe
+# ==============================================================
+
+alpha_long_plot_house_icc <- alpha_diversity_meta %>%
+  dplyr::filter(
+    as.character(Growout) %in% c("1", "2")
+  ) %>%
+  tidyr::pivot_longer(
+    cols = c(
+      Observed,
+      Shannon,
+      InvSimpson,
+      Faith_PD
+    ),
+    names_to = "Metric",
+    values_to = "Value"
+  ) %>%
+  dplyr::mutate(
+
+    Metric = dplyr::case_when(
+      Metric %in% c(
+        "Faith_PD",
+        "Faith’s PD",
+        "Faith's PD"
+      ) ~ "Faith’s PD",
+      TRUE ~ Metric
+    ),
+
+    Growout = as.character(
+      Growout
+    ),
+
+    Treatment = factor(
+      Treatment
+    )
+  )
+
+
+# ==============================================================
+# 3. Extract pairwise Treatment p-values
+#
+# Uses revised global models with House retained.
+# ==============================================================
+
+alpha_pairs_df_house_icc <- purrr::imap_dfr(
+  alpha_house_icc_models_global,
+  function(one_model, metric_name) {
+
+    pair_df <- as.data.frame(
+      summary(
+        one_model$pairs
+      )
+    )
+
+    keep <- grepl(
+      "Control\\s*-\\s*IndigoLT|IndigoLT\\s*-\\s*Control",
+      pair_df$contrast
+    )
+
+    pair_df <- pair_df[
+      keep,
+      ,
+      drop = FALSE
+    ]
+
+    if (nrow(pair_df) == 0) {
+
+      return(
+        tibble::tibble(
+          Metric = character(),
+          Growout = character(),
+          P_Value = numeric()
+        )
+      )
+    }
+
+    return(
+      tibble::tibble(
+        Metric = metric_name,
+        Growout = as.character(
+          pair_df$Growout
+        ),
+        P_Value = as.numeric(
+          pair_df$p.value
+        )
+      )
+    )
+  }
+) %>%
+  dplyr::mutate(
+
+    Metric = dplyr::case_when(
+      Metric %in% c(
+        "Faith_PD",
+        "Faith’s PD",
+        "Faith's PD"
+      ) ~ "Faith’s PD",
+      TRUE ~ Metric
+    ),
+
+    Growout = as.character(
+      Growout
+    ),
+
+    P_Label = vapply(
+      P_Value,
+      fmt_p_parse_house_icc,
+      character(1)
+    )
+  )
+
+
+# ==============================================================
+# 4. Print p-values used in figure
+# ==============================================================
+
+print(
+  alpha_pairs_df_house_icc,
+  n = Inf
+)
+
+
+# ==============================================================
+# 5. Calculate y-positions for p-value text
+#
+# Final formatting used 1.10 x maximum.
+# ==============================================================
+
+p_ypos_df_house_icc <- alpha_long_plot_house_icc %>%
+  dplyr::group_by(
+    Metric,
+    Growout
+  ) %>%
+  dplyr::summarise(
+    y_pos = max(
+      Value,
+      na.rm = TRUE
+    ) * 1.10,
+    .groups = "drop"
+  )
+
+
+# ==============================================================
+# 6. Join p-values with annotation positions
+# ==============================================================
+
+alpha_pairs_annot_house_icc <- dplyr::left_join(
+  alpha_pairs_df_house_icc,
+  p_ypos_df_house_icc,
+  by = c(
+    "Metric",
+    "Growout"
+  )
+)
+
+
+# ==============================================================
+# 7. Create updated figure
+# ==============================================================
+
+alpha_pair_plot_house_icc <- ggplot(
+  alpha_long_plot_house_icc,
+  aes(
+    x = Growout,
+    y = Value
+  )
+) +
+
+  geom_boxplot(
+    aes(
+      fill = Treatment
+    ),
+    color = "black",
+    alpha = 0.9,
+    outlier.shape = NA,
+    position = position_dodge(
+      width = 0.9
+    )
+  ) +
+
+  stat_summary(
+    aes(
+      fill = Treatment
+    ),
+    fun = mean,
+    geom = "point",
+    shape = 23,
+    size = 3,
+    color = "white",
+    position = position_dodge(
+      width = 0.9
+    ),
+    show.legend = FALSE
+  ) +
+
+  geom_jitter(
+    aes(
+      color = Treatment
+    ),
+    shape = 21,
+    size = 1.25,
+    alpha = 0.9,
+    fill = "white",
+    position = position_jitterdodge(
+      jitter.width = 0.1,
+      dodge.width = 0.9
+    ),
+    show.legend = FALSE
+  ) +
+
+  geom_text(
+    data = alpha_pairs_annot_house_icc,
+    aes(
+      x = Growout,
+      y = y_pos,
+      label = P_Label
+    ),
+    parse = TRUE,
+    size = 3,
+    inherit.aes = FALSE,
+    vjust = 0
+  ) +
+
+  facet_wrap(
+    ~ Metric,
+    scales = "free",
+    nrow = 1
+  ) +
+
+  scale_fill_manual(
+    values = c(
+      "Control" = "#f8765c",
+      "IndigoLT" = "#221150"
+    )
+  ) +
+
+  scale_color_manual(
+    values = c(
+      "Control" = "black",
+      "IndigoLT" = "black"
+    )
+  ) +
+
+  scale_y_continuous(
+    expand = expansion(
+      mult = c(
+        0.05,
+        0.15
+      )
+    )
+  ) +
+
+  theme_bw() +
+
+  theme(
+    axis.title.x = element_text(
+      size = 14,
+      face = "bold"
+    ),
+    axis.title.y = element_blank(),
+
+    axis.text = element_text(
+      size = 12,
+      color = "black"
+    ),
+
+    axis.ticks.x = element_blank(),
+
+    strip.text = element_text(
+      size = 12
+    ),
+
+    strip.background = element_blank(),
+
+    legend.title = element_text(
+      size = 14,
+      face = "bold"
+    ),
+
+    legend.text = element_text(
+      size = 14
+    ),
+
+    legend.position = "top",
+
+    panel.spacing = grid::unit(
+      1,
+      "lines"
+    )
+  ) +
+
+  labs(
+    fill = "Treatment",
+    x = "Growout"
+  )
+
+
+# ==============================================================
+# 8. Display figure
+# ==============================================================
+
+print(
+  alpha_pair_plot_house_icc
+)
+
+
+# ==============================================================
+# 9. Save figure
+# ==============================================================
+
+ggsave(
+  filename = "alpha_pairwise_BH_pvalues_house_retained.png",
+  plot = alpha_pair_plot_house_icc,
+  width = 7.5,
+  height = 3,
+  units = "in",
+  dpi = 900
+)
+
+```
+
+```{r}
+# ==============================================================
+# UPDATED ALPHA-DIVERSITY FIGURE
+#
+# Pairwise Treatment p-values come from the revised GLOBAL models:
+#   Response ~ Treatment * Growout + Position + (1 | House)
+#
+# Uses final formatting from the previous figure:
+#   - p-value position = 1.10 x maximum
+#   - expanded upper y-axis margin
+#   - width = 7.5 in
+#
+# Plot display:
+#   - IndigoLT renamed to Alternative
+#
+# Does NOT overwrite previous plotting objects.
+# ==============================================================
+
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(ggplot2)
+library(grid)
+
+
+# ==============================================================
+# 1. Helper to format p-values for plotmath
+# ==============================================================
+
+fmt_p_parse_house_icc <- function(p) {
+
+  if (is.na(p)) {
+    return("italic(p)==NA")
+  }
+
+  if (p < 1e-3) {
+    return(
+      sprintf(
+        "italic(p)==%s",
+        formatC(
+          p,
+          format = "e",
+          digits = 3
+        )
+      )
+    )
+  }
+
+  return(
+    sprintf(
+      "italic(p)==%.3f",
+      p
+    )
+  )
+}
+
+
+# ==============================================================
+# 2. Build long plotting dataframe
+# ==============================================================
+
+alpha_long_plot_house_icc <- alpha_diversity_meta %>%
+  dplyr::filter(
+    as.character(Growout) %in% c("1", "2")
+  ) %>%
+  tidyr::pivot_longer(
+    cols = c(
+      Observed,
+      Shannon,
+      InvSimpson,
+      Faith_PD
+    ),
+    names_to = "Metric",
+    values_to = "Value"
+  ) %>%
+  dplyr::mutate(
+
+    Metric = dplyr::case_when(
+      Metric %in% c(
+        "Faith_PD",
+        "Faith’s PD",
+        "Faith's PD"
+      ) ~ "Faith’s PD",
+      TRUE ~ Metric
+    ),
+
+    Growout = as.character(
+      Growout
+    ),
+
+    Treatment = dplyr::recode(
+      as.character(Treatment),
+      "IndigoLT" = "Alternative"
+    ),
+
+    Treatment = factor(
+      Treatment,
+      levels = c(
+        "Control",
+        "Alternative"
+      )
+    )
+  )
+
+
+# ==============================================================
+# 3. Extract pairwise Treatment p-values
+#
+# Uses revised global models with House retained.
+#
+# NOTE:
+#   Model objects retain the original IndigoLT treatment label.
+#   This is intentional and does not affect the displayed label.
+# ==============================================================
+
+alpha_pairs_df_house_icc <- purrr::imap_dfr(
+  alpha_house_icc_models_global,
+  function(one_model, metric_name) {
+
+    pair_df <- as.data.frame(
+      summary(
+        one_model$pairs
+      )
+    )
+
+    keep <- grepl(
+      "Control\\s*-\\s*IndigoLT|IndigoLT\\s*-\\s*Control",
+      pair_df$contrast
+    )
+
+    pair_df <- pair_df[
+      keep,
+      ,
+      drop = FALSE
+    ]
+
+    if (nrow(pair_df) == 0) {
+
+      return(
+        tibble::tibble(
+          Metric = character(),
+          Growout = character(),
+          P_Value = numeric()
+        )
+      )
+    }
+
+    return(
+      tibble::tibble(
+        Metric = metric_name,
+        Growout = as.character(
+          pair_df$Growout
+        ),
+        P_Value = as.numeric(
+          pair_df$p.value
+        )
+      )
+    )
+  }
+) %>%
+  dplyr::mutate(
+
+    Metric = dplyr::case_when(
+      Metric %in% c(
+        "Faith_PD",
+        "Faith’s PD",
+        "Faith's PD"
+      ) ~ "Faith’s PD",
+      TRUE ~ Metric
+    ),
+
+    Growout = as.character(
+      Growout
+    ),
+
+    P_Label = vapply(
+      P_Value,
+      fmt_p_parse_house_icc,
+      character(1)
+    )
+  )
+
+
+# ==============================================================
+# 4. Print p-values used in figure
+# ==============================================================
+
+print(
+  alpha_pairs_df_house_icc,
+  n = Inf
+)
+
+
+# ==============================================================
+# 5. Calculate y-positions for p-value text
+#
+# Final formatting used 1.10 x maximum.
+# ==============================================================
+
+p_ypos_df_house_icc <- alpha_long_plot_house_icc %>%
+  dplyr::group_by(
+    Metric,
+    Growout
+  ) %>%
+  dplyr::summarise(
+    y_pos = max(
+      Value,
+      na.rm = TRUE
+    ) * 1.10,
+    .groups = "drop"
+  )
+
+
+# ==============================================================
+# 6. Join p-values with annotation positions
+# ==============================================================
+
+alpha_pairs_annot_house_icc <- dplyr::left_join(
+  alpha_pairs_df_house_icc,
+  p_ypos_df_house_icc,
+  by = c(
+    "Metric",
+    "Growout"
+  )
+)
+
+
+# ==============================================================
+# 7. Create updated figure
+# ==============================================================
+
+alpha_pair_plot_house_icc <- ggplot(
+  alpha_long_plot_house_icc,
+  aes(
+    x = Growout,
+    y = Value
+  )
+) +
+
+  geom_boxplot(
+    aes(
+      fill = Treatment
+    ),
+    color = "black",
+    alpha = 0.9,
+    outlier.shape = NA,
+    position = position_dodge(
+      width = 0.9
+    )
+  ) +
+
+  stat_summary(
+    aes(
+      fill = Treatment
+    ),
+    fun = mean,
+    geom = "point",
+    shape = 23,
+    size = 3,
+    color = "white",
+    position = position_dodge(
+      width = 0.9
+    ),
+    show.legend = FALSE
+  ) +
+
+  geom_jitter(
+    aes(
+      color = Treatment
+    ),
+    shape = 21,
+    size = 1.25,
+    alpha = 0.9,
+    fill = "white",
+    position = position_jitterdodge(
+      jitter.width = 0.1,
+      dodge.width = 0.9
+    ),
+    show.legend = FALSE
+  ) +
+
+  geom_text(
+    data = alpha_pairs_annot_house_icc,
+    aes(
+      x = Growout,
+      y = y_pos,
+      label = P_Label
+    ),
+    parse = TRUE,
+    size = 3,
+    inherit.aes = FALSE,
+    vjust = 0
+  ) +
+
+  facet_wrap(
+    ~ Metric,
+    scales = "free",
+    nrow = 1
+  ) +
+
+  scale_fill_manual(
+    values = c(
+      "Control" = "#f8765c",
+      "Alternative" = "#221150"
+    )
+  ) +
+
+  scale_color_manual(
+    values = c(
+      "Control" = "black",
+      "Alternative" = "black"
+    )
+  ) +
+
+  scale_y_continuous(
+    expand = expansion(
+      mult = c(
+        0.05,
+        0.15
+      )
+    )
+  ) +
+
+  theme_bw() +
+
+  theme(
+    axis.title.x = element_text(
+      size = 14,
+      face = "bold"
+    ),
+    axis.title.y = element_blank(),
+
+    axis.text = element_text(
+      size = 12,
+      color = "black"
+    ),
+
+    axis.ticks.x = element_blank(),
+
+    strip.text = element_text(
+      size = 12
+    ),
+
+    strip.background = element_blank(),
+
+    legend.title = element_text(
+      size = 14,
+      face = "bold"
+    ),
+
+    legend.text = element_text(
+      size = 14
+    ),
+
+    legend.position = "top",
+
+    panel.spacing = grid::unit(
+      1,
+      "lines"
+    )
+  ) +
+
+  labs(
+    fill = "Treatment",
+    x = "Growout"
+  )
+
+
+# ==============================================================
+# 8. Display figure
+# ==============================================================
+
+print(
+  alpha_pair_plot_house_icc
+)
+
+
+# ==============================================================
+# 9. Save figure
+# ==============================================================
+
+ggsave(
+  filename = "alpha_pairwise_BH_pvalues_house_retained.png",
+  plot = alpha_pair_plot_house_icc,
+  width = 7.5,
+  height = 3,
+  units = "in",
+  dpi = 900
+)
+```
+

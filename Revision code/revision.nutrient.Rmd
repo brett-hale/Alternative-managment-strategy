@@ -1,0 +1,4766 @@
+---
+title: "revision.nutrient"
+author: "BH"
+date: "2026-10-12"
+output: html_document
+---
+
+```{r}
+# ==============================================================
+# FINAL CORRECTED PHYSICOCHEMICAL ANALYSIS
+#
+# DEFINITIVE INPUT:
+#   DeQueen.nutrient_metric
+#
+# IMPORTANT:
+#   We use ONLY the source laboratory columns:
+#
+#     Nitrogen
+#     Ammonium.N
+#     Phosphorus
+#     Potassium
+#
+#   These are already DRY-BASIS values in lb/US ton.
+#
+#   Conversion:
+#
+#     lb/US ton x 0.5 = kg/metric ton
+#
+#   NO dry-matter correction is applied.
+#   DM_frac is NOT used to transform nutrient concentrations.
+#
+# NEW OBJECTS:
+#   Everything created here ends in .final
+#
+# MODEL STRATEGY:
+#
+# Global:
+#   Level ~ Treatment * Growout + Position + (1 | House)
+#
+# Growout-specific:
+#   Level ~ Treatment + Position + (1 | House)
+#
+# House is ALWAYS retained.
+#
+# Distribution:
+#   Normal
+#   Gamma
+#   Log-normal
+#
+# Distribution is selected independently for:
+#   - global model
+#   - each growout-specific model
+#
+# Figure/manuscript within-growout Treatment comparisons:
+#   emmeans(~ Treatment | Growout)
+#   from GLOBAL model
+#
+# Baseline:
+#   one composite sample per house
+#   two-sided Mann-Whitney / Wilcoxon rank-sum test
+#
+# DHARMa:
+#   global models only
+# ==============================================================
+
+
+# ==============================================================
+# 0. Packages
+# ==============================================================
+
+library(dplyr)
+library(tidyr)
+library(MASS)
+library(glmmTMB)
+library(car)
+library(emmeans)
+library(DHARMa)
+library(performance)
+library(writexl)
+
+
+# ==============================================================
+# 1. REBUILD THE CORRECT METRIC DATA FROM SOURCE COLUMNS
+#
+# Do NOT trust or use any existing .dry columns.
+# ==============================================================
+
+DeQueen.nutrient_metric.final <- DeQueen.nutrient_metric %>%
+  dplyr::mutate(
+
+    Nitrogen.kg_mt =
+      as.numeric(Nitrogen) * 0.5,
+
+    Ammonium.N.kg_mt =
+      as.numeric(Ammonium.N) * 0.5,
+
+    Phosphorus.kg_mt =
+      as.numeric(Phosphorus) * 0.5,
+
+    Potassium.kg_mt =
+      as.numeric(Potassium) * 0.5,
+
+    NH4_to_TotalN.final =
+      Ammonium.N.kg_mt / Nitrogen.kg_mt
+  )
+
+
+# ==============================================================
+# 2. HARD AUDIT OF THE CONVERSION
+#
+# These checks make it impossible for the old DM-corrected
+# values to enter this analysis.
+# ==============================================================
+
+nutrient_conversion_audit.final <- DeQueen.nutrient_metric.final %>%
+  dplyr::transmute(
+
+    Sample.Name,
+
+    Moisture,
+
+    DM_frac,
+
+    Nitrogen_source =
+      as.numeric(Nitrogen),
+
+    Nitrogen_kg_mt =
+      Nitrogen.kg_mt,
+
+    Nitrogen_expected =
+      as.numeric(Nitrogen) * 0.5,
+
+    NH4_source =
+      as.numeric(Ammonium.N),
+
+    NH4_kg_mt =
+      Ammonium.N.kg_mt,
+
+    NH4_expected =
+      as.numeric(Ammonium.N) * 0.5,
+
+    P_source =
+      as.numeric(Phosphorus),
+
+    P_kg_mt =
+      Phosphorus.kg_mt,
+
+    P_expected =
+      as.numeric(Phosphorus) * 0.5,
+
+    K_source =
+      as.numeric(Potassium),
+
+    K_kg_mt =
+      Potassium.kg_mt,
+
+    K_expected =
+      as.numeric(Potassium) * 0.5
+  )
+
+
+stopifnot(
+
+  all(
+    dplyr::near(
+      nutrient_conversion_audit.final$Nitrogen_kg_mt,
+      nutrient_conversion_audit.final$Nitrogen_expected
+    )
+  ),
+
+  all(
+    dplyr::near(
+      nutrient_conversion_audit.final$NH4_kg_mt,
+      nutrient_conversion_audit.final$NH4_expected
+    )
+  ),
+
+  all(
+    dplyr::near(
+      nutrient_conversion_audit.final$P_kg_mt,
+      nutrient_conversion_audit.final$P_expected
+    )
+  ),
+
+  all(
+    dplyr::near(
+      nutrient_conversion_audit.final$K_kg_mt,
+      nutrient_conversion_audit.final$K_expected
+    )
+  )
+)
+
+
+cat(
+  "\n============================================================\n",
+  "CONVERSION AUDIT PASSED\n",
+  "Source dry-basis lb/US ton -> kg/metric ton x 0.5\n",
+  "NO DM_frac correction applied\n",
+  "============================================================\n",
+  sep = ""
+)
+
+
+print(
+  nutrient_conversion_audit.final %>%
+    dplyr::select(
+      Sample.Name,
+      Moisture,
+      DM_frac,
+      Nitrogen_source,
+      Nitrogen_kg_mt,
+      NH4_source,
+      NH4_kg_mt,
+      P_source,
+      P_kg_mt,
+      K_source,
+      K_kg_mt
+    ) %>%
+    utils::head(10)
+)
+
+
+# ==============================================================
+# 3. BUILD FRESH LONG-FORMAT DATA
+# ==============================================================
+
+Nutrient_long.metric.final <- DeQueen.nutrient_metric.final %>%
+  tidyr::pivot_longer(
+
+    cols = dplyr::all_of(
+      c(
+        "Ammonium.N.kg_mt",
+        "Nitrogen.kg_mt",
+        "Phosphorus.kg_mt",
+        "Potassium.kg_mt",
+        "Moisture",
+        "NH4_to_TotalN.final"
+      )
+    ),
+
+    names_to =
+      "Metric",
+
+    values_to =
+      "Level"
+  ) %>%
+
+  dplyr::mutate(
+
+    Growout =
+      factor(
+        as.character(Growout),
+        levels = c(
+          "Baseline",
+          "1",
+          "2"
+        )
+      ),
+
+    Treatment =
+      factor(
+        as.character(Treatment),
+        levels = c(
+          "Control",
+          "IndigoLT"
+        )
+      ),
+
+    Position =
+      factor(
+        as.character(Position)
+      ),
+
+    House =
+      factor(
+        as.character(House)
+      ),
+
+    Metric =
+      dplyr::recode(
+
+        Metric,
+
+        "Ammonium.N.kg_mt" =
+          "NH4+ (kg/mt)",
+
+        "Nitrogen.kg_mt" =
+          "Total N (kg/mt)",
+
+        "Phosphorus.kg_mt" =
+          "P (kg/mt)",
+
+        "Potassium.kg_mt" =
+          "K (kg/mt)",
+
+        "Moisture" =
+          "Moisture (% wb)",
+
+        "NH4_to_TotalN.final" =
+          "NH4+/Total N"
+      ),
+
+    Metric =
+      factor(
+        Metric,
+        levels = c(
+          "NH4+ (kg/mt)",
+          "Total N (kg/mt)",
+          "NH4+/Total N",
+          "P (kg/mt)",
+          "K (kg/mt)",
+          "Moisture (% wb)"
+        )
+      )
+  ) %>%
+
+  dplyr::filter(
+    !is.na(Level),
+    !is.na(Growout),
+    !is.na(Treatment)
+  )
+
+
+# ==============================================================
+# 4. SECOND AUDIT:
+# CONFIRM LONG-FORMAT VALUES ARE THE CORRECT ONES
+# ==============================================================
+
+nutrient_long_audit.final <- Nutrient_long.metric.final %>%
+  dplyr::filter(
+    as.character(Metric) %in% c(
+      "NH4+ (kg/mt)",
+      "Total N (kg/mt)",
+      "P (kg/mt)",
+      "K (kg/mt)"
+    )
+  ) %>%
+
+  dplyr::mutate(
+
+    Expected.final =
+      dplyr::case_when(
+
+        as.character(Metric) ==
+          "NH4+ (kg/mt)" ~
+          as.numeric(Ammonium.N) * 0.5,
+
+        as.character(Metric) ==
+          "Total N (kg/mt)" ~
+          as.numeric(Nitrogen) * 0.5,
+
+        as.character(Metric) ==
+          "P (kg/mt)" ~
+          as.numeric(Phosphorus) * 0.5,
+
+        as.character(Metric) ==
+          "K (kg/mt)" ~
+          as.numeric(Potassium) * 0.5,
+
+        TRUE ~
+          NA_real_
+      ),
+
+    Difference.final =
+      Level - Expected.final
+  )
+
+
+stopifnot(
+  max(
+    abs(
+      nutrient_long_audit.final$Difference.final
+    ),
+    na.rm = TRUE
+  ) < 1e-10
+)
+
+
+cat(
+  "\nLong-format audit passed.\n"
+)
+
+
+# ==============================================================
+# 5. BASELINE TESTS
+#
+# One composite sample per house.
+#
+# Uses the SAME two-sided Wilcoxon rank-sum settings as the
+# original workflow:
+#   exact = FALSE
+#   correct = FALSE
+# ==============================================================
+
+rbc_two_sample.metric.final <- function(x, y) {
+  diffs <- outer(y, x, FUN = "-")
+  mean(sign(diffs))
+}
+
+
+wilcox_baseline.metric.final <- Nutrient_long.metric.final %>%
+  dplyr::filter(
+    Growout == "Baseline"
+  ) %>%
+  dplyr::group_by(
+    Metric
+  ) %>%
+  dplyr::group_modify(~ {
+
+    df_baseline.final <- .x
+
+    trts.final <- unique(
+      df_baseline.final$Treatment
+    )
+
+
+    if (
+      length(trts.final) != 2
+    ) {
+
+      return(
+        tibble::tibble(
+          Analysis =
+            "Baseline",
+
+          Growout =
+            "Baseline",
+
+          Family =
+            NA_character_,
+
+          Transform =
+            "none",
+
+          N =
+            nrow(
+              df_baseline.final
+            ),
+
+          Result_type =
+            "Wilcoxon rank-sum",
+
+          Effect_or_contrast =
+            NA_character_,
+
+          Estimate =
+            NA_real_,
+
+          SE =
+            NA_real_,
+
+          df =
+            NA_real_,
+
+          Test_statistic =
+            NA_real_,
+
+          P_value =
+            NA_real_,
+
+          Variance =
+            NA_real_,
+
+          SD =
+            NA_real_,
+
+          ICC_adjusted =
+            NA_real_,
+
+          ICC_unadjusted =
+            NA_real_,
+
+          Percent_House_adjusted =
+            NA_real_,
+
+          Percent_House_unadjusted =
+            NA_real_
+        )
+      )
+    }
+
+
+    if (
+      all(
+        c(
+          "Control",
+          "IndigoLT"
+        ) %in%
+          as.character(
+            trts.final
+          )
+      )
+    ) {
+
+      g1.final <- "Control"
+      g2.final <- "IndigoLT"
+
+    } else {
+
+      ord.final <- sort(
+        as.character(
+          trts.final
+        )
+      )
+
+      g1.final <- ord.final[1]
+      g2.final <- ord.final[2]
+    }
+
+
+    x.final <- df_baseline.final$Level[
+      df_baseline.final$Treatment ==
+        g1.final
+    ]
+
+    y.final <- df_baseline.final$Level[
+      df_baseline.final$Treatment ==
+        g2.final
+    ]
+
+
+    wilcox_fit.final <- suppressWarnings(
+      stats::wilcox.test(
+        x.final,
+        y.final,
+        alternative =
+          "two.sided",
+        exact =
+          FALSE,
+        correct =
+          FALSE
+      )
+    )
+
+
+    rank_biserial.final <-
+      rbc_two_sample.metric.final(
+        x.final,
+        y.final
+      )
+
+
+    tibble::tibble(
+      Analysis =
+        "Baseline",
+
+      Growout =
+        "Baseline",
+
+      Family =
+        NA_character_,
+
+      Transform =
+        "none",
+
+      N =
+        length(x.final) +
+        length(y.final),
+
+      Result_type =
+        "Wilcoxon rank-sum",
+
+      Effect_or_contrast =
+        paste0(
+          g2.final,
+          " - ",
+          g1.final
+        ),
+
+      Estimate =
+        rank_biserial.final,
+
+      SE =
+        NA_real_,
+
+      df =
+        NA_real_,
+
+      Test_statistic =
+        as.numeric(
+          wilcox_fit.final$statistic
+        ),
+
+      P_value =
+        unname(
+          wilcox_fit.final$p.value
+        ),
+
+      Variance =
+        NA_real_,
+
+      SD =
+        NA_real_,
+
+      ICC_adjusted =
+        NA_real_,
+
+      ICC_unadjusted =
+        NA_real_,
+
+      Percent_House_adjusted =
+        NA_real_,
+
+      Percent_House_unadjusted =
+        NA_real_
+    )
+  }) %>%
+  dplyr::ungroup()
+
+
+cat(
+  "\n============================================================\n",
+  "BASELINE TESTS\n",
+  "============================================================\n",
+  sep = ""
+)
+
+
+print(
+  wilcox_baseline.metric.final %>%
+    dplyr::select(
+      Metric,
+      Result_type,
+      Test_statistic,
+      Estimate,
+      P_value
+    ),
+  n = Inf
+)
+
+
+# ==============================================================
+# 6. DISTRIBUTION-SELECTION HELPER
+# ==============================================================
+
+fit_dists_AIC.metric.final <- function(
+  y
+) {
+
+  y <- y[
+    is.finite(y)
+  ]
+
+
+  fits.final <- list()
+
+
+  fits.final$normal <- tryCatch(
+
+    MASS::fitdistr(
+      y,
+      "normal"
+    ),
+
+    error =
+      function(e) NULL
+  )
+
+
+  y_positive.final <- y[
+    y > 0
+  ]
+
+
+  fits.final$gamma <- if (
+    length(
+      y_positive.final
+    ) > 1
+  ) {
+
+    tryCatch(
+
+      MASS::fitdistr(
+        y_positive.final,
+        "gamma"
+      ),
+
+      error =
+        function(e) NULL
+    )
+
+  } else {
+
+    NULL
+  }
+
+
+  fits.final$lognorm <- if (
+    length(
+      y_positive.final
+    ) > 1
+  ) {
+
+    tryCatch(
+
+      MASS::fitdistr(
+        y_positive.final,
+        "lognormal"
+      ),
+
+      error =
+        function(e) NULL
+    )
+
+  } else {
+
+    NULL
+  }
+
+
+  aics.final <- c(
+
+    normal =
+      if (
+        !is.null(
+          fits.final$normal
+        )
+      ) {
+        AIC(
+          fits.final$normal
+        )
+      } else {
+        NA_real_
+      },
+
+    gamma =
+      if (
+        !is.null(
+          fits.final$gamma
+        )
+      ) {
+        AIC(
+          fits.final$gamma
+        )
+      } else {
+        NA_real_
+      },
+
+    lognorm =
+      if (
+        !is.null(
+          fits.final$lognorm
+        )
+      ) {
+        AIC(
+          fits.final$lognorm
+        )
+      } else {
+        NA_real_
+      }
+  )
+
+
+  valid_aics.final <- aics.final[
+    is.finite(
+      aics.final
+    )
+  ]
+
+
+  if (
+    length(
+      valid_aics.final
+    ) == 0
+  ) {
+
+    stop(
+      "No candidate distribution could be fitted."
+    )
+  }
+
+
+  best.final <- names(
+    which.min(
+      valid_aics.final
+    )
+  )[1]
+
+
+  list(
+
+    AICs =
+      aics.final,
+
+    Best =
+      best.final
+  )
+}
+
+
+# ==============================================================
+# 7. FAMILY HELPER
+# ==============================================================
+
+get_family.metric.final <- function(
+  family_name
+) {
+
+  if (
+    family_name == "normal"
+  ) {
+
+    return(
+      gaussian(
+        link = "identity"
+      )
+    )
+  }
+
+
+  if (
+    family_name == "gamma"
+  ) {
+
+    return(
+      Gamma(
+        link = "log"
+      )
+    )
+  }
+
+
+  if (
+    family_name == "lognorm"
+  ) {
+
+    return(
+      gaussian(
+        link = "identity"
+      )
+    )
+  }
+
+
+  stop(
+    "Unsupported family: ",
+    family_name
+  )
+}
+
+
+# ==============================================================
+# 8. MODEL-FITTING HELPER
+#
+# House is ALWAYS retained.
+# ==============================================================
+
+fit_model.metric.final <- function(
+  data,
+  family_name,
+  scope = c(
+    "global",
+    "growout"
+  )
+) {
+
+  scope <- match.arg(
+    scope
+  )
+
+
+  data.final <- data %>%
+    dplyr::mutate(
+
+      Treatment =
+        factor(
+          as.character(Treatment),
+          levels = c(
+            "Control",
+            "IndigoLT"
+          )
+        ),
+
+      Growout =
+        factor(
+          as.character(Growout)
+        ),
+
+      Position =
+        factor(
+          as.character(Position)
+        ),
+
+      House =
+        factor(
+          as.character(House)
+        )
+    ) %>%
+    droplevels()
+
+
+  response.final <-
+    "Level"
+
+
+  if (
+    family_name ==
+      "lognorm"
+  ) {
+
+    if (
+      any(
+        data.final$Level <= 0,
+        na.rm = TRUE
+      )
+    ) {
+
+      stop(
+        "Non-positive value encountered in log-normal model."
+      )
+    }
+
+
+    data.final$Level_log.final <-
+      log(
+        data.final$Level
+      )
+
+
+    response.final <-
+      "Level_log.final"
+  }
+
+
+  if (
+    scope ==
+      "global"
+  ) {
+
+    formula.final <- stats::as.formula(
+      paste0(
+        response.final,
+        " ~ Treatment * Growout + Position + (1 | House)"
+      )
+    )
+
+  } else {
+
+    formula.final <- stats::as.formula(
+      paste0(
+        response.final,
+        " ~ Treatment + Position + (1 | House)"
+      )
+    )
+  }
+
+
+  glmmTMB::glmmTMB(
+
+    formula.final,
+
+    family =
+      get_family.metric.final(
+        family_name
+      ),
+
+    data =
+      data.final
+  )
+}
+
+
+# ==============================================================
+# 9. HOUSE VARIANCE + ICC HELPER
+# ==============================================================
+
+get_house_stats.metric.final <- function(
+  model,
+  family_name
+) {
+
+  variance_components.final <-
+    glmmTMB::VarCorr(
+      model
+    )$cond
+
+
+  house_variance.final <-
+    as.numeric(
+      variance_components.final$House[
+        1,
+        1
+      ]
+    )
+
+
+  house_sd.final <-
+    sqrt(
+      house_variance.final
+    )
+
+
+  if (
+    family_name ==
+      "gamma"
+  ) {
+
+    icc.final <- suppressWarnings(
+      tryCatch(
+
+        performance::icc(
+          model,
+          tolerance = 0,
+          approximation = "lognormal"
+        ),
+
+        error =
+          function(e) NULL
+      )
+    )
+
+  } else {
+
+    icc.final <- suppressWarnings(
+      tryCatch(
+
+        performance::icc(
+          model,
+          tolerance = 0
+        ),
+
+        error =
+          function(e) NULL
+      )
+    )
+  }
+
+
+  if (
+    is.null(
+      icc.final
+    )
+  ) {
+
+    icc_adjusted.final <-
+      NA_real_
+
+    icc_unadjusted.final <-
+      NA_real_
+
+  } else {
+
+    icc_adjusted.final <-
+      as.numeric(
+        icc.final$ICC_adjusted
+      )[1]
+
+    icc_unadjusted.final <-
+      as.numeric(
+        icc.final$ICC_unadjusted
+      )[1]
+  }
+
+
+  data.frame(
+
+    Variance =
+      house_variance.final,
+
+    SD =
+      house_sd.final,
+
+    ICC_adjusted =
+      icc_adjusted.final,
+
+    ICC_unadjusted =
+      icc_unadjusted.final,
+
+    Percent_House_adjusted =
+      icc_adjusted.final * 100,
+
+    Percent_House_unadjusted =
+      icc_unadjusted.final * 100
+  )
+}
+
+
+# ==============================================================
+# 10. EMMEANS STATISTIC HELPER
+# ==============================================================
+
+get_emmeans_stat.metric.final <- function(
+  data
+) {
+
+  if (
+    "z.ratio" %in%
+      names(data)
+  ) {
+
+    return(
+      as.numeric(
+        data$z.ratio
+      )
+    )
+  }
+
+
+  if (
+    "t.ratio" %in%
+      names(data)
+  ) {
+
+    return(
+      as.numeric(
+        data$t.ratio
+      )
+    )
+  }
+
+
+  rep(
+    NA_real_,
+    nrow(data)
+  )
+}
+
+
+# ==============================================================
+# 11. DATA USED FOR GLMMs
+#
+# Growouts 1 and 2 only.
+# ==============================================================
+
+Nutrient_model_data.metric.final <- Nutrient_long.metric.final %>%
+  dplyr::filter(
+
+    as.character(Growout) %in%
+      c(
+        "1",
+        "2"
+      ),
+
+    !is.na(Position),
+
+    !is.na(House)
+  ) %>%
+  droplevels()
+
+
+# ==============================================================
+# 12. SUM-TO-ZERO CONTRASTS FOR TYPE III TESTS
+# ==============================================================
+
+old_contrasts.metric.final <- options(
+  contrasts = c(
+    "contr.sum",
+    "contr.poly"
+  )
+)
+
+
+# ==============================================================
+# 13. GLOBAL DISTRIBUTION SELECTION
+# ==============================================================
+
+metrics.metric.final <- levels(
+  droplevels(
+    Nutrient_model_data.metric.final$Metric
+  )
+)
+
+
+distribution_rows.metric.final <- list()
+
+
+for (
+  metric_name.final in
+  metrics.metric.final
+) {
+
+  metric_data.final <- Nutrient_model_data.metric.final %>%
+    dplyr::filter(
+      as.character(Metric) ==
+        metric_name.final
+    )
+
+
+  dist_result.final <-
+    fit_dists_AIC.metric.final(
+      metric_data.final$Level
+    )
+
+
+  distribution_rows.metric.final[
+    metric_name.final
+  ] <- list(
+
+    data.frame(
+
+      Analysis =
+        "Global",
+
+      Metric =
+        metric_name.final,
+
+      Growout =
+        "All",
+
+      Normal_AIC =
+        as.numeric(
+          dist_result.final$AICs["normal"]
+        ),
+
+      Gamma_AIC =
+        as.numeric(
+          dist_result.final$AICs["gamma"]
+        ),
+
+      Lognormal_AIC =
+        as.numeric(
+          dist_result.final$AICs["lognorm"]
+        ),
+
+      Selected_family =
+        dist_result.final$Best,
+
+      stringsAsFactors =
+        FALSE
+    )
+  )
+}
+
+
+nutrient_distribution_summary.metric.final <-
+  dplyr::bind_rows(
+    distribution_rows.metric.final
+  )
+
+
+cat(
+  "\n============================================================\n",
+  "GLOBAL DISTRIBUTION SELECTION\n",
+  "============================================================\n",
+  sep = ""
+)
+
+
+print(
+  nutrient_distribution_summary.metric.final,
+  n = Inf
+)
+
+
+# ==============================================================
+# 14. FIT ALL GLOBAL + GROWOUT-SPECIFIC MODELS
+# ==============================================================
+
+nutrient_models.metric.final <- list()
+
+growout_distribution_rows.metric.final <- list()
+
+
+for (
+  metric_name.final in
+  metrics.metric.final
+) {
+
+  cat(
+    "\n============================================================\n",
+    metric_name.final,
+    "\n============================================================\n",
+    sep = ""
+  )
+
+
+  # ------------------------------------------------------------
+  # Global data
+  # ------------------------------------------------------------
+
+  metric_data.final <- Nutrient_model_data.metric.final %>%
+    dplyr::filter(
+      as.character(Metric) ==
+        metric_name.final
+    ) %>%
+    droplevels()
+
+
+  # ------------------------------------------------------------
+  # Global distribution
+  # ------------------------------------------------------------
+
+  global_dist.final <-
+    fit_dists_AIC.metric.final(
+      metric_data.final$Level
+    )
+
+
+  global_family.final <-
+    global_dist.final$Best
+
+
+  # ------------------------------------------------------------
+  # Global model
+  # ------------------------------------------------------------
+
+  global_model.final <-
+    fit_model.metric.final(
+
+      data =
+        metric_data.final,
+
+      family_name =
+        global_family.final,
+
+      scope =
+        "global"
+    )
+
+
+  # ------------------------------------------------------------
+  # Global Type III
+  # ------------------------------------------------------------
+
+  global_anova.final <-
+    car::Anova(
+      global_model.final,
+      type = 3
+    )
+
+
+  # ------------------------------------------------------------
+  # Global-model emmeans:
+  # Treatment within each Growout
+  # ------------------------------------------------------------
+
+  global_emmeans.final <-
+    emmeans::emmeans(
+      global_model.final,
+      ~ Treatment | Growout
+    )
+
+
+  global_pairs.final <-
+    emmeans::contrast(
+      global_emmeans.final,
+      method = "pairwise",
+      adjust = "BH"
+    )
+
+
+  global_pairs_df.final <-
+    as.data.frame(
+      summary(
+        global_pairs.final,
+        infer = c(
+          TRUE,
+          TRUE
+        )
+      )
+    )
+
+
+  # ------------------------------------------------------------
+  # Global House variance / ICC
+  # ------------------------------------------------------------
+
+  global_house.final <-
+    get_house_stats.metric.final(
+      global_model.final,
+      global_family.final
+    )
+
+
+  # ------------------------------------------------------------
+  # Global DHARMa
+  # ------------------------------------------------------------
+
+  global_dharma.final <-
+    DHARMa::simulateResiduals(
+      fittedModel =
+        global_model.final,
+      n =
+        1000
+    )
+
+
+  global_dispersion.final <-
+    DHARMa::testDispersion(
+      global_dharma.final
+    )
+
+
+  global_outliers.final <-
+    DHARMa::testOutliers(
+      global_dharma.final
+    )
+
+
+  global_quantiles.final <-
+    DHARMa::testQuantiles(
+      global_dharma.final
+    )
+
+
+  # ------------------------------------------------------------
+  # Growout-specific models
+  # ------------------------------------------------------------
+
+  pergo_models.final <- list()
+
+
+  for (
+    growout_name.final in
+    c(
+      "1",
+      "2"
+    )
+  ) {
+
+    growout_data.final <- metric_data.final %>%
+      dplyr::filter(
+        as.character(Growout) ==
+          growout_name.final
+      ) %>%
+      droplevels()
+
+
+    growout_dist.final <-
+      fit_dists_AIC.metric.final(
+        growout_data.final$Level
+      )
+
+
+    growout_family.final <-
+      growout_dist.final$Best
+
+
+    growout_model.final <-
+      fit_model.metric.final(
+
+        data =
+          growout_data.final,
+
+        family_name =
+          growout_family.final,
+
+        scope =
+          "growout"
+      )
+
+
+    growout_anova.final <-
+      car::Anova(
+        growout_model.final,
+        type = 3
+      )
+
+
+    growout_house.final <-
+      get_house_stats.metric.final(
+        growout_model.final,
+        growout_family.final
+      )
+
+
+    pergo_models.final[
+      growout_name.final
+    ] <- list(
+
+      list(
+
+        Growout =
+          growout_name.final,
+
+        Family =
+          growout_family.final,
+
+        Transform =
+          if (
+            growout_family.final ==
+              "lognorm"
+          ) {
+            "log"
+          } else {
+            "none"
+          },
+
+        N =
+          stats::nobs(
+            growout_model.final
+          ),
+
+        Model =
+          growout_model.final,
+
+        Anova =
+          growout_anova.final,
+
+        House =
+          growout_house.final
+      )
+    )
+
+
+    growout_distribution_rows.metric.final[
+      paste(
+        metric_name.final,
+        growout_name.final,
+        sep = "_"
+      )
+    ] <- list(
+
+      data.frame(
+
+        Analysis =
+          "Growout-specific",
+
+        Metric =
+          metric_name.final,
+
+        Growout =
+          growout_name.final,
+
+        Normal_AIC =
+          as.numeric(
+            growout_dist.final$AICs["normal"]
+          ),
+
+        Gamma_AIC =
+          as.numeric(
+            growout_dist.final$AICs["gamma"]
+          ),
+
+        Lognormal_AIC =
+          as.numeric(
+            growout_dist.final$AICs["lognorm"]
+          ),
+
+        Selected_family =
+          growout_family.final,
+
+        stringsAsFactors =
+          FALSE
+      )
+    )
+  }
+
+
+  # ------------------------------------------------------------
+  # Save complete metric result
+  # ------------------------------------------------------------
+
+  nutrient_models.metric.final[
+    metric_name.final
+  ] <- list(
+
+    list(
+
+      Metric =
+        metric_name.final,
+
+      Family =
+        global_family.final,
+
+      Transform =
+        if (
+          global_family.final ==
+            "lognorm"
+        ) {
+          "log"
+        } else {
+          "none"
+        },
+
+      N =
+        stats::nobs(
+          global_model.final
+        ),
+
+      Model =
+        global_model.final,
+
+      Anova =
+        global_anova.final,
+
+      Emmeans =
+        global_emmeans.final,
+
+      Pairs =
+        global_pairs.final,
+
+      Pairs_df =
+        global_pairs_df.final,
+
+      House =
+        global_house.final,
+
+      DHARMa_sim =
+        global_dharma.final,
+
+      DHARMa_dispersion =
+        global_dispersion.final,
+
+      DHARMa_outliers =
+        global_outliers.final,
+
+      DHARMa_quantiles =
+        global_quantiles.final,
+
+      Growout_models =
+        pergo_models.final
+    )
+  )
+}
+
+
+# ==============================================================
+# 15. COMPLETE DISTRIBUTION TABLE
+# ==============================================================
+
+nutrient_distribution_summary.metric.final <-
+  dplyr::bind_rows(
+
+    nutrient_distribution_summary.metric.final,
+
+    dplyr::bind_rows(
+      growout_distribution_rows.metric.final
+    )
+  )
+
+
+cat(
+  "\n============================================================\n",
+  "ALL SELECTED DISTRIBUTIONS\n",
+  "============================================================\n",
+  sep = ""
+)
+
+
+print(
+  nutrient_distribution_summary.metric.final,
+  n = Inf
+)
+
+
+# ==============================================================
+# 16. BUILD ONE FLAT RESULTS TABLE
+# ==============================================================
+
+nutrient_result_rows.metric.final <- list()
+
+
+for (
+  metric_name.final in
+  names(
+    nutrient_models.metric.final
+  )
+) {
+
+  result.final <-
+    getElement(
+      nutrient_models.metric.final,
+      metric_name.final
+    )
+
+
+  # ------------------------------------------------------------
+  # A. Global Type III
+  # ------------------------------------------------------------
+
+  anova_global_df.final <-
+    as.data.frame(
+      result.final$Anova
+    )
+
+
+  anova_global_df.final$Effect <-
+    rownames(
+      anova_global_df.final
+    )
+
+
+  rownames(
+    anova_global_df.final
+  ) <- NULL
+
+
+  anova_global_df.final <-
+    anova_global_df.final[
+      anova_global_df.final$Effect !=
+        "(Intercept)",
+      ,
+      drop = FALSE
+    ]
+
+
+  global_fixed_rows.final <-
+    data.frame(
+
+      Analysis =
+        "Global",
+
+      Metric =
+        metric_name.final,
+
+      Growout =
+        "All",
+
+      Family =
+        result.final$Family,
+
+      Transform =
+        result.final$Transform,
+
+      N =
+        result.final$N,
+
+      Result_type =
+        "Fixed effect - Type III Wald",
+
+      Effect_or_contrast =
+        as.character(
+          anova_global_df.final$Effect
+        ),
+
+      Estimate =
+        NA_real_,
+
+      SE =
+        NA_real_,
+
+      df =
+        as.numeric(
+          anova_global_df.final[
+            ,
+            "Df"
+          ]
+        ),
+
+      Test_statistic =
+        as.numeric(
+          anova_global_df.final[
+            ,
+            "Chisq"
+          ]
+        ),
+
+      P_value =
+        as.numeric(
+          anova_global_df.final[
+            ,
+            "Pr(>Chisq)"
+          ]
+        ),
+
+      Variance =
+        NA_real_,
+
+      SD =
+        NA_real_,
+
+      ICC_adjusted =
+        NA_real_,
+
+      ICC_unadjusted =
+        NA_real_,
+
+      Percent_House_adjusted =
+        NA_real_,
+
+      Percent_House_unadjusted =
+        NA_real_,
+
+      stringsAsFactors =
+        FALSE
+    )
+
+
+  # ------------------------------------------------------------
+  # B. Global House effect
+  # ------------------------------------------------------------
+
+  global_house_row.final <-
+    data.frame(
+
+      Analysis =
+        "Global",
+
+      Metric =
+        metric_name.final,
+
+      Growout =
+        "All",
+
+      Family =
+        result.final$Family,
+
+      Transform =
+        result.final$Transform,
+
+      N =
+        result.final$N,
+
+      Result_type =
+        "Random effect",
+
+      Effect_or_contrast =
+        "House",
+
+      Estimate =
+        NA_real_,
+
+      SE =
+        NA_real_,
+
+      df =
+        NA_real_,
+
+      Test_statistic =
+        NA_real_,
+
+      P_value =
+        NA_real_,
+
+      Variance =
+        result.final$House$Variance,
+
+      SD =
+        result.final$House$SD,
+
+      ICC_adjusted =
+        result.final$House$ICC_adjusted,
+
+      ICC_unadjusted =
+        result.final$House$ICC_unadjusted,
+
+      Percent_House_adjusted =
+        result.final$House$Percent_House_adjusted,
+
+      Percent_House_unadjusted =
+        result.final$House$Percent_House_unadjusted,
+
+      stringsAsFactors =
+        FALSE
+    )
+
+
+  # ------------------------------------------------------------
+  # C. Global DHARMa
+  # ------------------------------------------------------------
+
+  global_dharma_rows.final <-
+    data.frame(
+
+      Analysis =
+        rep(
+          "Global",
+          3
+        ),
+
+      Metric =
+        rep(
+          metric_name.final,
+          3
+        ),
+
+      Growout =
+        rep(
+          "All",
+          3
+        ),
+
+      Family =
+        rep(
+          result.final$Family,
+          3
+        ),
+
+      Transform =
+        rep(
+          result.final$Transform,
+          3
+        ),
+
+      N =
+        rep(
+          result.final$N,
+          3
+        ),
+
+      Result_type =
+        rep(
+          "DHARMa diagnostic",
+          3
+        ),
+
+      Effect_or_contrast =
+        c(
+          "Dispersion",
+          "Outliers",
+          "Quantiles"
+        ),
+
+      Estimate =
+        NA_real_,
+
+      SE =
+        NA_real_,
+
+      df =
+        NA_real_,
+
+      Test_statistic =
+        NA_real_,
+
+      P_value =
+        c(
+          result.final$DHARMa_dispersion$p.value,
+          result.final$DHARMa_outliers$p.value,
+          result.final$DHARMa_quantiles$p.value
+        ),
+
+      Variance =
+        NA_real_,
+
+      SD =
+        NA_real_,
+
+      ICC_adjusted =
+        NA_real_,
+
+      ICC_unadjusted =
+        NA_real_,
+
+      Percent_House_adjusted =
+        NA_real_,
+
+      Percent_House_unadjusted =
+        NA_real_,
+
+      stringsAsFactors =
+        FALSE
+    )
+
+
+  # ------------------------------------------------------------
+  # D. Global-model Treatment contrasts within Growout
+  # ------------------------------------------------------------
+
+  pair_df.final <-
+    result.final$Pairs_df
+
+
+  pair_stat.final <-
+    get_emmeans_stat.metric.final(
+      pair_df.final
+    )
+
+
+  pair_df_value.final <- if (
+    "df" %in%
+      names(
+        pair_df.final
+      )
+  ) {
+
+    as.numeric(
+      pair_df.final$df
+    )
+
+  } else {
+
+    rep(
+      NA_real_,
+      nrow(
+        pair_df.final
+      )
+    )
+  }
+
+
+  pair_estimate.final <-
+    as.numeric(
+      pair_df.final$estimate
+    )
+
+
+  if (
+    result.final$Family %in%
+      c(
+        "gamma",
+        "lognorm"
+      )
+  ) {
+
+    pair_estimate.final <-
+      exp(
+        pair_estimate.final
+      )
+  }
+
+
+  treatment_pair_rows.final <-
+    data.frame(
+
+      Analysis =
+        "Within-growout",
+
+      Metric =
+        metric_name.final,
+
+      Growout =
+        as.character(
+          pair_df.final$Growout
+        ),
+
+      Family =
+        result.final$Family,
+
+      Transform =
+        result.final$Transform,
+
+      N =
+        result.final$N,
+
+      Result_type =
+        "Treatment contrast - emmeans",
+
+      Effect_or_contrast =
+        as.character(
+          pair_df.final$contrast
+        ),
+
+      Estimate =
+        pair_estimate.final,
+
+      SE =
+        as.numeric(
+          pair_df.final$SE
+        ),
+
+      df =
+        pair_df_value.final,
+
+      Test_statistic =
+        pair_stat.final,
+
+      P_value =
+        as.numeric(
+          pair_df.final$p.value
+        ),
+
+      Variance =
+        NA_real_,
+
+      SD =
+        NA_real_,
+
+      ICC_adjusted =
+        NA_real_,
+
+      ICC_unadjusted =
+        NA_real_,
+
+      Percent_House_adjusted =
+        NA_real_,
+
+      Percent_House_unadjusted =
+        NA_real_,
+
+      stringsAsFactors =
+        FALSE
+    )
+
+
+  # ------------------------------------------------------------
+  # E. Growout-specific models
+  # ------------------------------------------------------------
+
+  growout_rows.final <- list()
+
+
+  for (
+    growout_name.final in
+    names(
+      result.final$Growout_models
+    )
+  ) {
+
+    growout_result.final <-
+      getElement(
+        result.final$Growout_models,
+        growout_name.final
+      )
+
+
+    anova_growout_df.final <-
+      as.data.frame(
+        growout_result.final$Anova
+      )
+
+
+    anova_growout_df.final$Effect <-
+      rownames(
+        anova_growout_df.final
+      )
+
+
+    rownames(
+      anova_growout_df.final
+    ) <- NULL
+
+
+    anova_growout_df.final <-
+      anova_growout_df.final[
+        anova_growout_df.final$Effect !=
+          "(Intercept)",
+        ,
+        drop = FALSE
+      ]
+
+
+    growout_fixed.final <-
+      data.frame(
+
+        Analysis =
+          "Growout-specific",
+
+        Metric =
+          metric_name.final,
+
+        Growout =
+          growout_name.final,
+
+        Family =
+          growout_result.final$Family,
+
+        Transform =
+          growout_result.final$Transform,
+
+        N =
+          growout_result.final$N,
+
+        Result_type =
+          "Fixed effect - Type III Wald",
+
+        Effect_or_contrast =
+          as.character(
+            anova_growout_df.final$Effect
+          ),
+
+        Estimate =
+          NA_real_,
+
+        SE =
+          NA_real_,
+
+        df =
+          as.numeric(
+            anova_growout_df.final[
+              ,
+              "Df"
+            ]
+          ),
+
+        Test_statistic =
+          as.numeric(
+            anova_growout_df.final[
+              ,
+              "Chisq"
+            ]
+          ),
+
+        P_value =
+          as.numeric(
+            anova_growout_df.final[
+              ,
+              "Pr(>Chisq)"
+            ]
+          ),
+
+        Variance =
+          NA_real_,
+
+        SD =
+          NA_real_,
+
+        ICC_adjusted =
+          NA_real_,
+
+        ICC_unadjusted =
+          NA_real_,
+
+        Percent_House_adjusted =
+          NA_real_,
+
+        Percent_House_unadjusted =
+          NA_real_,
+
+        stringsAsFactors =
+          FALSE
+      )
+
+
+    growout_house.final <-
+      data.frame(
+
+        Analysis =
+          "Growout-specific",
+
+        Metric =
+          metric_name.final,
+
+        Growout =
+          growout_name.final,
+
+        Family =
+          growout_result.final$Family,
+
+        Transform =
+          growout_result.final$Transform,
+
+        N =
+          growout_result.final$N,
+
+        Result_type =
+          "Random effect",
+
+        Effect_or_contrast =
+          "House",
+
+        Estimate =
+          NA_real_,
+
+        SE =
+          NA_real_,
+
+        df =
+          NA_real_,
+
+        Test_statistic =
+          NA_real_,
+
+        P_value =
+          NA_real_,
+
+        Variance =
+          growout_result.final$House$Variance,
+
+        SD =
+          growout_result.final$House$SD,
+
+        ICC_adjusted =
+          growout_result.final$House$ICC_adjusted,
+
+        ICC_unadjusted =
+          growout_result.final$House$ICC_unadjusted,
+
+        Percent_House_adjusted =
+          growout_result.final$House$Percent_House_adjusted,
+
+        Percent_House_unadjusted =
+          growout_result.final$House$Percent_House_unadjusted,
+
+        stringsAsFactors =
+          FALSE
+      )
+
+
+    growout_rows.final[
+      growout_name.final
+    ] <- list(
+
+      dplyr::bind_rows(
+        growout_fixed.final,
+        growout_house.final
+      )
+    )
+  }
+
+
+  # ------------------------------------------------------------
+  # F. Combine this metric
+  # ------------------------------------------------------------
+
+  nutrient_result_rows.metric.final[
+    metric_name.final
+  ] <- list(
+
+    dplyr::bind_rows(
+
+      global_fixed_rows.final,
+
+      global_house_row.final,
+
+      global_dharma_rows.final,
+
+      dplyr::bind_rows(
+        growout_rows.final
+      ),
+
+      treatment_pair_rows.final
+    )
+  )
+}
+
+
+# ==============================================================
+# 17. COMBINE BASELINE + ALL GLMM RESULTS
+# ==============================================================
+
+nutrient_glmm_results.metric.final <-
+  dplyr::bind_rows(
+
+    wilcox_baseline.metric.final,
+
+    dplyr::bind_rows(
+      nutrient_result_rows.metric.final
+    )
+  )
+
+
+# ==============================================================
+# 18. ORDER RESULTS
+# ==============================================================
+
+nutrient_glmm_results.metric.final <-
+  nutrient_glmm_results.metric.final %>%
+
+  dplyr::mutate(
+
+    Metric_order.final =
+      match(
+        Metric,
+        levels(
+          Nutrient_long.metric.final$Metric
+        )
+      ),
+
+    Analysis_order.final =
+      dplyr::case_when(
+
+        Analysis ==
+          "Baseline" ~ 1,
+
+        Analysis ==
+          "Global" ~ 2,
+
+        Analysis ==
+          "Growout-specific" ~ 3,
+
+        Analysis ==
+          "Within-growout" ~ 4,
+
+        TRUE ~ 99
+      ),
+
+    Growout_order.final =
+      dplyr::case_when(
+
+        Growout ==
+          "Baseline" ~ 0,
+
+        Growout ==
+          "All" ~ 1,
+
+        Growout ==
+          "1" ~ 2,
+
+        Growout ==
+          "2" ~ 3,
+
+        TRUE ~ 99
+      )
+  ) %>%
+
+  dplyr::arrange(
+    Metric_order.final,
+    Analysis_order.final,
+    Growout_order.final
+  ) %>%
+
+  dplyr::select(
+    -Metric_order.final,
+    -Analysis_order.final,
+    -Growout_order.final
+  )
+
+
+# ==============================================================
+# 19. PRINT GLOBAL RESULTS
+# ==============================================================
+
+cat(
+  "\n============================================================\n",
+  "GLOBAL FIXED EFFECTS\n",
+  "============================================================\n",
+  sep = ""
+)
+
+
+print(
+
+  nutrient_glmm_results.metric.final %>%
+
+    dplyr::filter(
+      Analysis == "Global",
+      Result_type ==
+        "Fixed effect - Type III Wald"
+    ) %>%
+
+    dplyr::select(
+      Metric,
+      Family,
+      Effect_or_contrast,
+      Test_statistic,
+      df,
+      P_value
+    ),
+
+  n = Inf
+)
+
+
+# ==============================================================
+# 20. PRINT GROWOUT-SPECIFIC FIXED EFFECTS
+# ==============================================================
+
+cat(
+  "\n============================================================\n",
+  "GROWOUT-SPECIFIC TREATMENT + POSITION EFFECTS\n",
+  "============================================================\n",
+  sep = ""
+)
+
+
+print(
+
+  nutrient_glmm_results.metric.final %>%
+
+    dplyr::filter(
+      Analysis ==
+        "Growout-specific",
+      Result_type ==
+        "Fixed effect - Type III Wald"
+    ) %>%
+
+    dplyr::select(
+      Metric,
+      Growout,
+      Family,
+      Effect_or_contrast,
+      Test_statistic,
+      df,
+      P_value
+    ),
+
+  n = Inf
+)
+
+
+# ==============================================================
+# 21. PRINT WITHIN-GROWOUT TREATMENT CONTRASTS
+#
+# These are the p-values to use for G1/G2 in the figure.
+# ==============================================================
+
+cat(
+  "\n============================================================\n",
+  "GLOBAL-MODEL TREATMENT CONTRASTS WITHIN GROWOUT\n",
+  "============================================================\n",
+  sep = ""
+)
+
+
+print(
+
+  nutrient_glmm_results.metric.final %>%
+
+    dplyr::filter(
+      Analysis ==
+        "Within-growout",
+      Result_type ==
+        "Treatment contrast - emmeans"
+    ) %>%
+
+    dplyr::select(
+      Metric,
+      Growout,
+      Family,
+      Effect_or_contrast,
+      Estimate,
+      Test_statistic,
+      P_value
+    ),
+
+  n = Inf
+)
+
+
+# ==============================================================
+# 22. PRINT HOUSE ICCs
+# ==============================================================
+
+nutrient_house_icc.metric.final <-
+  nutrient_glmm_results.metric.final %>%
+
+  dplyr::filter(
+    Result_type ==
+      "Random effect"
+  ) %>%
+
+  dplyr::select(
+    Analysis,
+    Metric,
+    Growout,
+    Family,
+    N,
+    Variance,
+    SD,
+    ICC_adjusted,
+    ICC_unadjusted,
+    Percent_House_adjusted,
+    Percent_House_unadjusted
+  )
+
+
+cat(
+  "\n============================================================\n",
+  "HOUSE VARIANCE + ICC\n",
+  "============================================================\n",
+  sep = ""
+)
+
+
+print(
+  nutrient_house_icc.metric.final,
+  n = Inf
+)
+
+
+# ==============================================================
+# 23. PRINT GLOBAL DHARMa
+# ==============================================================
+
+cat(
+  "\n============================================================\n",
+  "GLOBAL DHARMa DIAGNOSTICS\n",
+  "============================================================\n",
+  sep = ""
+)
+
+
+print(
+
+  nutrient_glmm_results.metric.final %>%
+
+    dplyr::filter(
+      Analysis ==
+        "Global",
+      Result_type ==
+        "DHARMa diagnostic"
+    ) %>%
+
+    dplyr::select(
+      Metric,
+      Family,
+      Effect_or_contrast,
+      P_value
+    ),
+
+  n = Inf
+)
+
+
+# ==============================================================
+# 24. SAVE FINAL EXCEL WORKBOOK
+# ==============================================================
+
+nutrient_excel_file.metric.final <-
+  "Nutrient GLMM FINAL Corrected Metric House Retained.xlsx"
+
+
+writexl::write_xlsx(
+
+  list(
+
+    "Nutrient GLMM Results" =
+      nutrient_glmm_results.metric.final,
+
+    "Distribution Selection" =
+      nutrient_distribution_summary.metric.final,
+
+    "Conversion Audit" =
+      nutrient_conversion_audit.final
+  ),
+
+  path =
+    nutrient_excel_file.metric.final
+)
+
+
+# ==============================================================
+# 25. RESTORE ORIGINAL CONTRAST SETTINGS
+# ==============================================================
+
+options(
+  old_contrasts.metric.final
+)
+
+
+# ==============================================================
+# 26. FINAL CONFIRMATION
+# ==============================================================
+
+cat(
+  "\n============================================================\n",
+  "FINAL CORRECTED NUTRIENT ANALYSIS COMPLETE\n",
+  "============================================================\n",
+  sep = ""
+)
+
+
+cat(
+  "\nInput object:\n",
+  "DeQueen.nutrient_metric\n",
+  "\nConversion:\n",
+  "source dry-basis lb/US ton x 0.5 -> kg/metric ton\n",
+  "\nHouse retained in every GLMM.\n",
+  "\nWorkbook:\n",
+  nutrient_excel_file.metric.final,
+  "\n",
+  sep = ""
+)
+
+```
+
+```{r}
+##Visualization (METRIC) — MATCH TEMPLATE AESTHETICS EXACTLY
+## Uses:
+##   - Nutrient_long.metric.final
+##   - nutrient_glmm_results.metric.final
+##   - predefined pal_fill, pal_color, dodge_width
+##
+## Corrected nutrient values:
+##   source dry-basis lb/US ton × 0.5 = kg/metric ton
+##
+## Statistics:
+##   - Baseline = Mann-Whitney / Wilcoxon
+##   - Growout 1 and 2 = global House-retained GLMM
+##     Treatment contrasts within Growout
+##
+## Reuses existing .house_icc plotting object names
+
+
+## =====================================================================
+## 1) Format p-values
+##
+## p >= 0.001:
+##   0.032
+##
+## p < 0.001:
+##   3.86e-4
+## =====================================================================
+
+format_p_metric.house_icc <- function(p) {
+
+  if (is.na(p)) {
+    return(NA_character_)
+  }
+
+  if (p < 0.001) {
+
+    x <- formatC(
+      p,
+      format = "e",
+      digits = 2
+    )
+
+    # Remove unnecessary trailing zeros
+    x <- sub(
+      "0+e",
+      "e",
+      x
+    )
+
+    x <- sub(
+      "\\.e",
+      "e",
+      x
+    )
+
+    # Simplify exponent:
+    # e-04 -> e-4
+    # e+03 -> e3
+    x <- sub(
+      "e-0+",
+      "e-",
+      x
+    )
+
+    x <- sub(
+      "e\\+0*",
+      "e",
+      x
+    )
+
+    return(
+      paste0(
+        "italic(p) == '",
+        x,
+        "'"
+      )
+    )
+  }
+
+  sprintf(
+    "italic(p) == %.3f",
+    p
+  )
+}
+
+
+## =====================================================================
+## 2) Build p-value labels for plotting from corrected final stats object
+## =====================================================================
+
+p_values_plot_df.metric.house_icc <- nutrient_glmm_results.metric.final %>%
+  dplyr::filter(
+    Analysis == "Baseline" |
+      (
+        Analysis == "Within-growout" &
+          Result_type == "Treatment contrast - emmeans"
+      )
+  ) %>%
+  dplyr::group_by(Metric, Growout) %>%
+  dplyr::slice(1) %>%  # ensure single row per Metric × Growout
+  dplyr::ungroup() %>%
+  dplyr::mutate(
+    Metric  = factor(
+      Metric,
+      levels = levels(Nutrient_long.metric.final$Metric)
+    ),
+    Growout = factor(
+      Growout,
+      levels = levels(Nutrient_long.metric.final$Growout)
+    ),
+    P_Value = P_value,
+    P_Label = vapply(
+      P_Value,
+      format_p_metric.house_icc,
+      character(1)
+    )
+  )
+
+
+## =====================================================================
+## 3) y-positions just above the tallest point per Metric × Growout
+## =====================================================================
+
+y_pos_df.metric.house_icc <- Nutrient_long.metric.final %>%
+  dplyr::group_by(Metric, Growout) %>%
+  dplyr::summarise(
+    y_pos = max(Level, na.rm = TRUE) * 1.03,
+    .groups = "drop"
+  )
+
+
+p_values_plot_df.metric.house_icc <- dplyr::left_join(
+  p_values_plot_df.metric.house_icc,
+  y_pos_df.metric.house_icc,
+  by = c("Metric", "Growout")
+)
+
+
+## =====================================================================
+## 4) Helper data for plot: stripe + mean lines
+## =====================================================================
+
+g_levels.metric.house_icc <- levels(
+  Nutrient_long.metric.final$Growout
+)
+
+idx1.metric.house_icc <- which(
+  g_levels.metric.house_icc == "1"
+)
+
+
+stripes_df.metric.house_icc <- tibble::tibble(
+  xmin = if (length(idx1.metric.house_icc))
+    idx1.metric.house_icc - 0.5
+  else
+    NA_real_,
+  xmax = if (length(idx1.metric.house_icc))
+    idx1.metric.house_icc + 0.5
+  else
+    NA_real_
+) %>%
+  dplyr::filter(
+    is.finite(xmin),
+    is.finite(xmax)
+  )
+
+
+mean_levels_df.metric.house_icc <- Nutrient_long.metric.final %>%
+  dplyr::group_by(Metric, Growout, Treatment) %>%
+  dplyr::summarise(
+    Mean_Level = mean(Level, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+
+## =====================================================================
+## 5) Graphics params — SAME AS ORIGINAL
+## =====================================================================
+
+if (!exists("dodge_width"))
+  dodge_width <- 0.6
+
+
+if (!exists("pal_fill")) {
+
+  trts <- levels(
+    Nutrient_long.metric.final$Treatment
+  )
+
+  pal_fill <- stats::setNames(
+    RColorBrewer::brewer.pal(
+      max(3, length(trts)),
+      "Set2"
+    )[seq_along(trts)],
+    trts
+  )
+}
+
+
+if (!exists("pal_color"))
+  pal_color <- pal_fill
+
+
+## =====================================================================
+## 6) Plot — COPY ORIGINAL TEMPLATE AESTHETICS EXACTLY
+## =====================================================================
+
+p.metric.horizontal.house_icc <- ggplot(
+  Nutrient_long.metric.final,
+  aes(
+    x = Growout,
+    y = Level
+  )
+) +
+
+  # Light stripe for Growout "1"
+  {
+    if (nrow(stripes_df.metric.house_icc))
+
+      geom_rect(
+        data = stripes_df.metric.house_icc,
+        aes(
+          xmin = xmin,
+          xmax = xmax,
+          ymin = -Inf,
+          ymax = Inf
+        ),
+        inherit.aes = FALSE,
+        fill = "gray85",
+        alpha = 0.5
+      )
+
+    else
+
+      NULL
+  } +
+
+  # Boxplots
+  geom_boxplot(
+    aes(fill = Treatment),
+    color = "black",
+    alpha = 0.9,
+    width = 0.65,
+    outlier.shape = NA,
+    position = position_dodge(
+      width = dodge_width
+    )
+  ) +
+
+  # Mean points
+  stat_summary(
+    aes(fill = Treatment),
+    fun = mean,
+    geom = "point",
+    shape = 23,
+    size = 3,
+    color = "white",
+    position = position_dodge(
+      width = dodge_width
+    ),
+    show.legend = FALSE
+  ) +
+
+  # Jittered observations
+  geom_jitter(
+    aes(color = Treatment),
+    shape = 21,
+    size = 1.25,
+    alpha = 0.9,
+    fill = "white",
+    position = position_jitterdodge(
+      jitter.width = 0.10,
+      dodge.width = dodge_width
+    ),
+    show.legend = FALSE
+  ) +
+
+  # Treatment trendlines (means)
+  geom_line(
+    data = mean_levels_df.metric.house_icc,
+    aes(
+      x = Growout,
+      y = Mean_Level,
+      group = Treatment,
+      color = Treatment
+    ),
+    position = position_dodge(
+      width = dodge_width
+    ),
+    linewidth = 0.6
+  ) +
+
+  scale_y_continuous(
+    expand = expansion(
+      mult = c(0.05, 0.2)
+    )
+  ) +
+
+  # p-value labels
+  geom_text(
+    data = p_values_plot_df.metric.house_icc %>%
+      dplyr::filter(!is.na(P_Label)),
+    aes(
+      x = Growout,
+      y = y_pos,
+      label = P_Label
+    ),
+    parse = TRUE,
+    size = 3,
+    vjust = 0,
+    inherit.aes = FALSE
+  ) +
+
+  scale_fill_manual(
+    values = pal_fill,
+    drop = FALSE
+  ) +
+
+  scale_color_manual(
+    values = pal_color,
+    drop = FALSE
+  ) +
+
+  facet_wrap(
+    ~ Metric,
+    scales = "free_y",
+    nrow = 2
+  ) +
+
+  theme_bw() +
+
+  theme(
+    axis.title.x =
+      element_text(
+        size = 14,
+        face = "bold"
+      ),
+    axis.title.y =
+      element_blank(),
+    axis.text =
+      element_text(
+        size = 12,
+        color = "black"
+      ),
+    axis.ticks.x =
+      element_blank(),
+    strip.text =
+      element_text(
+        size = 12
+      ),
+    strip.background =
+      element_blank(),
+    legend.title =
+      element_text(
+        size = 14,
+        face = "bold"
+      ),
+    legend.text =
+      element_text(
+        size = 14
+      ),
+    legend.position =
+      "top"
+  ) +
+
+  labs(
+    x = "Growout",
+    fill = "Treatment",
+    color = "Treatment"
+  )
+
+
+print(
+  p.metric.horizontal.house_icc
+)
+
+
+ggsave(
+  "nutrients_box_with_pvals_metric.horizontal.house_retained.png",
+  p.metric.horizontal.house_icc,
+  width = 7,
+  height = 5,
+  units = "in",
+  dpi = 900
+)
+
+```
+
+```{r}
+# ================================================================
+# MICROBIOME COMPOSITION vs. PHYSICOCHEMICAL VARIABLES
+# REVISED HOUSE-RESTRICTED PERMUTATION ANALYSIS
+#
+# Includes:
+#   1) PERMANOVA
+#   2) PROTEST
+#   3) Mantel tests
+#   4) db-RDA
+#
+# Experimental structure:
+#   - Treatment assigned at House level
+#   - Growout repeated within House
+#   - Positions A-E are recurring physical locations within House
+#   - The same Position is retained across Growouts
+#
+# Permutation structure used here:
+#   - permutations occur within House
+#   - each House x Position trajectory is moved as an intact unit
+#   - the Growout 1 and Growout 2 observations for a Position
+#     therefore remain linked
+#
+# IMPORTANT:
+#   The PERMANOVA model includes Treatment, Growout, Position,
+#   and Treatment:Growout as adjustment variables.
+#
+#   The permutation scheme below is designed for inference on the
+#   sample-level physicochemical variables. Therefore, ONLY the
+#   physicochemical-variable rows are extracted/interpreted from
+#   these PERMANOVA fits.
+#
+#   Treatment, Growout, Position, and Treatment:Growout inference
+#   should come from the dedicated beta-diversity analysis with the
+#   factor-specific permutation schemes.
+#
+#   The db-RDA retains the ORIGINAL model structure:
+#     focal environmental variable +
+#     Condition(House + Growout + Treatment + Position)
+#
+#   Other physicochemical variables are NOT included in the
+#   Condition() term.
+#
+# Does NOT overwrite previous .metric objects.
+# ================================================================
+
+
+library(dplyr)
+library(tidyr)
+library(vegan)
+library(permute)
+library(phyloseq)
+
+
+# ================================================================
+# 0. Settings
+# ================================================================
+
+n_permutations.metric_houseperm <- 9999L
+
+env_vars.metric_houseperm <- c(
+  "Nitrogen.dry",
+  "Ammonium.N.dry",
+  "Phosphorus.dry",
+  "Potassium.dry",
+  "Moisture"
+)
+
+
+# ================================================================
+# 1. Extract metadata
+# ================================================================
+
+sample_data_df.metric_houseperm <- data.frame(
+  phyloseq::sample_data(
+    physeq_no_growout3_css_nutr.metric
+  )
+)
+
+
+sample_data_df.metric_houseperm$Position <- factor(
+  sample_data_df.metric_houseperm$Position
+)
+
+sample_data_df.metric_houseperm$House <- factor(
+  sample_data_df.metric_houseperm$House
+)
+
+sample_data_df.metric_houseperm$Growout <- factor(
+  sample_data_df.metric_houseperm$Growout
+)
+
+sample_data_df.metric_houseperm$Treatment <- factor(
+  sample_data_df.metric_houseperm$Treatment
+)
+
+
+# ================================================================
+# 2. Confirm required columns
+# ================================================================
+
+required_vars.metric_houseperm <- c(
+  "Treatment",
+  "House",
+  "Growout",
+  "Position",
+  env_vars.metric_houseperm
+)
+
+
+missing_vars.metric_houseperm <- setdiff(
+  required_vars.metric_houseperm,
+  colnames(
+    sample_data_df.metric_houseperm
+  )
+)
+
+
+if (
+  length(
+    missing_vars.metric_houseperm
+  ) > 0
+) {
+
+  stop(
+    paste(
+      "Missing required metadata columns:",
+      paste(
+        missing_vars.metric_houseperm,
+        collapse = ", "
+      )
+    )
+  )
+}
+
+
+# ================================================================
+# 3. Retain complete cases for the full environmental model
+# ================================================================
+
+complete_rows.metric_houseperm <- stats::complete.cases(
+  sample_data_df.metric_houseperm[
+    ,
+    required_vars.metric_houseperm,
+    drop = FALSE
+  ]
+)
+
+
+analysis_ids.metric_houseperm <- rownames(
+  sample_data_df.metric_houseperm
+)[
+  complete_rows.metric_houseperm
+]
+
+
+if (
+  length(
+    analysis_ids.metric_houseperm
+  ) < 10
+) {
+
+  stop(
+    "Too few complete samples for the environmental composition analysis."
+  )
+}
+
+
+if (
+  sum(
+    !complete_rows.metric_houseperm
+  ) > 0
+) {
+
+  message(
+    "Dropping ",
+    sum(
+      !complete_rows.metric_houseperm
+    ),
+    " samples with incomplete environmental/design metadata."
+  )
+}
+
+
+sample_data_df.metric_houseperm <-
+  sample_data_df.metric_houseperm[
+    analysis_ids.metric_houseperm,
+    ,
+    drop = FALSE
+  ]
+
+
+sample_data_df.metric_houseperm <- droplevels(
+  sample_data_df.metric_houseperm
+)
+
+
+# ================================================================
+# 4. Build community distance matrices
+# ================================================================
+
+bray_dist_full.metric_houseperm <- phyloseq::distance(
+  physeq_no_growout3_css_nutr.metric,
+  method = "bray"
+)
+
+
+wunifrac_dist_full.metric_houseperm <- phyloseq::UniFrac(
+  physeq_no_growout3_css_nutr.metric,
+  weighted = TRUE,
+  normalized = TRUE,
+  parallel = FALSE
+)
+
+
+uunifrac_dist_full.metric_houseperm <- phyloseq::UniFrac(
+  physeq_no_growout3_css_nutr.metric,
+  weighted = FALSE,
+  normalized = TRUE,
+  parallel = FALSE
+)
+
+
+# ================================================================
+# 5. Helper: subset/reorder distance matrix to analysis IDs
+# ================================================================
+
+subset_dist.metric_houseperm <- function(
+  distance_object_houseperm,
+  keep_ids_houseperm
+) {
+
+  distance_matrix_houseperm <- as.matrix(
+    distance_object_houseperm
+  )
+
+
+  if (
+    !all(
+      keep_ids_houseperm %in%
+        rownames(
+          distance_matrix_houseperm
+        )
+    )
+  ) {
+
+    stop(
+      "Not all analysis sample IDs were found in the distance matrix."
+    )
+  }
+
+
+  stats::as.dist(
+    distance_matrix_houseperm[
+      keep_ids_houseperm,
+      keep_ids_houseperm,
+      drop = FALSE
+    ]
+  )
+}
+
+
+bray_dist.metric_houseperm <- subset_dist.metric_houseperm(
+  bray_dist_full.metric_houseperm,
+  analysis_ids.metric_houseperm
+)
+
+
+wunifrac_dist.metric_houseperm <- subset_dist.metric_houseperm(
+  wunifrac_dist_full.metric_houseperm,
+  analysis_ids.metric_houseperm
+)
+
+
+uunifrac_dist.metric_houseperm <- subset_dist.metric_houseperm(
+  uunifrac_dist_full.metric_houseperm,
+  analysis_ids.metric_houseperm
+)
+
+
+# ================================================================
+# 6. Define recurring House x Position units
+#
+# Each House x Position unit contains the same physical location
+# sampled in Growout 1 and Growout 2.
+# ================================================================
+
+sample_data_df.metric_houseperm$House_Position_houseperm <-
+  interaction(
+    sample_data_df.metric_houseperm$House,
+    sample_data_df.metric_houseperm$Position,
+    drop = TRUE,
+    sep = ":"
+  )
+
+
+house_position_counts.metric_houseperm <- table(
+  sample_data_df.metric_houseperm$House_Position_houseperm
+)
+
+
+cat(
+  "\n============================================================\n",
+  "HOUSE x POSITION SAMPLE COUNTS\n",
+  "============================================================\n",
+  sep = ""
+)
+
+
+print(
+  house_position_counts.metric_houseperm
+)
+
+
+# With two microbiome growouts, each recurring physical Position
+# should have two observations.
+
+if (
+  any(
+    house_position_counts.metric_houseperm != 2
+  )
+) {
+
+  stop(
+    paste(
+      "At least one House x Position unit does not contain exactly",
+      "two observations. Check missing samples before constructing",
+      "the linked-position permutation design."
+    )
+  )
+}
+
+
+# Confirm that each House x Position contains both Growouts
+
+house_position_growout.metric_houseperm <- with(
+  sample_data_df.metric_houseperm,
+  table(
+    House_Position_houseperm,
+    Growout
+  )
+)
+
+
+if (
+  any(
+    house_position_growout.metric_houseperm != 1
+  )
+) {
+
+  stop(
+    paste(
+      "Each House x Position unit should contain exactly one",
+      "observation from each Growout."
+    )
+  )
+}
+
+
+# ================================================================
+# 7. Build restricted environmental permutation matrix
+#
+# House = permutation block
+#
+# House x Position = whole plot
+#
+# within = none
+#
+# Therefore:
+#   - samples never move between Houses
+#   - Position trajectories can exchange within House
+#   - G1 and G2 observations for the same physical Position
+#     remain together
+# ================================================================
+
+set.seed(1)
+
+
+perm_control_env.metric_houseperm <- permute::how(
+
+  nperm =
+    n_permutations.metric_houseperm,
+
+  blocks =
+    sample_data_df.metric_houseperm$House,
+
+  plots =
+    permute::Plots(
+      strata =
+        sample_data_df.metric_houseperm$House_Position_houseperm,
+      type =
+        "free"
+    ),
+
+  within =
+    permute::Within(
+      type =
+        "none"
+    ),
+
+  complete =
+    FALSE
+)
+
+
+perm_env.metric_houseperm <- permute::shuffleSet(
+
+  n =
+    nrow(
+      sample_data_df.metric_houseperm
+    ),
+
+  nset =
+    n_permutations.metric_houseperm,
+
+  control =
+    perm_control_env.metric_houseperm
+)
+
+
+cat(
+  "\nRestricted environmental permutations generated:",
+  nrow(
+    perm_env.metric_houseperm
+  ),
+  "\n"
+)
+
+
+# ================================================================
+# 8. PERMANOVA
+#
+# Model:
+#
+#   distance ~ Treatment * Growout + Position +
+#              NH4 + Total N + P + K + Moisture
+#
+# Treatment, Growout, Position, and Treatment:Growout are included
+# as adjustment variables.
+#
+# Only environmental-variable rows are interpreted from these fits.
+#
+# by = "margin" gives the contribution of each environmental
+# variable while accounting for the other terms in the model.
+# ================================================================
+
+form_metric_env_houseperm <- ~
+  Treatment * Growout +
+  Position +
+  Ammonium.N.dry +
+  Nitrogen.dry +
+  Phosphorus.dry +
+  Potassium.dry +
+  Moisture
+
+
+permanova_bray_env.metric_houseperm <- vegan::adonis2(
+
+  update(
+    form_metric_env_houseperm,
+    bray_dist.metric_houseperm ~ .
+  ),
+
+  data =
+    sample_data_df.metric_houseperm,
+
+  permutations =
+    perm_env.metric_houseperm,
+
+  by =
+    "margin"
+)
+
+
+permanova_wunifrac_env.metric_houseperm <- vegan::adonis2(
+
+  update(
+    form_metric_env_houseperm,
+    wunifrac_dist.metric_houseperm ~ .
+  ),
+
+  data =
+    sample_data_df.metric_houseperm,
+
+  permutations =
+    perm_env.metric_houseperm,
+
+  by =
+    "margin"
+)
+
+
+permanova_uunifrac_env.metric_houseperm <- vegan::adonis2(
+
+  update(
+    form_metric_env_houseperm,
+    uunifrac_dist.metric_houseperm ~ .
+  ),
+
+  data =
+    sample_data_df.metric_houseperm,
+
+  permutations =
+    perm_env.metric_houseperm,
+
+  by =
+    "margin"
+)
+
+
+# ================================================================
+# 9. Extract environmental PERMANOVA terms only
+#
+# Do NOT use the design-factor p-values from the above models.
+# ================================================================
+
+extract_permanova_env.metric_houseperm <- function(
+  ad2_obj_houseperm,
+  metric_label_houseperm,
+  env_vars_houseperm
+) {
+
+  df_houseperm <- as.data.frame(
+    ad2_obj_houseperm,
+    stringsAsFactors = FALSE
+  )
+
+
+  df_houseperm$Variable <- rownames(
+    df_houseperm
+  )
+
+
+  df_houseperm <- df_houseperm[
+    df_houseperm$Variable %in%
+      env_vars_houseperm,
+    ,
+    drop = FALSE
+  ]
+
+
+  if (
+    nrow(
+      df_houseperm
+    ) == 0
+  ) {
+
+    return(
+      NULL
+    )
+  }
+
+
+  pcol_houseperm <- grep(
+    "^Pr\\(>F\\)$",
+    names(
+      df_houseperm
+    ),
+    value = TRUE
+  )
+
+
+  if (
+    length(
+      pcol_houseperm
+    ) != 1
+  ) {
+
+    stop(
+      "Could not identify the PERMANOVA p-value column."
+    )
+  }
+
+
+  out_houseperm <- data.frame(
+
+    Variable =
+      df_houseperm$Variable,
+
+    Effect =
+      as.numeric(
+        df_houseperm[
+          ,
+          "R2",
+          drop = TRUE
+        ]
+      ),
+
+    p_value =
+      as.numeric(
+        df_houseperm[
+          ,
+          pcol_houseperm,
+          drop = TRUE
+        ]
+      ),
+
+    Metric =
+      metric_label_houseperm,
+
+    Analysis =
+      "PERMANOVA (margin)",
+
+    Stat =
+      "partial R2",
+
+    stringsAsFactors =
+      FALSE,
+
+    check.names =
+      FALSE
+  )
+
+
+  out_houseperm$q_value <- stats::p.adjust(
+    out_houseperm$p_value,
+    method = "BH"
+  )
+
+
+  out_houseperm
+}
+
+
+perm_env_bray.metric_houseperm <-
+  extract_permanova_env.metric_houseperm(
+
+    permanova_bray_env.metric_houseperm,
+
+    "Bray-Curtis",
+
+    env_vars.metric_houseperm
+  )
+
+
+perm_env_wunifrac.metric_houseperm <-
+  extract_permanova_env.metric_houseperm(
+
+    permanova_wunifrac_env.metric_houseperm,
+
+    "Weighted UniFrac",
+
+    env_vars.metric_houseperm
+  )
+
+
+perm_env_uunifrac.metric_houseperm <-
+  extract_permanova_env.metric_houseperm(
+
+    permanova_uunifrac_env.metric_houseperm,
+
+    "Unweighted UniFrac",
+
+    env_vars.metric_houseperm
+  )
+
+
+perm_env_long.metric_houseperm <- dplyr::bind_rows(
+
+  perm_env_bray.metric_houseperm,
+  perm_env_wunifrac.metric_houseperm,
+  perm_env_uunifrac.metric_houseperm
+)
+
+
+cat(
+  "\n============================================================\n",
+  "ENVIRONMENTAL PERMANOVA RESULTS\n",
+  "HOUSE-RESTRICTED PERMUTATIONS\n",
+  "============================================================\n",
+  sep = ""
+)
+
+
+print(
+  perm_env_long.metric_houseperm %>%
+    dplyr::mutate(
+      Effect =
+        round(
+          Effect,
+          4
+        ),
+      p_value =
+        signif(
+          p_value,
+          4
+        ),
+      q_value =
+        signif(
+          q_value,
+          4
+        )
+    ) %>%
+    dplyr::arrange(
+      Metric,
+      Variable
+    ),
+  n = Inf
+)
+
+
+# ================================================================
+# 10. Standardized environmental matrix for PROTEST and Mantel
+# ================================================================
+
+env_raw.metric_houseperm <-
+  sample_data_df.metric_houseperm[
+    ,
+    env_vars.metric_houseperm,
+    drop = FALSE
+  ]
+
+
+env_std.metric_houseperm <- scale(
+  env_raw.metric_houseperm
+)
+
+
+rownames(
+  env_std.metric_houseperm
+) <- rownames(
+  sample_data_df.metric_houseperm
+)
+
+
+env_dist.metric_houseperm <- vegan::vegdist(
+  env_std.metric_houseperm,
+  method = "euclidean"
+)
+
+
+cat(
+  "\n============================================================\n",
+  "ENVIRONMENTAL MATRIX\n",
+  "============================================================\n",
+  sep = ""
+)
+
+
+cat(
+  "Variables:",
+  paste(
+    colnames(
+      env_std.metric_houseperm
+    ),
+    collapse = ", "
+  ),
+  "\n"
+)
+
+
+cat(
+  "Samples:",
+  nrow(
+    env_std.metric_houseperm
+  ),
+  "\n"
+)
+
+
+# ================================================================
+# 11. PROTEST
+#
+# Community distance vs. combined standardized environmental
+# distance.
+#
+# Uses the same House-restricted, linked-Position permutation
+# matrix.
+# ================================================================
+
+protest_bray.metric_houseperm <- vegan::protest(
+
+  X =
+    bray_dist.metric_houseperm,
+
+  Y =
+    env_dist.metric_houseperm,
+
+  permutations =
+    perm_env.metric_houseperm
+)
+
+
+protest_wunifrac.metric_houseperm <- vegan::protest(
+
+  X =
+    wunifrac_dist.metric_houseperm,
+
+  Y =
+    env_dist.metric_houseperm,
+
+  permutations =
+    perm_env.metric_houseperm
+)
+
+
+protest_uunifrac.metric_houseperm <- vegan::protest(
+
+  X =
+    uunifrac_dist.metric_houseperm,
+
+  Y =
+    env_dist.metric_houseperm,
+
+  permutations =
+    perm_env.metric_houseperm
+)
+
+
+get_protest.metric_houseperm <- function(
+  obj_houseperm,
+  metric_houseperm
+) {
+
+  data.frame(
+
+    Metric =
+      metric_houseperm,
+
+    Procrustes_r =
+      as.numeric(
+        obj_houseperm$t0
+      ),
+
+    p_value =
+      as.numeric(
+        obj_houseperm$signif
+      ),
+
+    stringsAsFactors =
+      FALSE
+  )
+}
+
+
+protest_summary.metric_houseperm <- dplyr::bind_rows(
+
+  get_protest.metric_houseperm(
+    protest_bray.metric_houseperm,
+    "Bray-Curtis"
+  ),
+
+  get_protest.metric_houseperm(
+    protest_wunifrac.metric_houseperm,
+    "Weighted UniFrac"
+  ),
+
+  get_protest.metric_houseperm(
+    protest_uunifrac.metric_houseperm,
+    "Unweighted UniFrac"
+  )
+)
+
+
+cat(
+  "\n============================================================\n",
+  "PROTEST SUMMARY\n",
+  "HOUSE-RESTRICTED PERMUTATIONS\n",
+  "============================================================\n",
+  sep = ""
+)
+
+
+print(
+  protest_summary.metric_houseperm %>%
+    dplyr::mutate(
+      Procrustes_r =
+        round(
+          Procrustes_r,
+          3
+        ),
+      p_value =
+        signif(
+          p_value,
+          4
+        )
+    )
+)
+
+
+# ================================================================
+# 12. Mantel tests
+#
+# One environmental variable at a time.
+#
+# These remain singleton environmental comparisons, but the
+# permutation test now respects House and recurring Position.
+# ================================================================
+
+per_var_mantel.metric_houseperm <- function(
+  comm_dist_houseperm,
+  env_std_houseperm,
+  env_vars_houseperm,
+  permutation_matrix_houseperm
+) {
+
+  out_houseperm <- lapply(
+
+    env_vars_houseperm,
+
+    function(
+      variable_houseperm
+    ) {
+
+      env_single_houseperm <- env_std_houseperm[
+        ,
+        variable_houseperm,
+        drop = FALSE
+      ]
+
+
+      env_single_dist_houseperm <- stats::dist(
+        env_single_houseperm,
+        method = "euclidean"
+      )
+
+
+      fit_houseperm <- vegan::mantel(
+
+        comm_dist_houseperm,
+
+        env_single_dist_houseperm,
+
+        method =
+          "spearman",
+
+        permutations =
+          permutation_matrix_houseperm
+      )
+
+
+      data.frame(
+
+        Variable =
+          variable_houseperm,
+
+        Effect =
+          as.numeric(
+            fit_houseperm$statistic
+          ),
+
+        p_value =
+          as.numeric(
+            fit_houseperm$signif
+          ),
+
+        stringsAsFactors =
+          FALSE
+      )
+    }
+  )
+
+
+  do.call(
+    rbind,
+    out_houseperm
+  )
+}
+
+
+bioenv_single_bray.metric_houseperm <-
+  per_var_mantel.metric_houseperm(
+
+    bray_dist.metric_houseperm,
+
+    env_std.metric_houseperm,
+
+    env_vars.metric_houseperm,
+
+    perm_env.metric_houseperm
+  )
+
+
+bioenv_single_wunifrac.metric_houseperm <-
+  per_var_mantel.metric_houseperm(
+
+    wunifrac_dist.metric_houseperm,
+
+    env_std.metric_houseperm,
+
+    env_vars.metric_houseperm,
+
+    perm_env.metric_houseperm
+  )
+
+
+bioenv_single_uunifrac.metric_houseperm <-
+  per_var_mantel.metric_houseperm(
+
+    uunifrac_dist.metric_houseperm,
+
+    env_std.metric_houseperm,
+
+    env_vars.metric_houseperm,
+
+    perm_env.metric_houseperm
+  )
+
+
+bioenv_long.metric_houseperm <- dplyr::bind_rows(
+
+  dplyr::mutate(
+    bioenv_single_bray.metric_houseperm,
+    Metric = "Bray-Curtis"
+  ),
+
+  dplyr::mutate(
+    bioenv_single_wunifrac.metric_houseperm,
+    Metric = "Weighted UniFrac"
+  ),
+
+  dplyr::mutate(
+    bioenv_single_uunifrac.metric_houseperm,
+    Metric = "Unweighted UniFrac"
+  )
+) %>%
+
+  dplyr::mutate(
+
+    Analysis =
+      "BIO-ENV (singleton)",
+
+    Stat =
+      "Spearman r"
+  )
+
+
+cat(
+  "\n============================================================\n",
+  "MANTEL RESULTS\n",
+  "HOUSE-RESTRICTED PERMUTATIONS\n",
+  "============================================================\n",
+  sep = ""
+)
+
+
+print(
+  bioenv_long.metric_houseperm %>%
+    dplyr::mutate(
+      Effect =
+        round(
+          Effect,
+          3
+        ),
+      p_value =
+        signif(
+          p_value,
+          4
+        )
+    ) %>%
+    dplyr::arrange(
+      Metric,
+      Variable
+    ),
+  n = Inf
+)
+
+
+# ================================================================
+# 13. db-RDA
+#
+# ORIGINAL MODEL STRUCTURE RETAINED:
+#
+# For each environmental variable:
+#
+#   distance ~ focal_environmental_variable +
+#              Condition(
+#                House +
+#                Growout +
+#                Treatment +
+#                Position
+#              )
+#
+# Each physicochemical variable is therefore tested separately
+# after accounting for the primary experimental factors.
+#
+# Other physicochemical variables are NOT included in Condition().
+#
+# Significance is tested with the revised House-restricted,
+# linked-Position permutation matrix.
+# ================================================================
+
+per_var_dbrda.metric_houseperm <- function(
+
+  comm_dist_houseperm,
+
+  metric_label_houseperm,
+
+  dat_houseperm,
+
+  env_vars_houseperm,
+
+  permutation_matrix_houseperm
+) {
+
+  results_houseperm <- lapply(
+
+    env_vars_houseperm,
+
+    function(
+      variable_houseperm
+    ) {
+
+      formula_text_houseperm <- paste0(
+
+        "comm_dist_houseperm ~ ",
+
+        variable_houseperm,
+
+        " + Condition(House + Growout + Treatment + Position)"
+      )
+
+
+      formula_houseperm <- stats::as.formula(
+        formula_text_houseperm
+      )
+
+
+      model_houseperm <- vegan::dbrda(
+
+        formula_houseperm,
+
+        data =
+          dat_houseperm
+      )
+
+
+      anova_houseperm <- vegan::anova.cca(
+
+        model_houseperm,
+
+        permutations =
+          permutation_matrix_houseperm,
+
+        model =
+          "reduced"
+      )
+
+
+      pcol_houseperm <- grep(
+        "^Pr\\(>F\\)$",
+        colnames(
+          anova_houseperm
+        ),
+        value = TRUE
+      )
+
+
+      if (
+        length(
+          pcol_houseperm
+        ) == 1
+      ) {
+
+        p_houseperm <- as.numeric(
+          anova_houseperm[
+            1,
+            pcol_houseperm,
+            drop = TRUE
+          ]
+        )
+
+      } else {
+
+        p_houseperm <- NA_real_
+      }
+
+
+      r2_object_houseperm <- vegan::RsquareAdj(
+        model_houseperm
+      )
+
+
+      adj_r2_houseperm <- as.numeric(
+        r2_object_houseperm$adj.r.squared
+      )
+
+
+      data.frame(
+
+        Variable =
+          variable_houseperm,
+
+        Effect =
+          max(
+            0,
+            adj_r2_houseperm
+          ),
+
+        p_value =
+          p_houseperm,
+
+        Metric =
+          metric_label_houseperm,
+
+        Analysis =
+          "db-RDA (partial)",
+
+        Stat =
+          "partial adj. R2",
+
+        stringsAsFactors =
+          FALSE
+      )
+    }
+  )
+
+
+  do.call(
+    rbind,
+    results_houseperm
+  )
+}
+
+
+dbrda_bray_long.metric_houseperm <-
+  per_var_dbrda.metric_houseperm(
+
+    bray_dist.metric_houseperm,
+
+    "Bray-Curtis",
+
+    sample_data_df.metric_houseperm,
+
+    env_vars.metric_houseperm,
+
+    perm_env.metric_houseperm
+  )
+
+
+dbrda_wunifrac_long.metric_houseperm <-
+  per_var_dbrda.metric_houseperm(
+
+    wunifrac_dist.metric_houseperm,
+
+    "Weighted UniFrac",
+
+    sample_data_df.metric_houseperm,
+
+    env_vars.metric_houseperm,
+
+    perm_env.metric_houseperm
+  )
+
+
+dbrda_uunifrac_long.metric_houseperm <-
+  per_var_dbrda.metric_houseperm(
+
+    uunifrac_dist.metric_houseperm,
+
+    "Unweighted UniFrac",
+
+    sample_data_df.metric_houseperm,
+
+    env_vars.metric_houseperm,
+
+    perm_env.metric_houseperm
+  )
+
+
+dbrda_long.metric_houseperm <- dplyr::bind_rows(
+
+  dbrda_bray_long.metric_houseperm,
+
+  dbrda_wunifrac_long.metric_houseperm,
+
+  dbrda_uunifrac_long.metric_houseperm
+)
+
+
+cat(
+  "\n============================================================\n",
+  "db-RDA RESULTS\n",
+  "HOUSE-RESTRICTED PERMUTATIONS\n",
+  "============================================================\n",
+  sep = ""
+)
+
+
+print(
+  dbrda_long.metric_houseperm %>%
+    dplyr::mutate(
+      Effect =
+        round(
+          Effect,
+          4
+        ),
+      p_value =
+        signif(
+          p_value,
+          4
+        )
+    ) %>%
+    dplyr::arrange(
+      Metric,
+      Variable
+    ),
+  n = Inf
+)
+
+
+# ================================================================
+# 14. Combine per-variable results across methods
+#
+# Maintains the same general structure used by the previous
+# lollipop-plot workflow.
+# ==============================================================
+
+all_long_p_only.metric_houseperm <- dplyr::bind_rows(
+
+  bioenv_long.metric_houseperm[
+    ,
+    c(
+      "Variable",
+      "Effect",
+      "p_value",
+      "Metric",
+      "Analysis",
+      "Stat"
+    ),
+    drop = FALSE
+  ],
+
+  perm_env_long.metric_houseperm[
+    ,
+    c(
+      "Variable",
+      "Effect",
+      "p_value",
+      "Metric",
+      "Analysis",
+      "Stat"
+    ),
+    drop = FALSE
+  ],
+
+  dbrda_long.metric_houseperm[
+    ,
+    c(
+      "Variable",
+      "Effect",
+      "p_value",
+      "Metric",
+      "Analysis",
+      "Stat"
+    ),
+    drop = FALSE
+  ]
+)
+
+
+# ================================================================
+# 15. Order variables, methods, and distance metrics
+# ==============================================================
+
+all_long_p_only.metric_houseperm$Variable <- factor(
+
+  all_long_p_only.metric_houseperm$Variable,
+
+  levels =
+    env_vars.metric_houseperm
+)
+
+
+all_long_p_only.metric_houseperm$Analysis <- factor(
+
+  all_long_p_only.metric_houseperm$Analysis,
+
+  levels = c(
+    "BIO-ENV (singleton)",
+    "PERMANOVA (margin)",
+    "db-RDA (partial)"
+  )
+)
+
+
+all_long_p_only.metric_houseperm$Metric <- factor(
+
+  all_long_p_only.metric_houseperm$Metric,
+
+  levels = c(
+    "Bray-Curtis",
+    "Weighted UniFrac",
+    "Unweighted UniFrac"
+  )
+)
+
+
+# ================================================================
+# 16. Significance stars
+#
+# Raw permutation p-values, matching the prior visualization.
+# ==============================================================
+
+all_long_p_only.metric_houseperm$stars <- dplyr::case_when(
+
+  is.finite(
+    all_long_p_only.metric_houseperm$p_value
+  ) &
+    all_long_p_only.metric_houseperm$p_value < 0.001 ~
+    "***",
+
+  is.finite(
+    all_long_p_only.metric_houseperm$p_value
+  ) &
+    all_long_p_only.metric_houseperm$p_value < 0.01 ~
+    "**",
+
+  is.finite(
+    all_long_p_only.metric_houseperm$p_value
+  ) &
+    all_long_p_only.metric_houseperm$p_value < 0.05 ~
+    "*",
+
+  TRUE ~
+    ""
+)
+
+
+# ================================================================
+# 17. Final combined table
+# ==============================================================
+
+cat(
+  "\n============================================================\n",
+  "FINAL PER-VARIABLE COMPARISON\n",
+  "HOUSE-RESTRICTED PERMUTATIONS\n",
+  "============================================================\n",
+  sep = ""
+)
+
+
+print(
+
+  all_long_p_only.metric_houseperm %>%
+
+    dplyr::mutate(
+
+      Effect =
+        round(
+          Effect,
+          3
+        ),
+
+      p_value =
+        signif(
+          p_value,
+          4
+        )
+    ) %>%
+
+    dplyr::arrange(
+      Analysis,
+      Metric,
+      Variable
+    ),
+
+  n = Inf
+)
+
+```
+
+```{r}
+# ================================================================
+# LOLLIPOP PLOT — UPDATED HOUSE-RESTRICTED RESULTS
+#
+# Uses:
+#   all_long_p_only.metric_houseperm
+#
+# Displays:
+#   - Mantel: Spearman r
+#   - PERMANOVA: partial R²
+#   - db-RDA: partial adjusted R²
+#
+# Significance:
+#   - filled point = p < 0.05
+#   - open point   = p >= 0.05
+#
+# Aesthetics retained from previous finalized plot.
+# Does NOT overwrite previous plot/data objects.
+# ================================================================
+
+library(dplyr)
+library(ggplot2)
+
+
+# ================================================================
+# 1. Prepare plotting dataframe
+# ================================================================
+
+viz_df.metric_houseperm <- all_long_p_only.metric_houseperm %>%
+  dplyr::mutate(
+
+    Analysis = dplyr::recode(
+      as.character(Analysis),
+      "BIO-ENV (singleton)" = "Mantel",
+      "PERMANOVA (margin)"  = "PERMANOVA",
+      "db-RDA (partial)"    = "db-RDA"
+    ),
+
+    Variable = dplyr::recode(
+      as.character(Variable),
+      "Potassium.dry"   = "K",
+      "Phosphorus.dry"  = "P",
+      "Ammonium.N.dry"  = "NH4+",
+      "Nitrogen.dry"    = "Total N"
+    ),
+
+    Variable = factor(
+      Variable,
+      levels = c(
+        "Total N",
+        "NH4+",
+        "P",
+        "K",
+        "Moisture"
+      )
+    ),
+
+    Metric = factor(
+      as.character(Metric),
+      levels = c(
+        "Bray-Curtis",
+        "Weighted UniFrac",
+        "Unweighted UniFrac"
+      )
+    ),
+
+    Significance = factor(
+      dplyr::if_else(
+        is.finite(p_value) & p_value < 0.05,
+        "<0.05",
+        "≥0.05"
+      ),
+      levels = c(
+        "<0.05",
+        "≥0.05"
+      )
+    )
+  )
+
+
+# ================================================================
+# 2. Retain previous analysis colors
+# ================================================================
+
+analysis_cols.metric_houseperm <- c(
+  "Mantel"    = "#2A788EFF",
+  "PERMANOVA" = "#d3436e",
+  "db-RDA"    = "#000004"
+)
+
+
+# ================================================================
+# 3. Create facet labels with statistic used by each analysis
+# ================================================================
+
+viz_df.metric_houseperm <- viz_df.metric_houseperm %>%
+  dplyr::mutate(
+
+    Method = dplyr::case_when(
+      Analysis == "Mantel"    ~ "Spearman r",
+      Analysis == "PERMANOVA" ~ "partial R²",
+      Analysis == "db-RDA"    ~ "partial adj. R²",
+      TRUE                    ~ as.character(Stat)
+    ),
+
+    FacetLabel = paste0(
+      Analysis,
+      " (",
+      Method,
+      ")"
+    )
+  )
+
+
+facet_levels.metric_houseperm <- c(
+  "Mantel (Spearman r)",
+  "PERMANOVA (partial R²)",
+  "db-RDA (partial adj. R²)"
+)
+
+
+viz_df.metric_houseperm$FacetLabel <- factor(
+  viz_df.metric_houseperm$FacetLabel,
+  levels = facet_levels.metric_houseperm
+)
+
+
+# ================================================================
+# 4. Lollipop plot
+# ================================================================
+
+p_methods_lollipop.metric_houseperm <- ggplot(
+  viz_df.metric_houseperm,
+  aes(
+    y = Variable,
+    x = Effect
+  )
+) +
+
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    color = "black"
+  ) +
+
+  geom_segment(
+    aes(
+      x = 0,
+      xend = Effect,
+      yend = Variable,
+      color = Analysis
+    ),
+    linewidth = 0.6
+  ) +
+
+  # Base white point
+  geom_point(
+    shape = 21,
+    size = 3.6,
+    stroke = 0,
+    fill = "white"
+  ) +
+
+  # Colored outline
+  geom_point(
+    aes(
+      color = Analysis
+    ),
+    shape = 21,
+    size = 3.6,
+    stroke = 1.0,
+    fill = NA
+  ) +
+
+  # Colored fill for statistically significant results
+  geom_point(
+    aes(
+      fill = Analysis,
+      alpha = Significance
+    ),
+    shape = 21,
+    size = 3.6,
+    stroke = 0
+  ) +
+
+  scale_color_manual(
+    values = analysis_cols.metric_houseperm,
+    guide = "none"
+  ) +
+
+  scale_fill_manual(
+    values = analysis_cols.metric_houseperm,
+    guide = "none"
+  ) +
+
+  scale_alpha_manual(
+    values = c(
+      "<0.05" = 1,
+      "≥0.05" = 0
+    ),
+    limits = c(
+      "<0.05",
+      "≥0.05"
+    ),
+    drop = FALSE,
+    name = "Significance"
+  ) +
+
+  facet_grid(
+    Metric ~ FacetLabel,
+    scales = "free"
+  ) +
+
+  labs(
+    x = NULL,
+    y = NULL
+  ) +
+
+  theme_bw(
+    base_size = 11
+  ) +
+
+  theme(
+    legend.position  = "top",
+    legend.title     = element_text(
+      face = "bold",
+      color = "black"
+    ),
+    legend.text      = element_text(
+      color = "black"
+    ),
+    axis.text.x      = element_text(
+      color = "black"
+    ),
+    axis.text.y      = element_text(
+      color = "black"
+    ),
+    strip.background = element_blank(),
+    strip.text.x     = element_text(
+      size = 12,
+      color = "black"
+    ),
+    strip.text.y     = element_text(
+      color = "black"
+    )
+  ) +
+
+  guides(
+    alpha = guide_legend(
+      override.aes = list(
+        shape  = 21,
+        size   = 5,
+        stroke = 1.0,
+        color  = "black",
+        fill   = c(
+          "<0.05" = "black",
+          "≥0.05" = "white"
+        ),
+        alpha  = 1
+      )
+    )
+  )
+
+
+# ================================================================
+# 5. Display
+# ================================================================
+
+print(
+  p_methods_lollipop.metric_houseperm
+)
+
+
+# ================================================================
+# 6. Export
+# ================================================================
+
+ggsave(
+  "nutrient.lollipop.metric.houseperm.png",
+  p_methods_lollipop.metric_houseperm,
+  width = 7.5,
+  height = 5,
+  units = "in",
+  dpi = 900
+)
+
+```
+

@@ -1,0 +1,4308 @@
+---
+title: "revision.dpcr"
+author: "BH"
+date: "2026-10-12"
+output: html_document
+---
+
+```{r}
+# ==============================================================
+# GENUS-LEVEL ENTEROCOCCUS dPCR GLMM
+# RAW COPIES PER GRAM
+# HOUSE RETAINED + HOUSE ICC
+#
+# Distribution:
+#   Lognormal = natural-log response + Gaussian model
+#
+# GLOBAL MODEL:
+#   log(copies_per_gram) ~
+#     Treatment * Growout + Position + (1 | House)
+#
+# GROWOUT-SPECIFIC MODELS:
+#   log(copies_per_gram) ~
+#     Treatment + Position + (1 | House)
+#
+# House is ALWAYS retained because House is the experimental unit.
+#
+# Treatment contrasts within Growout are obtained from the
+# GLOBAL model using emmeans, consistent with the manuscript.
+#
+# Growout-specific models are used for omnibus Treatment and
+# Position tests, consistent with the original analysis structure.
+#
+# DHARMa diagnostics are run on the GLOBAL model only, consistent
+# with the original model-assessment workflow.
+#
+# Output includes:
+#   - Global Type III Wald tests
+#   - Global Treatment contrast
+#   - Treatment contrasts within each Growout
+#   - Growout-specific Type III Treatment and Position tests
+#   - Global and growout-specific House variance and SD
+#   - Global and growout-specific adjusted/unadjusted ICC
+#   - Global DHARMa diagnostics
+#
+# Saves:
+#   ONE Excel workbook
+#   ONE worksheet
+#   ONE flat results table
+# ==============================================================
+
+
+# ==============================================================
+# 0. Packages
+# ==============================================================
+
+library(glmmTMB)
+library(car)
+library(emmeans)
+library(DHARMa)
+library(dplyr)
+library(performance)
+library(writexl)
+
+
+# ==============================================================
+# 1. Check required columns
+# ==============================================================
+
+entero_genus_icc_required <- c(
+  "Growout",
+  "Treatment",
+  "House",
+  "Position",
+  "copies_per_gram"
+)
+
+entero_genus_icc_missing <- setdiff(
+  entero_genus_icc_required,
+  names(entero.merged)
+)
+
+if (length(entero_genus_icc_missing) > 0) {
+  stop(
+    "entero.merged is missing required columns: ",
+    paste(
+      entero_genus_icc_missing,
+      collapse = ", "
+    )
+  )
+}
+
+
+# ==============================================================
+# 2. Prepare data
+#
+# Original entero.merged is NOT modified.
+# ==============================================================
+
+entero_genus_icc_df <- entero.merged %>%
+  dplyr::mutate(
+    Growout = factor(Growout),
+    Treatment = factor(Treatment),
+    House = factor(House),
+    Position = factor(Position),
+    log_copies_raw = log(copies_per_gram)
+  ) %>%
+  dplyr::filter(
+    is.finite(log_copies_raw)
+  ) %>%
+  droplevels()
+
+
+cat(
+  "Genus-level samples included:",
+  nrow(entero_genus_icc_df),
+  "\n"
+)
+
+
+# ==============================================================
+# 3. Type III contrast settings
+# ==============================================================
+
+old_contr_genus_icc <- options(
+  contrasts = c(
+    "contr.sum",
+    "contr.poly"
+  )
+)
+
+
+# ==============================================================
+# 4. Helper: House variance + ICC
+#
+# tolerance = 0 permits reporting of very small House variance.
+# ==============================================================
+
+entero_genus_icc_house_stats <- function(model) {
+
+  vc <- glmmTMB::VarCorr(model)$cond
+
+  house_variance <- as.numeric(
+    vc$House[1, 1]
+  )
+
+  house_sd <- sqrt(
+    house_variance
+  )
+
+
+  icc_result <- suppressWarnings(
+    tryCatch(
+      performance::icc(
+        model,
+        tolerance = 0
+      ),
+      error = function(e) NULL
+    )
+  )
+
+
+  if (is.null(icc_result)) {
+
+    icc_adjusted <- NA_real_
+    icc_unadjusted <- NA_real_
+
+  } else {
+
+    icc_adjusted <- as.numeric(
+      icc_result$ICC_adjusted[1]
+    )
+
+    icc_unadjusted <- as.numeric(
+      icc_result$ICC_unadjusted[1]
+    )
+  }
+
+
+  data.frame(
+    Variance = house_variance,
+    SD = house_sd,
+    ICC_adjusted = icc_adjusted,
+    ICC_unadjusted = icc_unadjusted,
+    Percent_House_adjusted =
+      icc_adjusted * 100,
+    Percent_House_unadjusted =
+      icc_unadjusted * 100
+  )
+}
+
+
+# ==============================================================
+# 5. Helper: emmeans test statistic
+# ==============================================================
+
+entero_genus_icc_get_stat <- function(df) {
+
+  if ("z.ratio" %in% names(df)) {
+    return(
+      as.numeric(df$z.ratio)
+    )
+  }
+
+  if ("t.ratio" %in% names(df)) {
+    return(
+      as.numeric(df$t.ratio)
+    )
+  }
+
+  rep(
+    NA_real_,
+    nrow(df)
+  )
+}
+
+
+# ==============================================================
+# 6. GLOBAL model
+#
+# House is retained regardless of estimated variance.
+# ==============================================================
+
+entero_genus_icc_model <- glmmTMB::glmmTMB(
+  log_copies_raw ~
+    Treatment * Growout +
+    Position +
+    (1 | House),
+  family = gaussian(
+    link = "identity"
+  ),
+  data = entero_genus_icc_df
+)
+
+
+# ==============================================================
+# 7. GLOBAL Type III Wald tests
+# ==============================================================
+
+entero_genus_icc_anova <- car::Anova(
+  entero_genus_icc_model,
+  type = 3
+)
+
+
+cat(
+  "\n==============================================\n",
+  "GLOBAL TYPE III WALD TESTS\n",
+  "==============================================\n",
+  sep = ""
+)
+
+print(
+  entero_genus_icc_anova
+)
+
+
+# ==============================================================
+# 8. GLOBAL Treatment contrast
+# ==============================================================
+
+entero_genus_icc_global_emm <- emmeans::emmeans(
+  entero_genus_icc_model,
+  ~ Treatment
+)
+
+entero_genus_icc_global_pairs <- emmeans::contrast(
+  entero_genus_icc_global_emm,
+  method = "pairwise",
+  adjust = "BH"
+)
+
+entero_genus_icc_global_df <- as.data.frame(
+  summary(
+    entero_genus_icc_global_pairs
+  )
+)
+
+
+cat(
+  "\n==============================================\n",
+  "GLOBAL TREATMENT CONTRAST\n",
+  "==============================================\n",
+  sep = ""
+)
+
+print(
+  entero_genus_icc_global_df
+)
+
+
+# ==============================================================
+# 9. Treatment contrasts within Growout
+#
+# IMPORTANT:
+# These come from the GLOBAL model, consistent with the
+# manuscript Methods and original analysis.
+#
+# This object name is retained for downstream plotting:
+#   entero_genus_icc_pergo_df
+# ==============================================================
+
+entero_genus_icc_pergo_emm <- emmeans::emmeans(
+  entero_genus_icc_model,
+  ~ Treatment | Growout
+)
+
+entero_genus_icc_pergo_pairs <- emmeans::contrast(
+  entero_genus_icc_pergo_emm,
+  method = "pairwise",
+  adjust = "BH"
+)
+
+entero_genus_icc_pergo_df <- as.data.frame(
+  summary(
+    entero_genus_icc_pergo_pairs
+  )
+)
+
+
+cat(
+  "\n==============================================\n",
+  "TREATMENT CONTRASTS WITHIN GROWOUT\n",
+  "FROM GLOBAL MODEL\n",
+  "==============================================\n",
+  sep = ""
+)
+
+print(
+  entero_genus_icc_pergo_df
+)
+
+
+# ==============================================================
+# 10. GLOBAL House variance + ICC
+# ==============================================================
+
+entero_genus_icc_global_house <-
+  entero_genus_icc_house_stats(
+    entero_genus_icc_model
+  )
+
+
+cat(
+  "\n==============================================\n",
+  "GLOBAL HOUSE VARIANCE AND ICC\n",
+  "==============================================\n",
+  sep = ""
+)
+
+print(
+  entero_genus_icc_global_house
+)
+
+
+# ==============================================================
+# 11. GLOBAL DHARMa diagnostics
+#
+# Diagnostics remain on the primary global model only.
+# ==============================================================
+
+set.seed(5080)
+
+entero_genus_icc_dharma <- DHARMa::simulateResiduals(
+  fittedModel = entero_genus_icc_model,
+  n = 1000
+)
+
+entero_genus_icc_dispersion <- DHARMa::testDispersion(
+  entero_genus_icc_dharma
+)
+
+entero_genus_icc_outliers <- DHARMa::testOutliers(
+  entero_genus_icc_dharma
+)
+
+entero_genus_icc_quantiles <- DHARMa::testQuantiles(
+  entero_genus_icc_dharma
+)
+
+
+cat(
+  "\n==============================================\n",
+  "GLOBAL DHARMa DIAGNOSTICS\n",
+  "==============================================\n",
+  sep = ""
+)
+
+cat(
+  "Dispersion p =",
+  entero_genus_icc_dispersion$p.value,
+  "\n"
+)
+
+cat(
+  "Outliers p =",
+  entero_genus_icc_outliers$p.value,
+  "\n"
+)
+
+cat(
+  "Quantiles p =",
+  entero_genus_icc_quantiles$p.value,
+  "\n"
+)
+
+
+# ==============================================================
+# 12. Fit GROWOUT-SPECIFIC models
+#
+# Same structure used in the original manuscript-reporting code:
+#
+#   log_copies_raw ~ Treatment + Position + (1 | House)
+#
+# Difference from original:
+#   House is NEVER dropped.
+#
+# These models are used for growout-specific omnibus
+# Treatment and Position tests.
+# ==============================================================
+
+entero_genus_icc_pergo_models <- lapply(
+  levels(entero_genus_icc_df$Growout),
+  function(growout_value) {
+
+    df_i <- entero_genus_icc_df %>%
+      dplyr::filter(
+        as.character(Growout) ==
+          as.character(growout_value)
+      ) %>%
+      droplevels()
+
+
+    model_i <- glmmTMB::glmmTMB(
+      log_copies_raw ~
+        Treatment +
+        Position +
+        (1 | House),
+      family = gaussian(
+        link = "identity"
+      ),
+      data = df_i
+    )
+
+
+    list(
+      Growout =
+        as.character(growout_value),
+
+      N =
+        stats::nobs(model_i),
+
+      model =
+        model_i,
+
+      anova =
+        car::Anova(
+          model_i,
+          type = 3
+        ),
+
+      house =
+        entero_genus_icc_house_stats(
+          model_i
+        )
+    )
+  }
+)
+
+names(entero_genus_icc_pergo_models) <-
+  levels(entero_genus_icc_df$Growout)
+
+
+# ==============================================================
+# 13. Print GROWOUT-SPECIFIC Type III tests + House ICC
+# ==============================================================
+
+cat(
+  "\n==============================================\n",
+  "GROWOUT-SPECIFIC MODELS\n",
+  "==============================================\n",
+  sep = ""
+)
+
+
+for (
+  growout_value in names(
+    entero_genus_icc_pergo_models
+  )
+) {
+
+  one <- getElement(
+    entero_genus_icc_pergo_models,
+    growout_value
+  )
+
+  cat(
+    "\n----------------------------------------------\n",
+    "Growout ",
+    growout_value,
+    "\n",
+    "----------------------------------------------\n",
+    sep = ""
+  )
+
+  print(
+    one$anova
+  )
+
+  cat(
+    "\nHouse variance / ICC:\n"
+  )
+
+  print(
+    one$house
+  )
+}
+
+
+# ==============================================================
+# 14. Build ONE flat results table
+#
+# Keeps the global workspace relatively clean.
+# ==============================================================
+
+entero_genus_icc_build_results <- function() {
+
+  # ------------------------------------------------------------
+  # A. Global Type III fixed effects
+  # ------------------------------------------------------------
+
+  anova_global <- as.data.frame(
+    entero_genus_icc_anova
+  )
+
+  anova_global$Effect <- rownames(
+    anova_global
+  )
+
+  rownames(anova_global) <- NULL
+
+  anova_global <- anova_global[
+    anova_global$Effect != "(Intercept)",
+    ,
+    drop = FALSE
+  ]
+
+
+  rows_global_fixed <- data.frame(
+    Analysis = "Global",
+    Metric = "Enterococcus genus",
+    Growout = "All",
+    Family = "lognormal",
+    Transform = "log",
+    N = stats::nobs(
+      entero_genus_icc_model
+    ),
+    Result_type =
+      "Fixed effect - Type III Wald",
+    Effect_or_contrast =
+      as.character(
+        anova_global$Effect
+      ),
+    Estimate = NA_real_,
+    SE = NA_real_,
+    df = as.numeric(
+      anova_global[, "Df"]
+    ),
+    Test_statistic = as.numeric(
+      anova_global[, "Chisq"]
+    ),
+    P_value = as.numeric(
+      anova_global[, "Pr(>Chisq)"]
+    ),
+    Variance = NA_real_,
+    SD = NA_real_,
+    ICC_adjusted = NA_real_,
+    ICC_unadjusted = NA_real_,
+    Percent_House_adjusted = NA_real_,
+    Percent_House_unadjusted = NA_real_,
+    stringsAsFactors = FALSE
+  )
+
+
+  # ------------------------------------------------------------
+  # B. Global Treatment contrast
+  # ------------------------------------------------------------
+
+  global_stat <-
+    entero_genus_icc_get_stat(
+      entero_genus_icc_global_df
+    )
+
+
+  global_df_value <- if (
+    "df" %in%
+      names(entero_genus_icc_global_df)
+  ) {
+
+    as.numeric(
+      entero_genus_icc_global_df$df
+    )
+
+  } else {
+
+    rep(
+      NA_real_,
+      nrow(entero_genus_icc_global_df)
+    )
+  }
+
+
+  rows_global_pair <- data.frame(
+    Analysis = "Global",
+    Metric = "Enterococcus genus",
+    Growout = "All",
+    Family = "lognormal",
+    Transform = "log",
+    N = stats::nobs(
+      entero_genus_icc_model
+    ),
+    Result_type =
+      "Treatment contrast - global emmeans",
+    Effect_or_contrast =
+      as.character(
+        entero_genus_icc_global_df$contrast
+      ),
+    Estimate = as.numeric(
+      entero_genus_icc_global_df$estimate
+    ),
+    SE = as.numeric(
+      entero_genus_icc_global_df$SE
+    ),
+    df = global_df_value,
+    Test_statistic = global_stat,
+    P_value = as.numeric(
+      entero_genus_icc_global_df$p.value
+    ),
+    Variance = NA_real_,
+    SD = NA_real_,
+    ICC_adjusted = NA_real_,
+    ICC_unadjusted = NA_real_,
+    Percent_House_adjusted = NA_real_,
+    Percent_House_unadjusted = NA_real_,
+    stringsAsFactors = FALSE
+  )
+
+
+  # ------------------------------------------------------------
+  # C. Treatment contrasts within Growout
+  #    FROM GLOBAL MODEL
+  # ------------------------------------------------------------
+
+  pergo_stat <-
+    entero_genus_icc_get_stat(
+      entero_genus_icc_pergo_df
+    )
+
+
+  pergo_df_value <- if (
+    "df" %in%
+      names(entero_genus_icc_pergo_df)
+  ) {
+
+    as.numeric(
+      entero_genus_icc_pergo_df$df
+    )
+
+  } else {
+
+    rep(
+      NA_real_,
+      nrow(entero_genus_icc_pergo_df)
+    )
+  }
+
+
+  rows_pergo_pairs <- data.frame(
+    Analysis = "Within-growout",
+    Metric = "Enterococcus genus",
+    Growout = as.character(
+      entero_genus_icc_pergo_df$Growout
+    ),
+    Family = "lognormal",
+    Transform = "log",
+    N = stats::nobs(
+      entero_genus_icc_model
+    ),
+    Result_type =
+      "Treatment contrast - emmeans",
+    Effect_or_contrast =
+      as.character(
+        entero_genus_icc_pergo_df$contrast
+      ),
+    Estimate = as.numeric(
+      entero_genus_icc_pergo_df$estimate
+    ),
+    SE = as.numeric(
+      entero_genus_icc_pergo_df$SE
+    ),
+    df = pergo_df_value,
+    Test_statistic = pergo_stat,
+    P_value = as.numeric(
+      entero_genus_icc_pergo_df$p.value
+    ),
+    Variance = NA_real_,
+    SD = NA_real_,
+    ICC_adjusted = NA_real_,
+    ICC_unadjusted = NA_real_,
+    Percent_House_adjusted = NA_real_,
+    Percent_House_unadjusted = NA_real_,
+    stringsAsFactors = FALSE
+  )
+
+
+  # ------------------------------------------------------------
+  # D. Global House random effect
+  # ------------------------------------------------------------
+
+  rows_global_house <- data.frame(
+    Analysis = "Global",
+    Metric = "Enterococcus genus",
+    Growout = "All",
+    Family = "lognormal",
+    Transform = "log",
+    N = stats::nobs(
+      entero_genus_icc_model
+    ),
+    Result_type = "Random effect",
+    Effect_or_contrast = "House",
+    Estimate = NA_real_,
+    SE = NA_real_,
+    df = NA_real_,
+    Test_statistic = NA_real_,
+    P_value = NA_real_,
+    Variance =
+      entero_genus_icc_global_house$Variance,
+    SD =
+      entero_genus_icc_global_house$SD,
+    ICC_adjusted =
+      entero_genus_icc_global_house$ICC_adjusted,
+    ICC_unadjusted =
+      entero_genus_icc_global_house$ICC_unadjusted,
+    Percent_House_adjusted =
+      entero_genus_icc_global_house$Percent_House_adjusted,
+    Percent_House_unadjusted =
+      entero_genus_icc_global_house$Percent_House_unadjusted,
+    stringsAsFactors = FALSE
+  )
+
+
+  # ------------------------------------------------------------
+  # E. Global DHARMa diagnostics
+  # ------------------------------------------------------------
+
+  rows_dharma <- data.frame(
+    Analysis = rep(
+      "Global",
+      3
+    ),
+    Metric = rep(
+      "Enterococcus genus",
+      3
+    ),
+    Growout = rep(
+      "All",
+      3
+    ),
+    Family = rep(
+      "lognormal",
+      3
+    ),
+    Transform = rep(
+      "log",
+      3
+    ),
+    N = rep(
+      stats::nobs(
+        entero_genus_icc_model
+      ),
+      3
+    ),
+    Result_type = rep(
+      "DHARMa diagnostic",
+      3
+    ),
+    Effect_or_contrast = c(
+      "Dispersion",
+      "Outliers",
+      "Quantiles"
+    ),
+    Estimate = NA_real_,
+    SE = NA_real_,
+    df = NA_real_,
+    Test_statistic = NA_real_,
+    P_value = c(
+      entero_genus_icc_dispersion$p.value,
+      entero_genus_icc_outliers$p.value,
+      entero_genus_icc_quantiles$p.value
+    ),
+    Variance = NA_real_,
+    SD = NA_real_,
+    ICC_adjusted = NA_real_,
+    ICC_unadjusted = NA_real_,
+    Percent_House_adjusted = NA_real_,
+    Percent_House_unadjusted = NA_real_,
+    stringsAsFactors = FALSE
+  )
+
+
+  # ------------------------------------------------------------
+  # F. Growout-specific Type III + House rows
+  # ------------------------------------------------------------
+
+  rows_pergo_models <- dplyr::bind_rows(
+    lapply(
+      names(
+        entero_genus_icc_pergo_models
+      ),
+      function(growout_value) {
+
+        one <- getElement(
+          entero_genus_icc_pergo_models,
+          growout_value
+        )
+
+
+        anova_i <- as.data.frame(
+          one$anova
+        )
+
+        anova_i$Effect <- rownames(
+          anova_i
+        )
+
+        rownames(anova_i) <- NULL
+
+        anova_i <- anova_i[
+          anova_i$Effect != "(Intercept)",
+          ,
+          drop = FALSE
+        ]
+
+
+        fixed_i <- data.frame(
+          Analysis =
+            "Growout-specific",
+          Metric =
+            "Enterococcus genus",
+          Growout =
+            growout_value,
+          Family =
+            "lognormal",
+          Transform =
+            "log",
+          N =
+            one$N,
+          Result_type =
+            "Fixed effect - Type III Wald",
+          Effect_or_contrast =
+            as.character(
+              anova_i$Effect
+            ),
+          Estimate =
+            NA_real_,
+          SE =
+            NA_real_,
+          df =
+            as.numeric(
+              anova_i[, "Df"]
+            ),
+          Test_statistic =
+            as.numeric(
+              anova_i[, "Chisq"]
+            ),
+          P_value =
+            as.numeric(
+              anova_i[, "Pr(>Chisq)"]
+            ),
+          Variance =
+            NA_real_,
+          SD =
+            NA_real_,
+          ICC_adjusted =
+            NA_real_,
+          ICC_unadjusted =
+            NA_real_,
+          Percent_House_adjusted =
+            NA_real_,
+          Percent_House_unadjusted =
+            NA_real_,
+          stringsAsFactors = FALSE
+        )
+
+
+        house_i <- data.frame(
+          Analysis =
+            "Growout-specific",
+          Metric =
+            "Enterococcus genus",
+          Growout =
+            growout_value,
+          Family =
+            "lognormal",
+          Transform =
+            "log",
+          N =
+            one$N,
+          Result_type =
+            "Random effect",
+          Effect_or_contrast =
+            "House",
+          Estimate =
+            NA_real_,
+          SE =
+            NA_real_,
+          df =
+            NA_real_,
+          Test_statistic =
+            NA_real_,
+          P_value =
+            NA_real_,
+          Variance =
+            one$house$Variance,
+          SD =
+            one$house$SD,
+          ICC_adjusted =
+            one$house$ICC_adjusted,
+          ICC_unadjusted =
+            one$house$ICC_unadjusted,
+          Percent_House_adjusted =
+            one$house$Percent_House_adjusted,
+          Percent_House_unadjusted =
+            one$house$Percent_House_unadjusted,
+          stringsAsFactors = FALSE
+        )
+
+
+        dplyr::bind_rows(
+          fixed_i,
+          house_i
+        )
+      }
+    )
+  )
+
+
+  # ------------------------------------------------------------
+  # G. Combine everything
+  # ------------------------------------------------------------
+
+  dplyr::bind_rows(
+    rows_global_fixed,
+    rows_global_pair,
+    rows_global_house,
+    rows_dharma,
+    rows_pergo_models,
+    rows_pergo_pairs
+  ) %>%
+
+    dplyr::mutate(
+
+      Analysis_order =
+        dplyr::case_when(
+          Analysis == "Global" ~ 1,
+          Analysis == "Growout-specific" ~ 2,
+          Analysis == "Within-growout" ~ 3,
+          TRUE ~ 4
+        ),
+
+      Growout_order =
+        dplyr::case_when(
+          Growout == "All" ~ 0,
+          Growout == "1" ~ 1,
+          Growout == "2" ~ 2,
+          TRUE ~ 99
+        ),
+
+      Result_order =
+        dplyr::case_when(
+          Result_type ==
+            "Fixed effect - Type III Wald" ~ 1,
+
+          Result_type ==
+            "Treatment contrast - global emmeans" ~ 2,
+
+          Result_type ==
+            "Treatment contrast - emmeans" ~ 3,
+
+          Result_type ==
+            "Random effect" ~ 4,
+
+          Result_type ==
+            "DHARMa diagnostic" ~ 5,
+
+          TRUE ~ 99
+        )
+    ) %>%
+
+    dplyr::arrange(
+      Analysis_order,
+      Growout_order,
+      Result_order
+    ) %>%
+
+    dplyr::select(
+      -Analysis_order,
+      -Growout_order,
+      -Result_order
+    )
+}
+
+
+entero_genus_icc_results <-
+  entero_genus_icc_build_results()
+
+
+# ==============================================================
+# 15. Print complete results
+# ==============================================================
+
+cat(
+  "\n==============================================\n",
+  "COMPLETE ENTEROCOCCUS GENUS dPCR RESULTS\n",
+  "==============================================\n",
+  sep = ""
+)
+
+print(
+  entero_genus_icc_results,
+  n = Inf
+)
+
+
+# ==============================================================
+# 16. Print key manuscript results
+# ==============================================================
+
+cat(
+  "\n==============================================\n",
+  "GLOBAL FIXED EFFECTS\n",
+  "==============================================\n",
+  sep = ""
+)
+
+print(
+  entero_genus_icc_results %>%
+    dplyr::filter(
+      Analysis == "Global",
+      Result_type ==
+        "Fixed effect - Type III Wald"
+    ) %>%
+    dplyr::select(
+      Effect_or_contrast,
+      Test_statistic,
+      df,
+      P_value
+    ),
+  n = Inf
+)
+
+
+cat(
+  "\n==============================================\n",
+  "GROWOUT-SPECIFIC FIXED EFFECTS\n",
+  "==============================================\n",
+  sep = ""
+)
+
+print(
+  entero_genus_icc_results %>%
+    dplyr::filter(
+      Analysis == "Growout-specific",
+      Result_type ==
+        "Fixed effect - Type III Wald"
+    ) %>%
+    dplyr::select(
+      Growout,
+      Effect_or_contrast,
+      Test_statistic,
+      df,
+      P_value
+    ),
+  n = Inf
+)
+
+
+cat(
+  "\n==============================================\n",
+  "TREATMENT CONTRASTS WITHIN GROWOUT\n",
+  "==============================================\n",
+  sep = ""
+)
+
+print(
+  entero_genus_icc_results %>%
+    dplyr::filter(
+      Analysis == "Within-growout",
+      Result_type ==
+        "Treatment contrast - emmeans"
+    ) %>%
+    dplyr::select(
+      Growout,
+      Effect_or_contrast,
+      Estimate,
+      SE,
+      Test_statistic,
+      P_value
+    ),
+  n = Inf
+)
+
+
+cat(
+  "\n==============================================\n",
+  "HOUSE RANDOM-EFFECT VARIANCE AND ICC\n",
+  "==============================================\n",
+  sep = ""
+)
+
+print(
+  entero_genus_icc_results %>%
+    dplyr::filter(
+      Result_type == "Random effect"
+    ) %>%
+    dplyr::select(
+      Analysis,
+      Growout,
+      Variance,
+      SD,
+      ICC_adjusted,
+      ICC_unadjusted,
+      Percent_House_adjusted,
+      Percent_House_unadjusted
+    ),
+  n = Inf
+)
+
+
+# ==============================================================
+# 17. Plot GLOBAL DHARMa diagnostics
+# ==============================================================
+
+plot(
+  entero_genus_icc_dharma,
+  main = "Enterococcus genus dPCR"
+)
+
+
+# ==============================================================
+# 18. Save ONE flat results table to ONE Excel worksheet
+# ==============================================================
+
+entero_genus_icc_excel_file <-
+  "Enterococcus Genus dPCR GLMM Summary - House Retained with ICC.xlsx"
+
+
+writexl::write_xlsx(
+  list(
+    "dPCR GLMM Results" =
+      entero_genus_icc_results
+  ),
+  path =
+    entero_genus_icc_excel_file
+)
+
+
+# ==============================================================
+# 19. Restore original contrast settings
+# ==============================================================
+
+options(
+  old_contr_genus_icc
+)
+
+
+# ==============================================================
+# 20. Confirm saved file
+# ==============================================================
+
+cat(
+  "\nExcel file written to:\n",
+  normalizePath(
+    entero_genus_icc_excel_file,
+    mustWork = FALSE
+  ),
+  "\n"
+)
+
+```
+
+```{r}
+# ==============================================================
+# SPECIES-LEVEL ENTEROCOCCUS dPCR GLMM
+# RAW COPIES PER GRAM
+# HOUSE RETAINED + HOUSE ICC
+#
+# Species:
+#   Cecorum
+#   Hirae
+#
+# Distribution:
+#   Tweedie with log link first
+#   Gamma with log link + 0.1 response adjustment if Tweedie fails
+#
+# GLOBAL MODEL:
+#   copies ~ Treatment * Growout + Position + (1 | House)
+#
+# GROWOUT-SPECIFIC MODELS:
+#   copies ~ Treatment + Position + (1 | House)
+#
+# House is ALWAYS retained because House is the experimental unit.
+#
+# Treatment contrasts within Growout are obtained from the
+# GLOBAL model using emmeans, consistent with the manuscript.
+#
+# Growout-specific models are used for omnibus Treatment and
+# Position tests, consistent with the original analysis structure.
+#
+# DHARMa diagnostics are run on the GLOBAL models only,
+# consistent with the original model-assessment workflow.
+#
+# Output includes:
+#   - Global Type III Wald tests
+#   - Global Treatment contrasts
+#   - Treatment contrasts within each Growout
+#   - Growout-specific Type III Treatment and Position tests
+#   - Global and growout-specific House variance and SD
+#   - Global and growout-specific adjusted/unadjusted ICC
+#   - Global DHARMa diagnostics
+#
+# Saves:
+#   ONE Excel workbook
+#   ONE worksheet
+#   ONE flat results table
+# ==============================================================
+
+
+# ==============================================================
+# 0. Packages
+# ==============================================================
+
+library(glmmTMB)
+library(car)
+library(emmeans)
+library(DHARMa)
+library(dplyr)
+library(performance)
+library(writexl)
+
+
+# ==============================================================
+# 1. Check required columns
+# ==============================================================
+
+species_house_icc_required <- c(
+  "Target..Name.",
+  "Growout",
+  "Treatment",
+  "House",
+  "Position",
+  "copies_per_g_litter"
+)
+
+species_house_icc_missing <- setdiff(
+  species_house_icc_required,
+  names(entero_species_merged)
+)
+
+if (length(species_house_icc_missing) > 0) {
+
+  stop(
+    "entero_species_merged is missing required columns: ",
+    paste(
+      species_house_icc_missing,
+      collapse = ", "
+    )
+  )
+}
+
+
+# ==============================================================
+# 2. Type III contrast settings
+# ==============================================================
+
+old_contr_species_house_icc <- options(
+  contrasts = c(
+    "contr.sum",
+    "contr.poly"
+  )
+)
+
+
+# ==============================================================
+# 3. Helper: extract emmeans test statistic
+# ==============================================================
+
+species_house_icc_get_stat <- function(df) {
+
+  if ("z.ratio" %in% names(df)) {
+
+    return(
+      as.numeric(
+        df$z.ratio
+      )
+    )
+  }
+
+  if ("t.ratio" %in% names(df)) {
+
+    return(
+      as.numeric(
+        df$t.ratio
+      )
+    )
+  }
+
+  rep(
+    NA_real_,
+    nrow(df)
+  )
+}
+
+
+# ==============================================================
+# 4. Helper: House variance + ICC
+#
+# tolerance = 0 allows very small House variance estimates
+# to be retained and reported.
+#
+# approximation = "lognormal" is used for these non-Gaussian
+# models when estimating the distribution-specific variance.
+# ==============================================================
+
+species_house_icc_get_house_stats <- function(model) {
+
+  vc <- glmmTMB::VarCorr(
+    model
+  )$cond
+
+  house_variance <- as.numeric(
+    vc$House[1, 1]
+  )
+
+  house_sd <- sqrt(
+    house_variance
+  )
+
+
+  icc_result <- suppressWarnings(
+    tryCatch(
+      performance::icc(
+        model,
+        tolerance = 0,
+        approximation = "lognormal"
+      ),
+      error = function(e) NULL
+    )
+  )
+
+
+  if (is.null(icc_result)) {
+
+    icc_adjusted <- NA_real_
+    icc_unadjusted <- NA_real_
+
+  } else {
+
+    icc_adjusted <- as.numeric(
+      icc_result$ICC_adjusted[1]
+    )
+
+    icc_unadjusted <- as.numeric(
+      icc_result$ICC_unadjusted[1]
+    )
+  }
+
+
+  data.frame(
+    Variance =
+      house_variance,
+
+    SD =
+      house_sd,
+
+    ICC_adjusted =
+      icc_adjusted,
+
+    ICC_unadjusted =
+      icc_unadjusted,
+
+    Percent_House_adjusted =
+      icc_adjusted * 100,
+
+    Percent_House_unadjusted =
+      icc_unadjusted * 100
+  )
+}
+
+
+# ==============================================================
+# 5. Helper: fit model with established species workflow
+#
+# Tweedie is attempted first because it preserves zeros.
+#
+# If Tweedie fails:
+#   copies + 0.1
+#   Gamma with log link
+#
+# House is NEVER removed.
+# ==============================================================
+
+species_house_icc_fit_model <- function(
+  df,
+  scope = c(
+    "global",
+    "growout"
+  )
+) {
+
+  scope <- match.arg(
+    scope
+  )
+
+
+  # ------------------------------------------------------------
+  # Global model
+  # ------------------------------------------------------------
+
+  if (scope == "global") {
+
+    tweedie_model <- tryCatch(
+
+      glmmTMB::glmmTMB(
+        copies_raw ~
+          Treatment * Growout +
+          Position +
+          (1 | House),
+
+        family = glmmTMB::tweedie(
+          link = "log"
+        ),
+
+        data = df
+      ),
+
+      error = function(e) NULL
+    )
+
+
+    if (!is.null(tweedie_model)) {
+
+      return(
+        list(
+          model =
+            tweedie_model,
+
+          family =
+            "tweedie",
+
+          response_adjustment =
+            "none"
+        )
+      )
+    }
+
+
+    df$copies_adj <-
+      df$copies_raw + 0.1
+
+
+    gamma_model <- glmmTMB::glmmTMB(
+      copies_adj ~
+        Treatment * Growout +
+        Position +
+        (1 | House),
+
+      family = stats::Gamma(
+        link = "log"
+      ),
+
+      data = df
+    )
+
+
+    return(
+      list(
+        model =
+          gamma_model,
+
+        family =
+          "gamma",
+
+        response_adjustment =
+          "+0.1"
+      )
+    )
+  }
+
+
+  # ------------------------------------------------------------
+  # Growout-specific model
+  # ------------------------------------------------------------
+
+  tweedie_model <- tryCatch(
+
+    glmmTMB::glmmTMB(
+      copies_raw ~
+        Treatment +
+        Position +
+        (1 | House),
+
+      family = glmmTMB::tweedie(
+        link = "log"
+      ),
+
+      data = df
+    ),
+
+    error = function(e) NULL
+  )
+
+
+  if (!is.null(tweedie_model)) {
+
+    return(
+      list(
+        model =
+          tweedie_model,
+
+        family =
+          "tweedie",
+
+        response_adjustment =
+          "none"
+      )
+    )
+  }
+
+
+  df$copies_adj <-
+    df$copies_raw + 0.1
+
+
+  gamma_model <- glmmTMB::glmmTMB(
+    copies_adj ~
+      Treatment +
+      Position +
+      (1 | House),
+
+    family = stats::Gamma(
+      link = "log"
+    ),
+
+    data = df
+  )
+
+
+  list(
+    model =
+      gamma_model,
+
+    family =
+      "gamma",
+
+    response_adjustment =
+      "+0.1"
+  )
+}
+
+
+# ==============================================================
+# 6. Helper: fit ONE species
+#
+# For each species:
+#   - one global model
+#   - one model within Growout 1
+#   - one model within Growout 2
+#
+# Only the GLOBAL model receives DHARMa simulations.
+# ==============================================================
+
+fit_one_species_house_icc <- function(
+  target_species,
+  n_sims = 1000
+) {
+
+  # ------------------------------------------------------------
+  # Prepare species data
+  # ------------------------------------------------------------
+
+  df <- entero_species_merged %>%
+    dplyr::filter(
+      Target..Name. == target_species
+    ) %>%
+    dplyr::mutate(
+      Growout =
+        factor(Growout),
+
+      Treatment =
+        factor(Treatment),
+
+      House =
+        factor(House),
+
+      Position =
+        factor(Position),
+
+      copies_raw =
+        copies_per_g_litter
+    ) %>%
+    dplyr::filter(
+      is.finite(copies_raw),
+      copies_raw >= 0
+    ) %>%
+    droplevels()
+
+
+  n_zero <- sum(
+    df$copies_raw == 0,
+    na.rm = TRUE
+  )
+
+  n_nonzero <- sum(
+    df$copies_raw > 0,
+    na.rm = TRUE
+  )
+
+
+  cat(
+    "\n============================================================\n",
+    "Species: ",
+    target_species,
+    "\n",
+    "n = ",
+    nrow(df),
+    "\n",
+    "Zeros = ",
+    n_zero,
+    "\n",
+    "Non-zeros = ",
+    n_nonzero,
+    "\n",
+    "============================================================\n",
+    sep = ""
+  )
+
+
+  # ============================================================
+  # GLOBAL MODEL
+  # ============================================================
+
+  global_fit <-
+    species_house_icc_fit_model(
+      df = df,
+      scope = "global"
+    )
+
+
+  model_full <-
+    global_fit$model
+
+  family_name <-
+    global_fit$family
+
+  response_adjustment <-
+    global_fit$response_adjustment
+
+
+  cat(
+    "Global family:",
+    family_name,
+    "\n"
+  )
+
+  cat(
+    "Global response adjustment:",
+    response_adjustment,
+    "\n"
+  )
+
+
+  # ------------------------------------------------------------
+  # Global Type III Wald tests
+  # ------------------------------------------------------------
+
+  anova_result <- car::Anova(
+    model_full,
+    type = 3
+  )
+
+
+  cat(
+    "\n--- Global Type III Wald Tests ---\n"
+  )
+
+  print(
+    anova_result
+  )
+
+
+  # ------------------------------------------------------------
+  # Global Treatment contrast
+  # ------------------------------------------------------------
+
+  global_emm <- emmeans::emmeans(
+    model_full,
+    ~ Treatment
+  )
+
+  global_pairs <- emmeans::contrast(
+    global_emm,
+    method = "pairwise",
+    adjust = "BH"
+  )
+
+
+  cat(
+    "\n--- Global Treatment Effect ---\n"
+  )
+
+  print(
+    summary(
+      global_pairs
+    )
+  )
+
+
+  # ------------------------------------------------------------
+  # Treatment contrasts within Growout
+  #
+  # IMPORTANT:
+  # These are obtained from the GLOBAL model, as in the
+  # original analysis and manuscript Methods.
+  # ------------------------------------------------------------
+
+  pergrowout_emm <- emmeans::emmeans(
+    model_full,
+    ~ Treatment | Growout
+  )
+
+  pergrowout_pairs <- emmeans::contrast(
+    pergrowout_emm,
+    method = "pairwise",
+    adjust = "BH"
+  )
+
+
+  cat(
+    "\n--- Treatment Effects Within Growout ---\n"
+  )
+
+  print(
+    summary(
+      pergrowout_pairs
+    )
+  )
+
+
+  # ------------------------------------------------------------
+  # Global House variance + ICC
+  # ------------------------------------------------------------
+
+  global_house <-
+    species_house_icc_get_house_stats(
+      model_full
+    )
+
+
+  cat(
+    "\n--- Global House Variance / ICC ---\n"
+  )
+
+  print(
+    global_house
+  )
+
+
+  # ------------------------------------------------------------
+  # GLOBAL DHARMa only
+  # ------------------------------------------------------------
+
+  set.seed(
+    5080 +
+      match(
+        target_species,
+        c(
+          "Cecorum",
+          "Hirae"
+        )
+      )
+  )
+
+  simres <- DHARMa::simulateResiduals(
+    fittedModel = model_full,
+    n = n_sims
+  )
+
+  disp_test <- DHARMa::testDispersion(
+    simres
+  )
+
+  out_test <- DHARMa::testOutliers(
+    simres
+  )
+
+  quant_test <- DHARMa::testQuantiles(
+    simres
+  )
+
+
+  cat(
+    "\n--- Global DHARMa Diagnostics ---\n"
+  )
+
+  cat(
+    "Dispersion p =",
+    disp_test$p.value,
+    "\n"
+  )
+
+  cat(
+    "Outliers p =",
+    out_test$p.value,
+    "\n"
+  )
+
+  cat(
+    "Quantiles p =",
+    quant_test$p.value,
+    "\n"
+  )
+
+
+  # ============================================================
+  # GROWOUT-SPECIFIC MODELS
+  #
+  # Same structure as original manuscript reporting:
+  #
+  #   copies ~ Treatment + Position + (1 | House)
+  #
+  # Difference:
+  #   House is NEVER dropped.
+  #
+  # No additional DHARMa simulations are run here.
+  # ============================================================
+
+  pergo_models <- lapply(
+    levels(df$Growout),
+    function(growout_value) {
+
+      df_i <- df %>%
+        dplyr::filter(
+          as.character(Growout) ==
+            as.character(growout_value)
+        ) %>%
+        droplevels()
+
+
+      n_zero_i <- sum(
+        df_i$copies_raw == 0,
+        na.rm = TRUE
+      )
+
+      n_nonzero_i <- sum(
+        df_i$copies_raw > 0,
+        na.rm = TRUE
+      )
+
+
+      fit_i <-
+        species_house_icc_fit_model(
+          df = df_i,
+          scope = "growout"
+        )
+
+
+      model_i <-
+        fit_i$model
+
+
+      anova_i <- car::Anova(
+        model_i,
+        type = 3
+      )
+
+
+      house_i <-
+        species_house_icc_get_house_stats(
+          model_i
+        )
+
+
+      cat(
+        "\n----------------------------------------------\n",
+        target_species,
+        " | Growout ",
+        growout_value,
+        "\n",
+        "Family: ",
+        fit_i$family,
+        "\n",
+        "Response adjustment: ",
+        fit_i$response_adjustment,
+        "\n",
+        "----------------------------------------------\n",
+        sep = ""
+      )
+
+
+      print(
+        anova_i
+      )
+
+
+      cat(
+        "\nHouse variance / ICC:\n"
+      )
+
+      print(
+        house_i
+      )
+
+
+      list(
+        Growout =
+          as.character(growout_value),
+
+        N =
+          stats::nobs(model_i),
+
+        Zeros =
+          n_zero_i,
+
+        Nonzeros =
+          n_nonzero_i,
+
+        Family =
+          fit_i$family,
+
+        Response_adjustment =
+          fit_i$response_adjustment,
+
+        model =
+          model_i,
+
+        anova =
+          anova_i,
+
+        house =
+          house_i
+      )
+    }
+  )
+
+
+  names(pergo_models) <-
+    levels(df$Growout)
+
+
+  # ------------------------------------------------------------
+  # Return one complete object for species
+  # ------------------------------------------------------------
+
+  list(
+    species =
+      target_species,
+
+    family =
+      family_name,
+
+    response_adjustment =
+      response_adjustment,
+
+    n =
+      stats::nobs(model_full),
+
+    n_zero =
+      n_zero,
+
+    n_nonzero =
+      n_nonzero,
+
+    model =
+      model_full,
+
+    anova =
+      anova_result,
+
+    global_pairs =
+      global_pairs,
+
+    pergrowout_pairs =
+      pergrowout_pairs,
+
+    global_house =
+      global_house,
+
+    dharma_sim =
+      simres,
+
+    dharma_dispersion =
+      disp_test,
+
+    dharma_outliers =
+      out_test,
+
+    dharma_quantiles =
+      quant_test,
+
+    pergo_models =
+      pergo_models
+  )
+}
+
+
+# ==============================================================
+# 7. Fit both species
+# ==============================================================
+
+species_house_icc_targets <- c(
+  "Cecorum",
+  "Hirae"
+)
+
+
+species_house_icc_models <- lapply(
+  species_house_icc_targets,
+  function(species_name) {
+
+    fit_one_species_house_icc(
+      target_species =
+        species_name,
+
+      n_sims =
+        1000
+    )
+  }
+)
+
+
+names(species_house_icc_models) <-
+  species_house_icc_targets
+
+
+# ==============================================================
+# 8. Helper: convert ONE species into flat result rows
+# ==============================================================
+
+species_house_icc_build_rows <- function(
+  model_result
+) {
+
+  species_name <-
+    model_result$species
+
+  family_name <-
+    model_result$family
+
+  adjustment_name <-
+    model_result$response_adjustment
+
+  model_n <-
+    model_result$n
+
+  n_zero <-
+    model_result$n_zero
+
+  n_nonzero <-
+    model_result$n_nonzero
+
+
+  # ============================================================
+  # A. GLOBAL Type III fixed effects
+  # ============================================================
+
+  anova_global <- as.data.frame(
+    model_result$anova
+  )
+
+  anova_global$Effect <- rownames(
+    anova_global
+  )
+
+  rownames(
+    anova_global
+  ) <- NULL
+
+
+  anova_global <- anova_global[
+    anova_global$Effect != "(Intercept)",
+    ,
+    drop = FALSE
+  ]
+
+
+  rows_global_fixed <- data.frame(
+
+    Analysis =
+      "Global",
+
+    Species =
+      species_name,
+
+    Growout =
+      "All",
+
+    Family =
+      family_name,
+
+    Response_adjustment =
+      adjustment_name,
+
+    N =
+      model_n,
+
+    Zeros =
+      n_zero,
+
+    Nonzeros =
+      n_nonzero,
+
+    Result_type =
+      "Fixed effect - Type III Wald",
+
+    Effect_or_contrast =
+      as.character(
+        anova_global$Effect
+      ),
+
+    Estimate =
+      NA_real_,
+
+    SE =
+      NA_real_,
+
+    df =
+      as.numeric(
+        anova_global[, "Df"]
+      ),
+
+    Test_statistic =
+      as.numeric(
+        anova_global[, "Chisq"]
+      ),
+
+    P_value =
+      as.numeric(
+        anova_global[, "Pr(>Chisq)"]
+      ),
+
+    Variance =
+      NA_real_,
+
+    SD =
+      NA_real_,
+
+    ICC_adjusted =
+      NA_real_,
+
+    ICC_unadjusted =
+      NA_real_,
+
+    Percent_House_adjusted =
+      NA_real_,
+
+    Percent_House_unadjusted =
+      NA_real_,
+
+    stringsAsFactors =
+      FALSE
+  )
+
+
+  # ============================================================
+  # B. GLOBAL Treatment contrast
+  # ============================================================
+
+  global_df <- as.data.frame(
+    summary(
+      model_result$global_pairs
+    )
+  )
+
+
+  global_stat <-
+    species_house_icc_get_stat(
+      global_df
+    )
+
+
+  global_df_value <- if (
+    "df" %in% names(global_df)
+  ) {
+
+    as.numeric(
+      global_df$df
+    )
+
+  } else {
+
+    rep(
+      NA_real_,
+      nrow(global_df)
+    )
+  }
+
+
+  rows_global_pair <- data.frame(
+
+    Analysis =
+      "Global",
+
+    Species =
+      species_name,
+
+    Growout =
+      "All",
+
+    Family =
+      family_name,
+
+    Response_adjustment =
+      adjustment_name,
+
+    N =
+      model_n,
+
+    Zeros =
+      n_zero,
+
+    Nonzeros =
+      n_nonzero,
+
+    Result_type =
+      "Treatment contrast - global emmeans",
+
+    Effect_or_contrast =
+      as.character(
+        global_df$contrast
+      ),
+
+    Estimate =
+      as.numeric(
+        global_df$estimate
+      ),
+
+    SE =
+      as.numeric(
+        global_df$SE
+      ),
+
+    df =
+      global_df_value,
+
+    Test_statistic =
+      global_stat,
+
+    P_value =
+      as.numeric(
+        global_df$p.value
+      ),
+
+    Variance =
+      NA_real_,
+
+    SD =
+      NA_real_,
+
+    ICC_adjusted =
+      NA_real_,
+
+    ICC_unadjusted =
+      NA_real_,
+
+    Percent_House_adjusted =
+      NA_real_,
+
+    Percent_House_unadjusted =
+      NA_real_,
+
+    stringsAsFactors =
+      FALSE
+  )
+
+
+  # ============================================================
+  # C. Treatment contrasts within Growout
+  #    FROM GLOBAL MODEL
+  # ============================================================
+
+  pergo_df <- as.data.frame(
+    summary(
+      model_result$pergrowout_pairs
+    )
+  )
+
+
+  pergo_stat <-
+    species_house_icc_get_stat(
+      pergo_df
+    )
+
+
+  pergo_df_value <- if (
+    "df" %in% names(pergo_df)
+  ) {
+
+    as.numeric(
+      pergo_df$df
+    )
+
+  } else {
+
+    rep(
+      NA_real_,
+      nrow(pergo_df)
+    )
+  }
+
+
+  rows_pergo_pairs <- data.frame(
+
+    Analysis =
+      "Within-growout",
+
+    Species =
+      species_name,
+
+    Growout =
+      as.character(
+        pergo_df$Growout
+      ),
+
+    Family =
+      family_name,
+
+    Response_adjustment =
+      adjustment_name,
+
+    N =
+      model_n,
+
+    Zeros =
+      n_zero,
+
+    Nonzeros =
+      n_nonzero,
+
+    Result_type =
+      "Treatment contrast - emmeans",
+
+    Effect_or_contrast =
+      as.character(
+        pergo_df$contrast
+      ),
+
+    Estimate =
+      as.numeric(
+        pergo_df$estimate
+      ),
+
+    SE =
+      as.numeric(
+        pergo_df$SE
+      ),
+
+    df =
+      pergo_df_value,
+
+    Test_statistic =
+      pergo_stat,
+
+    P_value =
+      as.numeric(
+        pergo_df$p.value
+      ),
+
+    Variance =
+      NA_real_,
+
+    SD =
+      NA_real_,
+
+    ICC_adjusted =
+      NA_real_,
+
+    ICC_unadjusted =
+      NA_real_,
+
+    Percent_House_adjusted =
+      NA_real_,
+
+    Percent_House_unadjusted =
+      NA_real_,
+
+    stringsAsFactors =
+      FALSE
+  )
+
+
+  # ============================================================
+  # D. GLOBAL House random effect
+  # ============================================================
+
+  rows_global_house <- data.frame(
+
+    Analysis =
+      "Global",
+
+    Species =
+      species_name,
+
+    Growout =
+      "All",
+
+    Family =
+      family_name,
+
+    Response_adjustment =
+      adjustment_name,
+
+    N =
+      model_n,
+
+    Zeros =
+      n_zero,
+
+    Nonzeros =
+      n_nonzero,
+
+    Result_type =
+      "Random effect",
+
+    Effect_or_contrast =
+      "House",
+
+    Estimate =
+      NA_real_,
+
+    SE =
+      NA_real_,
+
+    df =
+      NA_real_,
+
+    Test_statistic =
+      NA_real_,
+
+    P_value =
+      NA_real_,
+
+    Variance =
+      model_result$global_house$Variance,
+
+    SD =
+      model_result$global_house$SD,
+
+    ICC_adjusted =
+      model_result$global_house$ICC_adjusted,
+
+    ICC_unadjusted =
+      model_result$global_house$ICC_unadjusted,
+
+    Percent_House_adjusted =
+      model_result$global_house$Percent_House_adjusted,
+
+    Percent_House_unadjusted =
+      model_result$global_house$Percent_House_unadjusted,
+
+    stringsAsFactors =
+      FALSE
+  )
+
+
+  # ============================================================
+  # E. GLOBAL DHARMa diagnostics
+  # ============================================================
+
+  rows_dharma <- data.frame(
+
+    Analysis = rep(
+      "Global",
+      3
+    ),
+
+    Species = rep(
+      species_name,
+      3
+    ),
+
+    Growout = rep(
+      "All",
+      3
+    ),
+
+    Family = rep(
+      family_name,
+      3
+    ),
+
+    Response_adjustment = rep(
+      adjustment_name,
+      3
+    ),
+
+    N = rep(
+      model_n,
+      3
+    ),
+
+    Zeros = rep(
+      n_zero,
+      3
+    ),
+
+    Nonzeros = rep(
+      n_nonzero,
+      3
+    ),
+
+    Result_type = rep(
+      "DHARMa diagnostic",
+      3
+    ),
+
+    Effect_or_contrast = c(
+      "Dispersion",
+      "Outliers",
+      "Quantiles"
+    ),
+
+    Estimate =
+      NA_real_,
+
+    SE =
+      NA_real_,
+
+    df =
+      NA_real_,
+
+    Test_statistic =
+      NA_real_,
+
+    P_value = c(
+      model_result$dharma_dispersion$p.value,
+      model_result$dharma_outliers$p.value,
+      model_result$dharma_quantiles$p.value
+    ),
+
+    Variance =
+      NA_real_,
+
+    SD =
+      NA_real_,
+
+    ICC_adjusted =
+      NA_real_,
+
+    ICC_unadjusted =
+      NA_real_,
+
+    Percent_House_adjusted =
+      NA_real_,
+
+    Percent_House_unadjusted =
+      NA_real_,
+
+    stringsAsFactors =
+      FALSE
+  )
+
+
+  # ============================================================
+  # F. GROWOUT-SPECIFIC Type III + House rows
+  # ============================================================
+
+  rows_pergo_models <- dplyr::bind_rows(
+    lapply(
+      names(
+        model_result$pergo_models
+      ),
+      function(growout_value) {
+
+        one <- getElement(
+          model_result$pergo_models,
+          growout_value
+        )
+
+
+        # --------------------------------------------------------
+        # Type III Treatment + Position
+        # --------------------------------------------------------
+
+        anova_i <- as.data.frame(
+          one$anova
+        )
+
+        anova_i$Effect <- rownames(
+          anova_i
+        )
+
+        rownames(
+          anova_i
+        ) <- NULL
+
+
+        anova_i <- anova_i[
+          anova_i$Effect != "(Intercept)",
+          ,
+          drop = FALSE
+        ]
+
+
+        fixed_i <- data.frame(
+
+          Analysis =
+            "Growout-specific",
+
+          Species =
+            species_name,
+
+          Growout =
+            growout_value,
+
+          Family =
+            one$Family,
+
+          Response_adjustment =
+            one$Response_adjustment,
+
+          N =
+            one$N,
+
+          Zeros =
+            one$Zeros,
+
+          Nonzeros =
+            one$Nonzeros,
+
+          Result_type =
+            "Fixed effect - Type III Wald",
+
+          Effect_or_contrast =
+            as.character(
+              anova_i$Effect
+            ),
+
+          Estimate =
+            NA_real_,
+
+          SE =
+            NA_real_,
+
+          df =
+            as.numeric(
+              anova_i[, "Df"]
+            ),
+
+          Test_statistic =
+            as.numeric(
+              anova_i[, "Chisq"]
+            ),
+
+          P_value =
+            as.numeric(
+              anova_i[, "Pr(>Chisq)"]
+            ),
+
+          Variance =
+            NA_real_,
+
+          SD =
+            NA_real_,
+
+          ICC_adjusted =
+            NA_real_,
+
+          ICC_unadjusted =
+            NA_real_,
+
+          Percent_House_adjusted =
+            NA_real_,
+
+          Percent_House_unadjusted =
+            NA_real_,
+
+          stringsAsFactors =
+            FALSE
+        )
+
+
+        # --------------------------------------------------------
+        # House variance + ICC
+        # --------------------------------------------------------
+
+        house_i <- data.frame(
+
+          Analysis =
+            "Growout-specific",
+
+          Species =
+            species_name,
+
+          Growout =
+            growout_value,
+
+          Family =
+            one$Family,
+
+          Response_adjustment =
+            one$Response_adjustment,
+
+          N =
+            one$N,
+
+          Zeros =
+            one$Zeros,
+
+          Nonzeros =
+            one$Nonzeros,
+
+          Result_type =
+            "Random effect",
+
+          Effect_or_contrast =
+            "House",
+
+          Estimate =
+            NA_real_,
+
+          SE =
+            NA_real_,
+
+          df =
+            NA_real_,
+
+          Test_statistic =
+            NA_real_,
+
+          P_value =
+            NA_real_,
+
+          Variance =
+            one$house$Variance,
+
+          SD =
+            one$house$SD,
+
+          ICC_adjusted =
+            one$house$ICC_adjusted,
+
+          ICC_unadjusted =
+            one$house$ICC_unadjusted,
+
+          Percent_House_adjusted =
+            one$house$Percent_House_adjusted,
+
+          Percent_House_unadjusted =
+            one$house$Percent_House_unadjusted,
+
+          stringsAsFactors =
+            FALSE
+        )
+
+
+        dplyr::bind_rows(
+          fixed_i,
+          house_i
+        )
+      }
+    )
+  )
+
+
+  # ============================================================
+  # G. Combine everything for species
+  # ============================================================
+
+  dplyr::bind_rows(
+    rows_global_fixed,
+    rows_global_pair,
+    rows_global_house,
+    rows_dharma,
+    rows_pergo_models,
+    rows_pergo_pairs
+  )
+}
+
+
+# ==============================================================
+# 9. Convert BOTH species into ONE flat results table
+# ==============================================================
+
+species_house_icc_results <- dplyr::bind_rows(
+  lapply(
+    species_house_icc_targets,
+    function(species_name) {
+
+      model_result <- getElement(
+        species_house_icc_models,
+        species_name
+      )
+
+      species_house_icc_build_rows(
+        model_result
+      )
+    }
+  )
+)
+
+
+# ==============================================================
+# 10. Order results
+# ==============================================================
+
+species_house_icc_results <- species_house_icc_results %>%
+  dplyr::mutate(
+
+    Species_order = match(
+      Species,
+      c(
+        "Cecorum",
+        "Hirae"
+      )
+    ),
+
+    Analysis_order =
+      dplyr::case_when(
+        Analysis == "Global" ~ 1,
+        Analysis == "Growout-specific" ~ 2,
+        Analysis == "Within-growout" ~ 3,
+        TRUE ~ 4
+      ),
+
+    Growout_order =
+      dplyr::case_when(
+        Growout == "All" ~ 0,
+        Growout == "1" ~ 1,
+        Growout == "2" ~ 2,
+        TRUE ~ 99
+      ),
+
+    Result_order =
+      dplyr::case_when(
+
+        Result_type ==
+          "Fixed effect - Type III Wald" ~ 1,
+
+        Result_type ==
+          "Treatment contrast - global emmeans" ~ 2,
+
+        Result_type ==
+          "Treatment contrast - emmeans" ~ 3,
+
+        Result_type ==
+          "Random effect" ~ 4,
+
+        Result_type ==
+          "DHARMa diagnostic" ~ 5,
+
+        TRUE ~ 99
+      )
+  ) %>%
+
+  dplyr::arrange(
+    Species_order,
+    Analysis_order,
+    Growout_order,
+    Result_order
+  ) %>%
+
+  dplyr::select(
+    -Species_order,
+    -Analysis_order,
+    -Growout_order,
+    -Result_order
+  )
+
+
+# ==============================================================
+# 11. Confirm no list-columns
+# ==============================================================
+
+species_house_icc_list_check <- vapply(
+  species_house_icc_results,
+  is.list,
+  logical(1)
+)
+
+species_house_icc_list_columns <- names(
+  species_house_icc_results
+)[species_house_icc_list_check]
+
+
+if (
+  length(
+    species_house_icc_list_columns
+  ) > 0
+) {
+
+  stop(
+    "List-columns remain: ",
+    paste(
+      species_house_icc_list_columns,
+      collapse = ", "
+    )
+  )
+}
+
+
+# ==============================================================
+# 12. Print complete results
+# ==============================================================
+
+cat(
+  "\n============================================================\n",
+  "COMPLETE SPECIES-LEVEL ENTEROCOCCUS dPCR RESULTS\n",
+  "============================================================\n",
+  sep = ""
+)
+
+print(
+  species_house_icc_results,
+  n = Inf
+)
+
+
+# ==============================================================
+# 13. Print GLOBAL fixed effects
+# ==============================================================
+
+cat(
+  "\n============================================================\n",
+  "GLOBAL FIXED EFFECTS\n",
+  "============================================================\n",
+  sep = ""
+)
+
+print(
+  species_house_icc_results %>%
+    dplyr::filter(
+      Analysis == "Global",
+      Result_type ==
+        "Fixed effect - Type III Wald"
+    ) %>%
+    dplyr::select(
+      Species,
+      Effect_or_contrast,
+      Test_statistic,
+      df,
+      P_value
+    ),
+  n = Inf
+)
+
+
+# ==============================================================
+# 14. Print GROWOUT-SPECIFIC fixed effects
+#
+# Gives the Treatment and Position omnibus tests separately
+# for Growout 1 and Growout 2.
+# ==============================================================
+
+cat(
+  "\n============================================================\n",
+  "GROWOUT-SPECIFIC FIXED EFFECTS\n",
+  "============================================================\n",
+  sep = ""
+)
+
+print(
+  species_house_icc_results %>%
+    dplyr::filter(
+      Analysis == "Growout-specific",
+      Result_type ==
+        "Fixed effect - Type III Wald"
+    ) %>%
+    dplyr::select(
+      Species,
+      Growout,
+      Family,
+      Effect_or_contrast,
+      Test_statistic,
+      df,
+      P_value
+    ),
+  n = Inf
+)
+
+
+# ==============================================================
+# 15. Print Treatment contrasts within Growout
+#
+# These are the manuscript pairwise Treatment comparisons from
+# the GLOBAL models.
+# ==============================================================
+
+cat(
+  "\n============================================================\n",
+  "TREATMENT CONTRASTS WITHIN GROWOUT\n",
+  "==============================================\n",
+  sep = ""
+)
+
+print(
+  species_house_icc_results %>%
+    dplyr::filter(
+      Analysis == "Within-growout",
+      Result_type ==
+        "Treatment contrast - emmeans"
+    ) %>%
+    dplyr::select(
+      Species,
+      Growout,
+      Effect_or_contrast,
+      Estimate,
+      SE,
+      Test_statistic,
+      P_value
+    ),
+  n = Inf
+)
+
+
+# ==============================================================
+# 16. House variance + ICC summary
+# ==============================================================
+
+species_house_icc_summary <- species_house_icc_results %>%
+  dplyr::filter(
+    Result_type ==
+      "Random effect"
+  ) %>%
+  dplyr::select(
+    Analysis,
+    Species,
+    Growout,
+    Family,
+    Response_adjustment,
+    N,
+    Variance,
+    SD,
+    ICC_adjusted,
+    ICC_unadjusted,
+    Percent_House_adjusted,
+    Percent_House_unadjusted
+  )
+
+
+cat(
+  "\n============================================================\n",
+  "HOUSE RANDOM-EFFECT VARIANCE AND ICC\n",
+  "============================================================\n",
+  sep = ""
+)
+
+print(
+  species_house_icc_summary,
+  n = Inf
+)
+
+
+# ==============================================================
+# 17. Global DHARMa diagnostic summary
+# ==============================================================
+
+species_house_icc_dharma_summary <- species_house_icc_results %>%
+  dplyr::filter(
+    Analysis == "Global",
+    Result_type ==
+      "DHARMa diagnostic"
+  ) %>%
+  dplyr::select(
+    Species,
+    Family,
+    Effect_or_contrast,
+    P_value
+  )
+
+
+cat(
+  "\n============================================================\n",
+  "GLOBAL DHARMa DIAGNOSTICS\n",
+  "============================================================\n",
+  sep = ""
+)
+
+print(
+  species_house_icc_dharma_summary,
+  n = Inf
+)
+
+
+# ==============================================================
+# 18. Plot GLOBAL DHARMa diagnostics for each species
+# ==============================================================
+
+for (
+  species_name in species_house_icc_targets
+) {
+
+  model_result <- getElement(
+    species_house_icc_models,
+    species_name
+  )
+
+
+  plot(
+    model_result$dharma_sim,
+    main = paste(
+      "Enterococcus",
+      species_name,
+      "dPCR"
+    )
+  )
+}
+
+
+# ==============================================================
+# 19. Save ONE flat results table to ONE Excel worksheet
+# ==============================================================
+
+species_house_icc_excel_file <-
+  "Enterococcus Species dPCR GLMM Summary - House Retained with ICC.xlsx"
+
+
+writexl::write_xlsx(
+  list(
+    "dPCR GLMM Results" =
+      species_house_icc_results
+  ),
+  path =
+    species_house_icc_excel_file
+)
+
+
+# ==============================================================
+# 20. Restore original contrast settings
+# ==============================================================
+
+options(
+  old_contr_species_house_icc
+)
+
+
+# ==============================================================
+# 21. Confirm saved file
+# ==============================================================
+
+cat(
+  "\nExcel file written to:\n",
+  normalizePath(
+    species_house_icc_excel_file,
+    mustWork = FALSE
+  ),
+  "\n"
+)
+
+```
+
+```{r}
+# ==============================================================
+# UPDATED COMBINED ENTEROCOCCUS VISUALIZATION
+# Genus + species dPCR
+#
+# Statistical annotations now come from models that retain:
+#   (1 | House)
+#
+# Genus source:
+#   entero_genus_icc_pergo_df
+#
+# Species source:
+#   species_house_icc_results
+#
+# New objects are created so previous plotting objects are not
+# overwritten.
+# ==============================================================
+
+library(phyloseq)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggh4x)
+library(grid)
+
+
+# ==============================================================
+# Helper function to format p-values for plotmath
+# ==============================================================
+
+fmt_p_parse_entero_house <- function(p) {
+
+  if (is.na(p)) {
+    return("italic(p)==NA")
+  }
+
+  if (p < 1e-3) {
+    return(
+      sprintf(
+        "italic(p)==%s",
+        formatC(
+          p,
+          format = "e",
+          digits = 3
+        )
+      )
+    )
+  }
+
+  return(
+    sprintf(
+      "italic(p)==%.3f",
+      p
+    )
+  )
+}
+
+
+# ==============================================================
+# PART 1
+# Combined dPCR plotting data
+# ==============================================================
+
+
+# ==============================================================
+# 1. Genus-level dPCR data
+# ==============================================================
+
+genus_data_house_icc <- entero.merged %>%
+  dplyr::mutate(
+    Target = "Enterococcus",
+    copies_per_g_litter = copies_per_gram,
+    log10_copies = log10(copies_per_gram),
+    Sample.NTC.Control = as.character(
+      Sample.NTC.Control
+    )
+  ) %>%
+  dplyr::select(
+    Sample.NTC.Control,
+    Growout,
+    Treatment,
+    House,
+    Position,
+    copies_per_g_litter,
+    log10_copies,
+    Target
+  )
+
+
+# ==============================================================
+# 2. Species-level dPCR data
+# ==============================================================
+
+species_data_house_icc <- entero_species_merged %>%
+  dplyr::mutate(
+    Target = paste(
+      "E.",
+      tolower(Target..Name.)
+    ),
+    log10_copies = log10(
+      copies_per_g_litter
+    ),
+    Sample.NTC.Control = as.character(
+      Sample.NTC.Control
+    )
+  ) %>%
+  dplyr::select(
+    Sample.NTC.Control,
+    Growout,
+    Treatment,
+    House,
+    Position,
+    copies_per_g_litter,
+    log10_copies,
+    Target
+  )
+
+
+# ==============================================================
+# 3. Combine dPCR plotting data
+# ==============================================================
+
+entero_combined_plot_house_icc <- dplyr::bind_rows(
+  genus_data_house_icc,
+  species_data_house_icc
+) %>%
+  dplyr::mutate(
+
+    Growout = as.character(
+      Growout
+    ),
+
+    Treatment = factor(
+      ifelse(
+        Treatment == "IndigoLT",
+        "Alternative",
+        as.character(Treatment)
+      ),
+      levels = c(
+        "Control",
+        "Alternative"
+      )
+    ),
+
+    Target = factor(
+      Target,
+      levels = c(
+        "Enterococcus",
+        "E. cecorum",
+        "E. hirae"
+      )
+    )
+  )
+
+
+cat(
+  "Combined dPCR plotting data:",
+  nrow(entero_combined_plot_house_icc),
+  "rows\n"
+)
+
+cat(
+  "Targets:",
+  levels(entero_combined_plot_house_icc$Target),
+  "\n"
+)
+
+cat(
+  "Treatments:",
+  levels(entero_combined_plot_house_icc$Treatment),
+  "\n"
+)
+
+
+# ==============================================================
+# 4. Extract updated genus dPCR p-values
+#
+# Source:
+#   revised genus model with House retained
+# ==============================================================
+
+genus_pairs_house_icc <- entero_genus_icc_pergo_df %>%
+  dplyr::filter(
+    as.character(Growout) %in% c(
+      "1",
+      "2"
+    )
+  ) %>%
+  dplyr::filter(
+    grepl(
+      "Control\\s*-\\s*IndigoLT|IndigoLT\\s*-\\s*Control",
+      contrast
+    )
+  ) %>%
+  dplyr::mutate(
+    Target = "Enterococcus",
+    Growout = as.character(
+      Growout
+    ),
+    P_Value = as.numeric(
+      p.value
+    )
+  ) %>%
+  dplyr::select(
+    Target,
+    Growout,
+    P_Value
+  )
+
+
+# ==============================================================
+# 5. Extract updated species dPCR p-values
+#
+# Source:
+#   revised species models with House retained
+# ==============================================================
+
+species_pairs_house_icc <- species_house_icc_results %>%
+  dplyr::filter(
+    Analysis == "Within-growout",
+    Result_type == "Treatment contrast - emmeans",
+    Growout %in% c(
+      "1",
+      "2"
+    )
+  ) %>%
+  dplyr::filter(
+    grepl(
+      "Control\\s*-\\s*IndigoLT|IndigoLT\\s*-\\s*Control",
+      Effect_or_contrast
+    )
+  ) %>%
+  dplyr::mutate(
+
+    Target = dplyr::case_when(
+      Species == "Cecorum" ~ "E. cecorum",
+      Species == "Hirae" ~ "E. hirae",
+      TRUE ~ Species
+    ),
+
+    Growout = as.character(
+      Growout
+    ),
+
+    P_Value = as.numeric(
+      P_value
+    )
+  ) %>%
+  dplyr::select(
+    Target,
+    Growout,
+    P_Value
+  )
+
+
+# ==============================================================
+# 6. Combine updated dPCR p-values
+# ==============================================================
+
+entero_pairs_df_house_icc <- dplyr::bind_rows(
+  genus_pairs_house_icc,
+  species_pairs_house_icc
+) %>%
+  dplyr::mutate(
+
+    Target = factor(
+      Target,
+      levels = c(
+        "Enterococcus",
+        "E. cecorum",
+        "E. hirae"
+      )
+    ),
+
+    Growout = as.character(
+      Growout
+    ),
+
+    P_Label = vapply(
+      P_Value,
+      fmt_p_parse_entero_house,
+      character(1)
+    )
+  )
+
+
+cat(
+  "\n==============================================\n",
+  "UPDATED dPCR P-VALUES USED IN FIGURE\n",
+  "==============================================\n",
+  sep = ""
+)
+
+print(
+  entero_pairs_df_house_icc
+)
+
+
+# ==============================================================
+# 7. Calculate annotation positions
+# ==============================================================
+
+p_ypos_entero_house_icc <- entero_combined_plot_house_icc %>%
+  dplyr::group_by(
+    Target,
+    Growout
+  ) %>%
+  dplyr::summarise(
+    y_pos = max(
+      log10_copies,
+      na.rm = TRUE
+    ) * 1.02,
+    .groups = "drop"
+  )
+
+
+# ==============================================================
+# 8. Join updated p-values to annotation positions
+# ==============================================================
+
+entero_pairs_annot_house_icc <- dplyr::left_join(
+  entero_pairs_df_house_icc,
+  p_ypos_entero_house_icc,
+  by = c(
+    "Target",
+    "Growout"
+  )
+)
+
+
+# ==============================================================
+# 9. Updated combined dPCR-only plot
+# ==============================================================
+
+entero_combined_boxplot_house_icc <- ggplot(
+  entero_combined_plot_house_icc,
+  aes(
+    x = Growout,
+    y = log10_copies
+  )
+) +
+
+  geom_boxplot(
+    aes(
+      fill = Treatment
+    ),
+    color = "black",
+    alpha = 0.9,
+    outlier.shape = NA,
+    position = position_dodge(
+      width = 0.9
+    )
+  ) +
+
+  stat_summary(
+    aes(
+      fill = Treatment
+    ),
+    fun = mean,
+    geom = "point",
+    shape = 23,
+    size = 3,
+    color = "white",
+    position = position_dodge(
+      width = 0.9
+    ),
+    show.legend = FALSE
+  ) +
+
+  geom_jitter(
+    aes(
+      color = Treatment
+    ),
+    shape = 21,
+    size = 1.25,
+    alpha = 0.9,
+    fill = "white",
+    position = position_jitterdodge(
+      jitter.width = 0.1,
+      dodge.width = 0.9
+    ),
+    show.legend = FALSE
+  ) +
+
+  geom_text(
+    data = entero_pairs_annot_house_icc,
+    aes(
+      x = Growout,
+      y = y_pos,
+      label = P_Label
+    ),
+    parse = TRUE,
+    size = 3,
+    inherit.aes = FALSE,
+    vjust = 0
+  ) +
+
+  facet_wrap(
+    ~ Target,
+    scales = "free_y",
+    nrow = 1
+  ) +
+
+  scale_fill_manual(
+    values = c(
+      "Control" = "#f8765c",
+      "Alternative" = "#221150"
+    )
+  ) +
+
+  scale_color_manual(
+    values = c(
+      "Control" = "black",
+      "Alternative" = "black"
+    )
+  ) +
+
+  scale_y_continuous(
+    expand = expansion(
+      mult = c(
+        0.05,
+        0.15
+      )
+    )
+  ) +
+
+  labs(
+    fill = "Treatment",
+    x = "Growout",
+    y = expression(
+      Log[10]~"copies per gram litter"
+    )
+  ) +
+
+  theme_bw() +
+
+  theme(
+    axis.title.x = element_text(
+      size = 14
+    ),
+    axis.title.y = element_text(
+      size = 14
+    ),
+    axis.text = element_text(
+      size = 12,
+      color = "black"
+    ),
+    axis.ticks.x = element_blank(),
+    strip.text = element_text(
+      size = 12,
+      face = "italic"
+    ),
+    strip.background = element_blank(),
+    legend.title = element_text(
+      size = 14,
+      face = "bold"
+    ),
+    legend.text = element_text(
+      size = 14
+    ),
+    legend.position = "top",
+    panel.spacing = grid::unit(
+      1,
+      "lines"
+    )
+  )
+
+
+print(
+  entero_combined_boxplot_house_icc
+)
+
+
+ggsave(
+  filename = "entero.boxplot.combined.house_retained.png",
+  plot = entero_combined_boxplot_house_icc,
+  width = 8,
+  height = 3.5,
+  units = "in",
+  dpi = 900
+)
+
+
+# ==============================================================
+# 10. Summary of significant updated dPCR effects
+# ==============================================================
+
+cat(
+  "\n==============================================\n",
+  "SUMMARY OF SIGNIFICANT TREATMENT EFFECTS\n",
+  "==============================================\n",
+  sep = ""
+)
+
+
+sig_entero_effects_house_icc <- entero_pairs_annot_house_icc %>%
+  dplyr::filter(
+    P_Value < 0.05
+  ) %>%
+  dplyr::arrange(
+    Target,
+    Growout
+  )
+
+
+if (nrow(sig_entero_effects_house_icc) > 0) {
+
+  print(
+    sig_entero_effects_house_icc %>%
+      dplyr::select(
+        Target,
+        Growout,
+        P_Value
+      )
+  )
+
+} else {
+
+  cat(
+    "No significant treatment effects at p < 0.05\n"
+  )
+}
+
+
+
+# ==============================================================
+# PART 2
+# COMBINED ENTEROCOCCUS 16S + dPCR VISUALIZATION
+#
+# dPCR annotations now use the updated House-retained models.
+#
+# CSS counts:
+#   log10(CSS + 1)
+#
+# Relative abundance:
+#   percent relative abundance
+#
+# dPCR:
+#   same log10 transformation used in the previous figure
+# ==============================================================
+
+
+# ==============================================================
+# 11. Treatment-label helper
+# ==============================================================
+
+clean_treatment_entero_house <- function(x) {
+
+  dplyr::recode(
+    as.character(x),
+    "IndigoLT" = "Alternative"
+  )
+}
+
+
+# ==============================================================
+# 12. Genus-level Enterococcus CSS counts
+# ==============================================================
+
+entero_genus_css_house_icc <- phyloseq::psmelt(
+  phy_genus
+) %>%
+  dplyr::filter(
+    Genus == "Enterococcus"
+  ) %>%
+  dplyr::mutate(
+
+    Treatment = factor(
+      clean_treatment_entero_house(
+        Treatment
+      ),
+      levels = c(
+        "Control",
+        "Alternative"
+      )
+    ),
+
+    Growout = factor(
+      Growout
+    ),
+
+    Target =
+      "italic('Enterococcus')",
+
+    Measure =
+      "log[10]~CSS~counts~'(16S)'",
+
+    value = log10(
+      Abundance + 1
+    )
+  ) %>%
+  dplyr::select(
+    Sample,
+    Growout,
+    Treatment,
+    Target,
+    Measure,
+    value
+  )
+
+
+# ==============================================================
+# 13. Genus-level Enterococcus relative abundance
+# ==============================================================
+
+phy_genus_rel_house_icc <-
+  phyloseq::transform_sample_counts(
+    phy_genus,
+    function(x) {
+      x / sum(x)
+    }
+  )
+
+
+entero_genus_ra_house_icc <- phyloseq::psmelt(
+  phy_genus_rel_house_icc
+) %>%
+  dplyr::filter(
+    Genus == "Enterococcus"
+  ) %>%
+  dplyr::mutate(
+
+    Treatment = factor(
+      clean_treatment_entero_house(
+        Treatment
+      ),
+      levels = c(
+        "Control",
+        "Alternative"
+      )
+    ),
+
+    Growout = factor(
+      Growout
+    ),
+
+    Target =
+      "italic('Enterococcus')",
+
+    Measure =
+      "'%'~relative~abundance~'(16S)'",
+
+    value =
+      Abundance * 100
+  ) %>%
+  dplyr::select(
+    Sample,
+    Growout,
+    Treatment,
+    Target,
+    Measure,
+    value
+  )
+
+
+# ==============================================================
+# 14. Species-level CSS counts
+# ==============================================================
+
+species_css_long_house_icc <- phyloseq::psmelt(
+  physeq_no_growout3_css
+) %>%
+  dplyr::filter(
+    Genus == "Enterococcus"
+  ) %>%
+  dplyr::mutate(
+
+    Species_clean = tolower(
+      gsub(
+        "^Enterococcus\\s+",
+        "",
+        Species
+      )
+    ),
+
+    Target = dplyr::case_when(
+
+      Species_clean %in% c(
+        "cecorum",
+        "e. cecorum",
+        "enterococcus cecorum"
+      ) ~
+        "italic('E. cecorum')",
+
+      Species_clean %in% c(
+        "hirae",
+        "e. hirae",
+        "enterococcus hirae"
+      ) ~
+        "italic('E. hirae')",
+
+      TRUE ~ NA_character_
+    )
+  ) %>%
+
+  dplyr::filter(
+    !is.na(Target)
+  ) %>%
+
+  dplyr::mutate(
+
+    Treatment = factor(
+      clean_treatment_entero_house(
+        Treatment
+      ),
+      levels = c(
+        "Control",
+        "Alternative"
+      )
+    ),
+
+    Growout = factor(
+      Growout
+    ),
+
+    Measure =
+      "log[10]~CSS~counts~'(16S)'",
+
+    value = log10(
+      Abundance + 1
+    )
+  ) %>%
+
+  dplyr::select(
+    Sample,
+    Growout,
+    Treatment,
+    Target,
+    Measure,
+    value
+  )
+
+
+# ==============================================================
+# 15. Species-level relative abundance
+# ==============================================================
+
+phy_species_rel_house_icc <-
+  phyloseq::transform_sample_counts(
+    physeq_no_growout3_css,
+    function(x) {
+      x / sum(x)
+    }
+  )
+
+
+species_ra_long_house_icc <- phyloseq::psmelt(
+  phy_species_rel_house_icc
+) %>%
+  dplyr::filter(
+    Genus == "Enterococcus"
+  ) %>%
+  dplyr::mutate(
+
+    Species_clean = tolower(
+      gsub(
+        "^Enterococcus\\s+",
+        "",
+        Species
+      )
+    ),
+
+    Target = dplyr::case_when(
+
+      Species_clean %in% c(
+        "cecorum",
+        "e. cecorum",
+        "enterococcus cecorum"
+      ) ~
+        "italic('E. cecorum')",
+
+      Species_clean %in% c(
+        "hirae",
+        "e. hirae",
+        "enterococcus hirae"
+      ) ~
+        "italic('E. hirae')",
+
+      TRUE ~ NA_character_
+    )
+  ) %>%
+
+  dplyr::filter(
+    !is.na(Target)
+  ) %>%
+
+  dplyr::mutate(
+
+    Treatment = factor(
+      clean_treatment_entero_house(
+        Treatment
+      ),
+      levels = c(
+        "Control",
+        "Alternative"
+      )
+    ),
+
+    Growout = factor(
+      Growout
+    ),
+
+    Measure =
+      "'%'~relative~abundance~'(16S)'",
+
+    value =
+      Abundance * 100
+  ) %>%
+
+  dplyr::select(
+    Sample,
+    Growout,
+    Treatment,
+    Target,
+    Measure,
+    value
+  )
+
+
+# ==============================================================
+# 16. dPCR data
+#
+# Uses updated combined dPCR plotting object.
+# ==============================================================
+
+dpcr_long_house_icc <- entero_combined_plot_house_icc %>%
+  dplyr::mutate(
+
+    Treatment = factor(
+      clean_treatment_entero_house(
+        Treatment
+      ),
+      levels = c(
+        "Control",
+        "Alternative"
+      )
+    ),
+
+    Growout = factor(
+      Growout
+    ),
+
+    Target = dplyr::case_when(
+
+      Target %in% c(
+        "Enterococcus",
+        "Genus",
+        "Total Enterococcus"
+      ) ~
+        "italic('Enterococcus')",
+
+      Target %in% c(
+        "Cecorum",
+        "E. cecorum",
+        "Enterococcus cecorum"
+      ) ~
+        "italic('E. cecorum')",
+
+      Target %in% c(
+        "Hirae",
+        "E. hirae",
+        "Enterococcus hirae"
+      ) ~
+        "italic('E. hirae')",
+
+      TRUE ~
+        as.character(Target)
+    ),
+
+    Measure =
+      "log[10]~counts~'(dPCR)'",
+
+    value =
+      log10_copies
+  ) %>%
+
+  dplyr::select(
+    Growout,
+    Treatment,
+    Target,
+    Measure,
+    value
+  )
+
+
+# ==============================================================
+# 17. Combine all 16S + dPCR plotting data
+# ==============================================================
+
+entero_all_plot_house_icc <- dplyr::bind_rows(
+  entero_genus_css_house_icc,
+  species_css_long_house_icc,
+  entero_genus_ra_house_icc,
+  species_ra_long_house_icc,
+  dpcr_long_house_icc
+) %>%
+  dplyr::mutate(
+
+    Target = factor(
+      Target,
+      levels = c(
+        "italic('Enterococcus')",
+        "italic('E. cecorum')",
+        "italic('E. hirae')"
+      )
+    ),
+
+    Measure = factor(
+      Measure,
+      levels = c(
+        "log[10]~CSS~counts~'(16S)'",
+        "'%'~relative~abundance~'(16S)'",
+        "log[10]~counts~'(dPCR)'"
+      )
+    )
+  )
+
+
+# ==============================================================
+# 18. Prepare UPDATED dPCR-only statistical annotations
+# ==============================================================
+
+entero_pairs_annot_combined_house_icc <-
+  entero_pairs_annot_house_icc %>%
+
+  dplyr::mutate(
+
+    Growout = factor(
+      Growout
+    ),
+
+    Target = dplyr::case_when(
+
+      Target %in% c(
+        "Enterococcus",
+        "Genus",
+        "Total Enterococcus"
+      ) ~
+        "italic('Enterococcus')",
+
+      Target %in% c(
+        "Cecorum",
+        "E. cecorum",
+        "Enterococcus cecorum"
+      ) ~
+        "italic('E. cecorum')",
+
+      Target %in% c(
+        "Hirae",
+        "E. hirae",
+        "Enterococcus hirae"
+      ) ~
+        "italic('E. hirae')",
+
+      TRUE ~
+        as.character(Target)
+    ),
+
+    Target = factor(
+      Target,
+      levels = c(
+        "italic('Enterococcus')",
+        "italic('E. cecorum')",
+        "italic('E. hirae')"
+      )
+    ),
+
+    Measure = factor(
+      "log[10]~counts~'(dPCR)'",
+      levels = c(
+        "log[10]~CSS~counts~'(16S)'",
+        "'%'~relative~abundance~'(16S)'",
+        "log[10]~counts~'(dPCR)'"
+      )
+    )
+  )
+
+
+# ==============================================================
+# 19. Combined 16S + dPCR plot
+# ==============================================================
+
+entero_16s_dpcr_boxplot_house_icc <- ggplot(
+  entero_all_plot_house_icc,
+  aes(
+    x = Growout,
+    y = value
+  )
+) +
+
+  geom_boxplot(
+    aes(
+      fill = Treatment
+    ),
+    color = "black",
+    alpha = 0.9,
+    outlier.shape = NA,
+    position = position_dodge(
+      width = 0.9
+    )
+  ) +
+
+  stat_summary(
+    aes(
+      fill = Treatment
+    ),
+    fun = mean,
+    geom = "point",
+    shape = 23,
+    size = 3,
+    color = "white",
+    position = position_dodge(
+      width = 0.9
+    ),
+    show.legend = FALSE
+  ) +
+
+  geom_jitter(
+    aes(
+      color = Treatment
+    ),
+    shape = 21,
+    size = 1.25,
+    alpha = 0.9,
+    fill = "white",
+    position = position_jitterdodge(
+      jitter.width = 0.1,
+      dodge.width = 0.9
+    ),
+    show.legend = FALSE
+  ) +
+
+  geom_text(
+    data =
+      entero_pairs_annot_combined_house_icc,
+    aes(
+      x = Growout,
+      y = y_pos,
+      label = P_Label
+    ),
+    parse = TRUE,
+    size = 3,
+    inherit.aes = FALSE,
+    vjust = 0
+  ) +
+
+  ggh4x::facet_grid2(
+    rows = vars(
+      Measure
+    ),
+    cols = vars(
+      Target
+    ),
+    scales = "free",
+    independent = "y",
+    labeller = labeller(
+      Measure = label_parsed,
+      Target = label_parsed
+    )
+  ) +
+
+  scale_fill_manual(
+    values = c(
+      "Control" = "#f8765c",
+      "Alternative" = "#221150"
+    )
+  ) +
+
+  scale_color_manual(
+    values = c(
+      "Control" = "black",
+      "Alternative" = "black"
+    )
+  ) +
+
+  scale_y_continuous(
+    expand = expansion(
+      mult = c(
+        0.05,
+        0.15
+      )
+    )
+  ) +
+
+  labs(
+    fill = "Treatment",
+    x = "Growout",
+    y = NULL
+  ) +
+
+  theme_bw() +
+
+  theme(
+    axis.title.x = element_text(
+      size = 14
+    ),
+    axis.title.y = element_text(
+      size = 14
+    ),
+    axis.text = element_text(
+      size = 12,
+      color = "black"
+    ),
+    axis.ticks.x = element_blank(),
+    strip.text.x = element_text(
+      size = 12
+    ),
+    strip.text.y = element_text(
+      size = 9
+    ),
+    strip.background = element_blank(),
+    legend.title = element_text(
+      size = 14,
+      face = "bold"
+    ),
+    legend.text = element_text(
+      size = 14
+    ),
+    legend.position = "top"
+  )
+
+
+# ==============================================================
+# 20. Display updated combined figure
+# ==============================================================
+
+print(
+  entero_16s_dpcr_boxplot_house_icc
+)
+
+
+# ==============================================================
+# 21. Save updated combined figure
+# ==============================================================
+
+ggsave(
+  filename =
+    "entero_16s_dpcr_boxplot_house_retained.png",
+  plot =
+    entero_16s_dpcr_boxplot_house_icc,
+  width = 6,
+  height = 6.5,
+  units = "in",
+  dpi = 900
+)
+
+```
+

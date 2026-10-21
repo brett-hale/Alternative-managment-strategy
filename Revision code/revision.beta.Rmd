@@ -1,0 +1,3461 @@
+---
+title: "revision.beta"
+author: "BH"
+date: "2026-10-13"
+output: html_document
+---
+
+```{r}
+# ==============================================================
+# REVISED BETA-DIVERSITY ANALYSIS
+#
+# HOUSE-AWARE PERMANOVA + BETA DISPERSION
+#
+# Uses the SAME general PERMANOVA method as the original analysis:
+#   vegan::adonis2()
+#
+# Input:
+#   physeq_no_growout3_css
+#   physeq_no_growout3
+#
+# Experimental design:
+#
+#   House
+#     = independent experimental unit
+#
+#   Treatment
+#     = assigned at the House level
+#
+#   Growout
+#     = repeated within House
+#
+#   Position
+#     = defined physical location A-E within House
+#     = same locations followed across both Growouts
+#
+#
+# PERMANOVA strategy
+# --------------------------------------------------------------
+#
+# Collective Treatment:
+#
+#   distance ~ Treatment + Growout + Position
+#
+#   Whole Houses are permuted.
+#   All Growout x Position observations belonging to a House
+#   remain together.
+#
+#
+# Collective Growout:
+#
+#   distance ~ Treatment + Growout + Position
+#
+#   Entire Growout blocks are permuted within House.
+#   The five defined Positions within a Growout stay together.
+#
+#
+# Collective Position:
+#
+#   distance ~ Treatment + Growout + Position
+#
+#   Position trajectories are permuted within House.
+#
+#   Example:
+#     Position A = Growout 1 A + Growout 2 A
+#
+#   Those two observations remain linked and move together when
+#   the Position label is permuted.
+#
+#
+# Treatment x Growout:
+#
+#   distance ~ Treatment * Growout + Position
+#
+#   Whole Houses are permuted.
+#   Therefore Growout and Position observations remain linked
+#   to their respective House.
+#
+#
+# Treatment within each Growout:
+#
+#   distance ~ Treatment + Position
+#
+#   Whole Houses are permuted.
+#
+#
+# Beta dispersion:
+#
+#   Treatment:
+#     whole-House permutation
+#
+#   Growout:
+#     Growout blocks within House
+#
+#   Position:
+#     Position trajectories within House
+#
+#   Treatment within Growout:
+#     whole-House permutation
+#
+#
+# IMPORTANT:
+#
+#   - House remains the Treatment-level experimental unit.
+#   - Position is an explicit covariate in PERMANOVA.
+#   - Position is NOT used as the permutation stratum for Treatment.
+#   - Defined Position locations remain linked across Growouts.
+#   - No Condition() is used.
+#   - No dbRDA is used.
+#   - No existing analysis objects are overwritten.
+#   - All new objects end in "_houseperm".
+# ==============================================================
+
+
+library(phyloseq)
+library(vegan)
+library(permute)
+library(dplyr)
+
+
+# ==============================================================
+# 1. Settings
+# ==============================================================
+
+set.seed(42)
+
+nperm_houseperm <- 9999
+
+
+# ==============================================================
+# 2. Reattach phylogenetic tree to CSS-normalized object
+#
+# Same input structure used in the original beta-diversity
+# analysis, but with a new object name.
+# ==============================================================
+
+ps_full_houseperm <- phyloseq::merge_phyloseq(
+  physeq_no_growout3_css,
+  phyloseq::phy_tree(
+    physeq_no_growout3
+  )
+)
+
+
+# ==============================================================
+# 3. Extract metadata
+# ==============================================================
+
+meta_houseperm <- data.frame(
+  phyloseq::sample_data(
+    ps_full_houseperm
+  ),
+  check.names = FALSE
+)
+
+
+# ==============================================================
+# 4. Confirm required metadata variables
+# ==============================================================
+
+required_cols_houseperm <- c(
+  "Treatment",
+  "House",
+  "Growout",
+  "Position"
+)
+
+
+missing_cols_houseperm <- setdiff(
+  required_cols_houseperm,
+  names(
+    meta_houseperm
+  )
+)
+
+
+if (
+  length(
+    missing_cols_houseperm
+  ) > 0
+) {
+
+  stop(
+    paste(
+      "Missing required metadata columns:",
+      paste(
+        missing_cols_houseperm,
+        collapse = ", "
+      )
+    )
+  )
+}
+
+
+# ==============================================================
+# 5. Set factors
+# ==============================================================
+
+meta_houseperm$Treatment <- factor(
+  as.character(
+    meta_houseperm$Treatment
+  ),
+  levels = c(
+    "Control",
+    "IndigoLT"
+  )
+)
+
+
+meta_houseperm$House <- factor(
+  meta_houseperm$House
+)
+
+
+meta_houseperm$Growout <- factor(
+  as.character(
+    meta_houseperm$Growout
+  ),
+  levels = c(
+    "1",
+    "2"
+  )
+)
+
+
+meta_houseperm$Position <- factor(
+  as.character(
+    meta_houseperm$Position
+  ),
+  levels = c(
+    "A",
+    "B",
+    "C",
+    "D",
+    "E"
+  )
+)
+
+
+# ==============================================================
+# 6. Confirm that Treatment is constant within House
+# ==============================================================
+
+house_treatment_map_houseperm <-
+  meta_houseperm %>%
+  dplyr::distinct(
+    House,
+    Treatment
+  )
+
+
+house_treatment_check_houseperm <-
+  house_treatment_map_houseperm %>%
+  dplyr::count(
+    House,
+    name = "n_treatments"
+  )
+
+
+if (
+  any(
+    house_treatment_check_houseperm$n_treatments != 1
+  )
+) {
+
+  stop(
+    "At least one House has more than one Treatment assignment."
+  )
+}
+
+
+# ==============================================================
+# 7. Confirm balanced House x Growout x Position structure
+#
+# Expected:
+#   6 Houses
+#   2 Growouts per House
+#   5 defined Positions per House
+#   one sample per House x Growout x Position
+# ==============================================================
+
+design_table_houseperm <- with(
+  meta_houseperm,
+  table(
+    House,
+    Growout,
+    Position
+  )
+)
+
+
+if (
+  any(
+    design_table_houseperm != 1
+  )
+) {
+
+  stop(
+    paste(
+      "House x Growout x Position is not perfectly balanced.",
+      "Inspect design_table_houseperm before continuing."
+    )
+  )
+}
+
+
+cat(
+  "\n============================================================\n",
+  "DESIGN CHECK\n",
+  "============================================================\n",
+  sep = ""
+)
+
+
+cat(
+  "Number of Houses:",
+  nlevels(
+    meta_houseperm$House
+  ),
+  "\n"
+)
+
+
+cat(
+  "Treatment allocation by House:\n"
+)
+
+
+print(
+  table(
+    house_treatment_map_houseperm$Treatment
+  )
+)
+
+
+cat(
+  "\nHouse x Growout x Position structure:\n"
+)
+
+
+print(
+  design_table_houseperm
+)
+
+
+# ==============================================================
+# 8. Order samples consistently within House
+#
+# Every House is ordered as:
+#
+#   Growout 1:
+#     A B C D E
+#
+#   Growout 2:
+#     A B C D E
+#
+# Whole-House and Growout-block permutations preserve this
+# internal structure.
+#
+# Position trajectories are explicitly identified below using
+# House x Position, so the same physical Position remains linked
+# across both Growouts.
+# ==============================================================
+
+sample_order_houseperm <- order(
+  meta_houseperm$House,
+  meta_houseperm$Growout,
+  meta_houseperm$Position
+)
+
+
+meta_houseperm <- meta_houseperm[
+  sample_order_houseperm,
+  ,
+  drop = FALSE
+]
+
+
+sample_ids_houseperm <- rownames(
+  meta_houseperm
+)
+
+
+# ==============================================================
+# 9. Create repeated-measures block identifiers
+#
+# House x Growout:
+#   identifies each five-Position Growout block.
+#
+# House x Position:
+#   identifies each defined Position trajectory across Growouts.
+#
+# Example:
+#   House 1 x Position A contains:
+#       Growout 1, Position A
+#       Growout 2, Position A
+# ==============================================================
+
+meta_houseperm$House_Growout_houseperm <- interaction(
+  meta_houseperm$House,
+  meta_houseperm$Growout,
+  drop = TRUE,
+  lex.order = TRUE
+)
+
+
+meta_houseperm$House_Position_houseperm <- interaction(
+  meta_houseperm$House,
+  meta_houseperm$Position,
+  drop = TRUE,
+  lex.order = TRUE
+)
+
+
+# ==============================================================
+# 10. Distance-matrix subsetting/reordering helper
+# ==============================================================
+
+subset_distance_houseperm <- function(
+  dist_object_houseperm,
+  ids_houseperm
+) {
+
+  distance_matrix_houseperm <- as.matrix(
+    dist_object_houseperm
+  )
+
+
+  stats::as.dist(
+    distance_matrix_houseperm[
+      ids_houseperm,
+      ids_houseperm,
+      drop = FALSE
+    ]
+  )
+}
+
+
+# ==============================================================
+# 11. Calculate the same three distance matrices
+# ==============================================================
+
+bray_raw_houseperm <- phyloseq::distance(
+  ps_full_houseperm,
+  method = "bray"
+)
+
+
+unweighted_raw_houseperm <- phyloseq::UniFrac(
+  ps_full_houseperm,
+  weighted = FALSE,
+  normalized = TRUE,
+  parallel = FALSE
+)
+
+
+weighted_raw_houseperm <- phyloseq::UniFrac(
+  ps_full_houseperm,
+  weighted = TRUE,
+  normalized = TRUE,
+  parallel = FALSE
+)
+
+
+# ==============================================================
+# 12. Reorder distances to match metadata
+# ==============================================================
+
+bray_houseperm <- subset_distance_houseperm(
+  bray_raw_houseperm,
+  sample_ids_houseperm
+)
+
+
+unweighted_houseperm <- subset_distance_houseperm(
+  unweighted_raw_houseperm,
+  sample_ids_houseperm
+)
+
+
+weighted_houseperm <- subset_distance_houseperm(
+  weighted_raw_houseperm,
+  sample_ids_houseperm
+)
+
+
+distances_houseperm <- list(
+
+  "Bray-Curtis" =
+    bray_houseperm,
+
+  "Unweighted UniFrac" =
+    unweighted_houseperm,
+
+  "Weighted UniFrac" =
+    weighted_houseperm
+)
+
+
+# ==============================================================
+# 13. Growout-specific metadata
+# ==============================================================
+
+meta_g1_houseperm <- droplevels(
+  meta_houseperm[
+    meta_houseperm$Growout == "1",
+    ,
+    drop = FALSE
+  ]
+)
+
+
+meta_g2_houseperm <- droplevels(
+  meta_houseperm[
+    meta_houseperm$Growout == "2",
+    ,
+    drop = FALSE
+  ]
+)
+
+
+ids_g1_houseperm <- rownames(
+  meta_g1_houseperm
+)
+
+
+ids_g2_houseperm <- rownames(
+  meta_g2_houseperm
+)
+
+
+# ==============================================================
+# 14. WHOLE-HOUSE permutation design
+#
+# Used for:
+#
+#   - Collective Treatment
+#   - Treatment x Growout
+#
+# Every House is treated as one whole plot.
+# Houses move freely.
+#
+# Within(type = "none") means that the 10 observations within
+# each House retain their structure and move together.
+#
+# With 6 Houses there are 6! = 720 House-order permutations,
+# including the observed ordering.
+# ==============================================================
+
+perm_control_house_houseperm <- permute::how(
+
+  nperm =
+    nperm_houseperm,
+
+  plots =
+    permute::Plots(
+      strata =
+        meta_houseperm$House,
+      type =
+        "free"
+    ),
+
+  within =
+    permute::Within(
+      type =
+        "none"
+    ),
+
+  complete =
+    TRUE
+)
+
+
+set.seed(42)
+
+
+perm_house_houseperm <- permute::shuffleSet(
+
+  n =
+    nrow(
+      meta_houseperm
+    ),
+
+  nset =
+    nperm_houseperm,
+
+  control =
+    perm_control_house_houseperm
+)
+
+
+# ==============================================================
+# 15. WHOLE-HOUSE permutation design: Growout 1
+#
+# Each House contains five Positions.
+# All five move together.
+# ==============================================================
+
+perm_control_house_g1_houseperm <- permute::how(
+
+  nperm =
+    nperm_houseperm,
+
+  plots =
+    permute::Plots(
+      strata =
+        meta_g1_houseperm$House,
+      type =
+        "free"
+    ),
+
+  within =
+    permute::Within(
+      type =
+        "none"
+    ),
+
+  complete =
+    TRUE
+)
+
+
+set.seed(42)
+
+
+perm_house_g1_houseperm <- permute::shuffleSet(
+
+  n =
+    nrow(
+      meta_g1_houseperm
+    ),
+
+  nset =
+    nperm_houseperm,
+
+  control =
+    perm_control_house_g1_houseperm
+)
+
+
+# ==============================================================
+# 16. WHOLE-HOUSE permutation design: Growout 2
+# ==============================================================
+
+perm_control_house_g2_houseperm <- permute::how(
+
+  nperm =
+    nperm_houseperm,
+
+  plots =
+    permute::Plots(
+      strata =
+        meta_g2_houseperm$House,
+      type =
+        "free"
+    ),
+
+  within =
+    permute::Within(
+      type =
+        "none"
+    ),
+
+  complete =
+    TRUE
+)
+
+
+set.seed(42)
+
+
+perm_house_g2_houseperm <- permute::shuffleSet(
+
+  n =
+    nrow(
+      meta_g2_houseperm
+    ),
+
+  nset =
+    nperm_houseperm,
+
+  control =
+    perm_control_house_g2_houseperm
+)
+
+
+# ==============================================================
+# 17. GROWOUT permutation design
+#
+# Growout is repeated within House.
+#
+# Each House contains two Growout blocks:
+#
+#   Growout 1 = A B C D E
+#   Growout 2 = A B C D E
+#
+# The two Growout blocks may exchange within each House.
+#
+# The five defined Positions within each Growout block remain
+# together and retain their internal structure.
+# ==============================================================
+
+perm_control_growout_houseperm <- permute::how(
+
+  nperm =
+    nperm_houseperm,
+
+  blocks =
+    meta_houseperm$House,
+
+  plots =
+    permute::Plots(
+      strata =
+        meta_houseperm$House_Growout_houseperm,
+      type =
+        "free"
+    ),
+
+  within =
+    permute::Within(
+      type =
+        "none"
+    ),
+
+  complete =
+    TRUE
+)
+
+
+set.seed(42)
+
+
+perm_growout_houseperm <- permute::shuffleSet(
+
+  n =
+    nrow(
+      meta_houseperm
+    ),
+
+  nset =
+    nperm_houseperm,
+
+  control =
+    perm_control_growout_houseperm
+)
+
+
+# ==============================================================
+# 18. POSITION permutation design
+#
+# A-E are defined physical locations followed across both
+# Growouts.
+#
+# Therefore Position is NOT independently permuted within each
+# House x Growout.
+#
+# Instead, each House x Position combination is treated as a
+# repeated Position trajectory:
+#
+#   Position A:
+#       Growout 1 A
+#       Growout 2 A
+#
+#   Position B:
+#       Growout 1 B
+#       Growout 2 B
+#
+#   etc.
+#
+# The five Position trajectories may be permuted within each
+# House, while the two Growout observations belonging to each
+# Position remain linked.
+# ==============================================================
+
+perm_control_position_houseperm <- permute::how(
+
+  nperm =
+    nperm_houseperm,
+
+  blocks =
+    meta_houseperm$House,
+
+  plots =
+    permute::Plots(
+      strata =
+        meta_houseperm$House_Position_houseperm,
+      type =
+        "free"
+    ),
+
+  within =
+    permute::Within(
+      type =
+        "none"
+    ),
+
+  complete =
+    FALSE
+)
+
+
+set.seed(42)
+
+
+perm_position_houseperm <- permute::shuffleSet(
+
+  n =
+    nrow(
+      meta_houseperm
+    ),
+
+  nset =
+    nperm_houseperm,
+
+  control =
+    perm_control_position_houseperm
+)
+
+
+# ==============================================================
+# 19. Print permutation-design information
+# ==============================================================
+
+treatment_counts_houseperm <- table(
+  house_treatment_map_houseperm$Treatment
+)
+
+
+n_houses_houseperm <- nrow(
+  house_treatment_map_houseperm
+)
+
+
+if (
+  length(
+    treatment_counts_houseperm
+  ) == 2 &&
+  length(
+    unique(
+      as.numeric(
+        treatment_counts_houseperm
+      )
+    )
+  ) == 1
+) {
+
+  treatment_allocations_houseperm <- choose(
+    n_houses_houseperm,
+    as.numeric(
+      treatment_counts_houseperm[1]
+    )
+  )
+
+
+  minimum_treatment_p_houseperm <-
+    2 /
+    treatment_allocations_houseperm
+
+} else {
+
+  treatment_allocations_houseperm <-
+    NA_real_
+
+
+  minimum_treatment_p_houseperm <-
+    NA_real_
+}
+
+
+cat(
+  "\n============================================================\n",
+  "PERMUTATION CHECK\n",
+  "============================================================\n",
+  sep = ""
+)
+
+
+cat(
+  "Whole-House permutations supplied:",
+  nrow(
+    perm_house_houseperm
+  ),
+  "\n"
+)
+
+
+cat(
+  "Growout-block permutations supplied:",
+  nrow(
+    perm_growout_houseperm
+  ),
+  "\n"
+)
+
+
+cat(
+  "Position-trajectory permutations supplied:",
+  nrow(
+    perm_position_houseperm
+  ),
+  "\n"
+)
+
+
+cat(
+  "Possible balanced Treatment allocations:",
+  treatment_allocations_houseperm,
+  "\n"
+)
+
+
+cat(
+  "Minimum attainable label-symmetric Treatment p-value:",
+  minimum_treatment_p_houseperm,
+  "\n"
+)
+
+
+# ==============================================================
+# 20. Helper to extract one adonis2 term
+# ==============================================================
+
+extract_adonis_houseperm <- function(
+  fit_houseperm,
+  effect_houseperm,
+  metric_houseperm,
+  analysis_houseperm,
+  growout_houseperm,
+  model_houseperm,
+  permutation_houseperm
+) {
+
+  table_houseperm <- as.data.frame(
+    fit_houseperm
+  )
+
+
+  table_houseperm$Effect_houseperm <- rownames(
+    table_houseperm
+  )
+
+
+  row_houseperm <- table_houseperm[
+    table_houseperm$Effect_houseperm ==
+      effect_houseperm,
+    ,
+    drop = FALSE
+  ]
+
+
+  # Allow either interaction ordering
+  if (
+    nrow(
+      row_houseperm
+    ) == 0 &&
+    effect_houseperm ==
+      "Treatment:Growout"
+  ) {
+
+    row_houseperm <- table_houseperm[
+      table_houseperm$Effect_houseperm ==
+        "Growout:Treatment",
+      ,
+      drop = FALSE
+    ]
+  }
+
+
+  if (
+    nrow(
+      row_houseperm
+    ) != 1
+  ) {
+
+    cat(
+      "\nAvailable adonis2 terms:\n"
+    )
+
+
+    print(
+      table_houseperm$Effect_houseperm
+    )
+
+
+    stop(
+      paste(
+        "Could not uniquely extract",
+        effect_houseperm,
+        "for",
+        metric_houseperm,
+        analysis_houseperm
+      )
+    )
+  }
+
+
+  p_column_houseperm <- grep(
+    "^Pr\\(>F\\)$",
+    names(
+      row_houseperm
+    ),
+    value = TRUE
+  )
+
+
+  if (
+    length(
+      p_column_houseperm
+    ) != 1
+  ) {
+
+    stop(
+      "Could not identify the adonis2 p-value column."
+    )
+  }
+
+
+  data.frame(
+
+    Metric =
+      metric_houseperm,
+
+    Analysis =
+      analysis_houseperm,
+
+    Growout =
+      growout_houseperm,
+
+    Effect =
+      effect_houseperm,
+
+    Model =
+      model_houseperm,
+
+    Permutation_design =
+      permutation_houseperm,
+
+    Df =
+      row_houseperm$Df,
+
+    SumOfSqs =
+      row_houseperm$SumOfSqs,
+
+    R2 =
+      row_houseperm$R2,
+
+    F =
+      row_houseperm$F,
+
+    P_value =
+      as.numeric(
+        row_houseperm[
+          1,
+          p_column_houseperm
+        ]
+      ),
+
+    stringsAsFactors =
+      FALSE
+  )
+}
+
+
+# ==============================================================
+# 21. Storage for PERMANOVA
+# ==============================================================
+
+permanova_fits_houseperm <- list()
+
+permanova_rows_houseperm <- list()
+
+
+# ==============================================================
+# 22. Run PERMANOVA for all three distance metrics
+# ==============================================================
+
+for (
+  metric_name_houseperm in names(
+    distances_houseperm
+  )
+) {
+
+  cat(
+    "\n\n============================================================\n",
+    metric_name_houseperm,
+    "\n============================================================\n",
+    sep = ""
+  )
+
+
+  dist_metric_houseperm <- getElement(
+    distances_houseperm,
+    metric_name_houseperm
+  )
+
+
+  # ============================================================
+  # A. COLLECTIVE TREATMENT
+  #
+  # Model:
+  #   distance ~ Treatment + Growout + Position
+  #
+  # Treatment:
+  #   whole-House permutations
+  #
+  # We extract ONLY Treatment from this fit.
+  # The Growout and Position p-values produced under this
+  # permutation scheme are not used.
+  # ============================================================
+
+  fit_treatment_houseperm <- vegan::adonis2(
+
+    dist_metric_houseperm ~
+      Treatment +
+      Growout +
+      Position,
+
+    data =
+      meta_houseperm,
+
+    permutations =
+      perm_house_houseperm,
+
+    by =
+      "margin"
+  )
+
+
+  permanova_fits_houseperm[
+    paste(
+      metric_name_houseperm,
+      "Collective Treatment",
+      sep = " | "
+    )
+  ] <- list(
+    fit_treatment_houseperm
+  )
+
+
+  permanova_rows_houseperm[
+    length(
+      permanova_rows_houseperm
+    ) + 1
+  ] <- list(
+
+    extract_adonis_houseperm(
+
+      fit_houseperm =
+        fit_treatment_houseperm,
+
+      effect_houseperm =
+        "Treatment",
+
+      metric_houseperm =
+        metric_name_houseperm,
+
+      analysis_houseperm =
+        "Collective Treatment",
+
+      growout_houseperm =
+        "1-2",
+
+      model_houseperm =
+        "Treatment + Growout + Position",
+
+      permutation_houseperm =
+        "Whole House"
+    )
+  )
+
+
+  # ============================================================
+  # B. COLLECTIVE GROWOUT
+  #
+  # Same additive PERMANOVA model.
+  #
+  # Growout:
+  #   whole Growout blocks permuted within House.
+  #
+  # We extract ONLY Growout from this fit.
+  # ============================================================
+
+  fit_growout_houseperm <- vegan::adonis2(
+
+    dist_metric_houseperm ~
+      Treatment +
+      Growout +
+      Position,
+
+    data =
+      meta_houseperm,
+
+    permutations =
+      perm_growout_houseperm,
+
+    by =
+      "margin"
+  )
+
+
+  permanova_fits_houseperm[
+    paste(
+      metric_name_houseperm,
+      "Collective Growout",
+      sep = " | "
+    )
+  ] <- list(
+    fit_growout_houseperm
+  )
+
+
+  permanova_rows_houseperm[
+    length(
+      permanova_rows_houseperm
+    ) + 1
+  ] <- list(
+
+    extract_adonis_houseperm(
+
+      fit_houseperm =
+        fit_growout_houseperm,
+
+      effect_houseperm =
+        "Growout",
+
+      metric_houseperm =
+        metric_name_houseperm,
+
+      analysis_houseperm =
+        "Collective Growout",
+
+      growout_houseperm =
+        "1-2",
+
+      model_houseperm =
+        "Treatment + Growout + Position",
+
+      permutation_houseperm =
+        "Growout blocks within House"
+    )
+  )
+
+
+  # ============================================================
+  # C. COLLECTIVE POSITION
+  #
+  # Same additive PERMANOVA model.
+  #
+  # Position:
+  #   Position trajectories permuted within House.
+  #
+  # The same Position in Growout 1 and Growout 2 remains linked.
+  #
+  # We extract ONLY Position from this fit.
+  # ============================================================
+
+  fit_position_houseperm <- vegan::adonis2(
+
+    dist_metric_houseperm ~
+      Treatment +
+      Growout +
+      Position,
+
+    data =
+      meta_houseperm,
+
+    permutations =
+      perm_position_houseperm,
+
+    by =
+      "margin"
+  )
+
+
+  permanova_fits_houseperm[
+    paste(
+      metric_name_houseperm,
+      "Collective Position",
+      sep = " | "
+    )
+  ] <- list(
+    fit_position_houseperm
+  )
+
+
+  permanova_rows_houseperm[
+    length(
+      permanova_rows_houseperm
+    ) + 1
+  ] <- list(
+
+    extract_adonis_houseperm(
+
+      fit_houseperm =
+        fit_position_houseperm,
+
+      effect_houseperm =
+        "Position",
+
+      metric_houseperm =
+        metric_name_houseperm,
+
+      analysis_houseperm =
+        "Collective Position",
+
+      growout_houseperm =
+        "1-2",
+
+      model_houseperm =
+        "Treatment + Growout + Position",
+
+      permutation_houseperm =
+        "Position trajectories within House"
+    )
+  )
+
+
+  # ============================================================
+  # D. TREATMENT x GROWOUT INTERACTION
+  #
+  # Model:
+  #   distance ~ Treatment * Growout + Position
+  #
+  # Whole Houses are permuted.
+  #
+  # This keeps both Growouts and all defined Positions belonging
+  # to the same House together while changing their association
+  # with House-level Treatment assignment.
+  #
+  # Only Treatment:Growout is extracted from this fit.
+  # ============================================================
+
+  fit_interaction_houseperm <- vegan::adonis2(
+
+    dist_metric_houseperm ~
+      Treatment * Growout +
+      Position,
+
+    data =
+      meta_houseperm,
+
+    permutations =
+      perm_house_houseperm,
+
+    by =
+      "margin"
+  )
+
+
+  permanova_fits_houseperm[
+    paste(
+      metric_name_houseperm,
+      "Treatment x Growout",
+      sep = " | "
+    )
+  ] <- list(
+    fit_interaction_houseperm
+  )
+
+
+  permanova_rows_houseperm[
+    length(
+      permanova_rows_houseperm
+    ) + 1
+  ] <- list(
+
+    extract_adonis_houseperm(
+
+      fit_houseperm =
+        fit_interaction_houseperm,
+
+      effect_houseperm =
+        "Treatment:Growout",
+
+      metric_houseperm =
+        metric_name_houseperm,
+
+      analysis_houseperm =
+        "Treatment x Growout",
+
+      growout_houseperm =
+        "1-2",
+
+      model_houseperm =
+        "Treatment * Growout + Position",
+
+      permutation_houseperm =
+        "Whole House"
+    )
+  )
+
+
+  # ============================================================
+  # E. GROWOUT 1 TREATMENT
+  #
+  # Model:
+  #   distance ~ Treatment + Position
+  #
+  # Treatment:
+  #   whole-House permutations
+  # ============================================================
+
+  dist_g1_houseperm <- subset_distance_houseperm(
+    dist_metric_houseperm,
+    ids_g1_houseperm
+  )
+
+
+  fit_treatment_g1_houseperm <- vegan::adonis2(
+
+    dist_g1_houseperm ~
+      Treatment +
+      Position,
+
+    data =
+      meta_g1_houseperm,
+
+    permutations =
+      perm_house_g1_houseperm,
+
+    by =
+      "margin"
+  )
+
+
+  permanova_fits_houseperm[
+    paste(
+      metric_name_houseperm,
+      "Growout 1 Treatment",
+      sep = " | "
+    )
+  ] <- list(
+    fit_treatment_g1_houseperm
+  )
+
+
+  permanova_rows_houseperm[
+    length(
+      permanova_rows_houseperm
+    ) + 1
+  ] <- list(
+
+    extract_adonis_houseperm(
+
+      fit_houseperm =
+        fit_treatment_g1_houseperm,
+
+      effect_houseperm =
+        "Treatment",
+
+      metric_houseperm =
+        metric_name_houseperm,
+
+      analysis_houseperm =
+        "Within Growout Treatment",
+
+      growout_houseperm =
+        "1",
+
+      model_houseperm =
+        "Treatment + Position",
+
+      permutation_houseperm =
+        "Whole House"
+    )
+  )
+
+
+  # ============================================================
+  # F. GROWOUT 2 TREATMENT
+  #
+  # Model:
+  #   distance ~ Treatment + Position
+  #
+  # Treatment:
+  #   whole-House permutations
+  # ============================================================
+
+  dist_g2_houseperm <- subset_distance_houseperm(
+    dist_metric_houseperm,
+    ids_g2_houseperm
+  )
+
+
+  fit_treatment_g2_houseperm <- vegan::adonis2(
+
+    dist_g2_houseperm ~
+      Treatment +
+      Position,
+
+    data =
+      meta_g2_houseperm,
+
+    permutations =
+      perm_house_g2_houseperm,
+
+    by =
+      "margin"
+  )
+
+
+  permanova_fits_houseperm[
+    paste(
+      metric_name_houseperm,
+      "Growout 2 Treatment",
+      sep = " | "
+    )
+  ] <- list(
+    fit_treatment_g2_houseperm
+  )
+
+
+  permanova_rows_houseperm[
+    length(
+      permanova_rows_houseperm
+    ) + 1
+  ] <- list(
+
+    extract_adonis_houseperm(
+
+      fit_houseperm =
+        fit_treatment_g2_houseperm,
+
+      effect_houseperm =
+        "Treatment",
+
+      metric_houseperm =
+        metric_name_houseperm,
+
+      analysis_houseperm =
+        "Within Growout Treatment",
+
+      growout_houseperm =
+        "2",
+
+      model_houseperm =
+        "Treatment + Position",
+
+      permutation_houseperm =
+        "Whole House"
+    )
+  )
+}
+
+
+# ==============================================================
+# 23. Combined PERMANOVA summary
+# ==============================================================
+
+permanova_results_houseperm <- dplyr::bind_rows(
+  permanova_rows_houseperm
+) %>%
+  dplyr::arrange(
+    Metric,
+    Analysis,
+    Growout
+  )
+
+
+cat(
+  "\n\n============================================================\n",
+  "HOUSE-AWARE PERMANOVA RESULTS\n",
+  "============================================================\n",
+  sep = ""
+)
+
+
+print(
+  permanova_results_houseperm,
+  n = Inf
+)
+
+
+# ==============================================================
+# 24. Beta-dispersion helper
+#
+# Same general method as original:
+#
+#   betadisper()
+#   permutest()
+#
+# The permutation matrix follows the same experimental hierarchy
+# used for the corresponding factor.
+#
+# type = "median" is stated explicitly for reproducibility.
+# ==============================================================
+
+run_dispersion_houseperm <- function(
+  dist_houseperm,
+  group_houseperm,
+  permutations_houseperm,
+  metric_houseperm,
+  analysis_houseperm,
+  growout_houseperm,
+  effect_houseperm,
+  permutation_design_houseperm
+) {
+
+  dispersion_object_houseperm <- vegan::betadisper(
+
+    dist_houseperm,
+
+    group =
+      group_houseperm,
+
+    type =
+      "median"
+  )
+
+
+  dispersion_anova_houseperm <- stats::anova(
+    dispersion_object_houseperm
+  )
+
+
+  dispersion_perm_houseperm <- vegan::permutest(
+
+    dispersion_object_houseperm,
+
+    permutations =
+      permutations_houseperm,
+
+    pairwise =
+      TRUE
+  )
+
+
+  dispersion_table_houseperm <- as.data.frame(
+    dispersion_perm_houseperm$tab
+  )
+
+
+  dispersion_p_column_houseperm <- grep(
+    "^Pr\\(>F\\)$",
+    names(
+      dispersion_table_houseperm
+    ),
+    value = TRUE
+  )
+
+
+  if (
+    length(
+      dispersion_p_column_houseperm
+    ) != 1
+  ) {
+
+    stop(
+      "Could not identify beta-dispersion permutation p-value."
+    )
+  }
+
+
+  dispersion_summary_houseperm <- data.frame(
+
+    Metric =
+      metric_houseperm,
+
+    Analysis =
+      analysis_houseperm,
+
+    Growout =
+      growout_houseperm,
+
+    Effect =
+      effect_houseperm,
+
+    Permutation_design =
+      permutation_design_houseperm,
+
+    F =
+      dispersion_table_houseperm$F[1],
+
+    ANOVA_P =
+      dispersion_anova_houseperm$`Pr(>F)`[1],
+
+    Permutation_P =
+      as.numeric(
+        dispersion_table_houseperm[
+          1,
+          dispersion_p_column_houseperm
+        ]
+      ),
+
+    N_permutations =
+      nrow(
+        permutations_houseperm
+      ),
+
+    stringsAsFactors =
+      FALSE
+  )
+
+
+  dispersion_means_houseperm <- data.frame(
+
+    Group =
+      as.character(
+        dispersion_object_houseperm$group
+      ),
+
+    Distance_to_median =
+      dispersion_object_houseperm$distances,
+
+    stringsAsFactors =
+      FALSE
+  ) %>%
+
+    dplyr::group_by(
+      Group
+    ) %>%
+
+    dplyr::summarise(
+
+      N =
+        dplyr::n(),
+
+      Mean_distance =
+        mean(
+          Distance_to_median,
+          na.rm = TRUE
+        ),
+
+      SD_distance =
+        stats::sd(
+          Distance_to_median,
+          na.rm = TRUE
+        ),
+
+      .groups =
+        "drop"
+    ) %>%
+
+    dplyr::mutate(
+
+      Metric =
+        metric_houseperm,
+
+      Analysis =
+        analysis_houseperm,
+
+      Growout =
+        growout_houseperm,
+
+      Effect =
+        effect_houseperm
+    )
+
+
+  list(
+
+    summary =
+      dispersion_summary_houseperm,
+
+    means =
+      dispersion_means_houseperm,
+
+    object =
+      dispersion_object_houseperm,
+
+    permutation =
+      dispersion_perm_houseperm
+  )
+}
+
+
+# ==============================================================
+# 25. Storage for beta-dispersion results
+# ==============================================================
+
+dispersion_objects_houseperm <- list()
+
+dispersion_rows_houseperm <- list()
+
+dispersion_means_rows_houseperm <- list()
+
+
+# ==============================================================
+# 26. Run beta-dispersion analyses
+#
+# We evaluate:
+#
+#   1. Treatment collectively
+#   2. Growout collectively
+#   3. Position collectively
+#   4. Treatment within Growout 1
+#   5. Treatment within Growout 2
+#
+# We do NOT use a four-level Treatment x Growout dispersion test.
+# A four-level grouping variable combines factors operating at
+# different experimental levels and is not a direct test of the
+# PERMANOVA interaction.
+# ==============================================================
+
+for (
+  metric_name_houseperm in names(
+    distances_houseperm
+  )
+) {
+
+  dist_metric_houseperm <- getElement(
+    distances_houseperm,
+    metric_name_houseperm
+  )
+
+
+  # ============================================================
+  # A. Collective Treatment dispersion
+  #
+  # Whole-House permutations
+  # ============================================================
+
+  disp_treatment_houseperm <- run_dispersion_houseperm(
+
+    dist_houseperm =
+      dist_metric_houseperm,
+
+    group_houseperm =
+      meta_houseperm$Treatment,
+
+    permutations_houseperm =
+      perm_house_houseperm,
+
+    metric_houseperm =
+      metric_name_houseperm,
+
+    analysis_houseperm =
+      "Collective Treatment",
+
+    growout_houseperm =
+      "1-2",
+
+    effect_houseperm =
+      "Treatment",
+
+    permutation_design_houseperm =
+      "Whole House"
+  )
+
+
+  dispersion_objects_houseperm[
+    paste(
+      metric_name_houseperm,
+      "Collective Treatment",
+      sep = " | "
+    )
+  ] <- list(
+    disp_treatment_houseperm
+  )
+
+
+  dispersion_rows_houseperm[
+    length(
+      dispersion_rows_houseperm
+    ) + 1
+  ] <- list(
+    getElement(
+      disp_treatment_houseperm,
+      "summary"
+    )
+  )
+
+
+  dispersion_means_rows_houseperm[
+    length(
+      dispersion_means_rows_houseperm
+    ) + 1
+  ] <- list(
+    getElement(
+      disp_treatment_houseperm,
+      "means"
+    )
+  )
+
+
+  # ============================================================
+  # B. Collective Growout dispersion
+  #
+  # Growout blocks permuted within House
+  # ============================================================
+
+  disp_growout_houseperm <- run_dispersion_houseperm(
+
+    dist_houseperm =
+      dist_metric_houseperm,
+
+    group_houseperm =
+      meta_houseperm$Growout,
+
+    permutations_houseperm =
+      perm_growout_houseperm,
+
+    metric_houseperm =
+      metric_name_houseperm,
+
+    analysis_houseperm =
+      "Collective Growout",
+
+    growout_houseperm =
+      "1-2",
+
+    effect_houseperm =
+      "Growout",
+
+    permutation_design_houseperm =
+      "Growout blocks within House"
+  )
+
+
+  dispersion_objects_houseperm[
+    paste(
+      metric_name_houseperm,
+      "Collective Growout",
+      sep = " | "
+    )
+  ] <- list(
+    disp_growout_houseperm
+  )
+
+
+  dispersion_rows_houseperm[
+    length(
+      dispersion_rows_houseperm
+    ) + 1
+  ] <- list(
+    getElement(
+      disp_growout_houseperm,
+      "summary"
+    )
+  )
+
+
+  dispersion_means_rows_houseperm[
+    length(
+      dispersion_means_rows_houseperm
+    ) + 1
+  ] <- list(
+    getElement(
+      disp_growout_houseperm,
+      "means"
+    )
+  )
+
+
+  # ============================================================
+  # C. Collective Position dispersion
+  #
+  # Position trajectories are permuted within House.
+  #
+  # The same physical Position in Growout 1 and Growout 2
+  # remains linked.
+  # ============================================================
+
+  disp_position_houseperm <- run_dispersion_houseperm(
+
+    dist_houseperm =
+      dist_metric_houseperm,
+
+    group_houseperm =
+      meta_houseperm$Position,
+
+    permutations_houseperm =
+      perm_position_houseperm,
+
+    metric_houseperm =
+      metric_name_houseperm,
+
+    analysis_houseperm =
+      "Collective Position",
+
+    growout_houseperm =
+      "1-2",
+
+    effect_houseperm =
+      "Position",
+
+    permutation_design_houseperm =
+      "Position trajectories within House"
+  )
+
+
+  dispersion_objects_houseperm[
+    paste(
+      metric_name_houseperm,
+      "Collective Position",
+      sep = " | "
+    )
+  ] <- list(
+    disp_position_houseperm
+  )
+
+
+  dispersion_rows_houseperm[
+    length(
+      dispersion_rows_houseperm
+    ) + 1
+  ] <- list(
+    getElement(
+      disp_position_houseperm,
+      "summary"
+    )
+  )
+
+
+  dispersion_means_rows_houseperm[
+    length(
+      dispersion_means_rows_houseperm
+    ) + 1
+  ] <- list(
+    getElement(
+      disp_position_houseperm,
+      "means"
+    )
+  )
+
+
+  # ============================================================
+  # D. Growout 1 Treatment dispersion
+  #
+  # Whole-House permutations
+  # ============================================================
+
+  dist_g1_houseperm <- subset_distance_houseperm(
+    dist_metric_houseperm,
+    ids_g1_houseperm
+  )
+
+
+  disp_treatment_g1_houseperm <- run_dispersion_houseperm(
+
+    dist_houseperm =
+      dist_g1_houseperm,
+
+    group_houseperm =
+      meta_g1_houseperm$Treatment,
+
+    permutations_houseperm =
+      perm_house_g1_houseperm,
+
+    metric_houseperm =
+      metric_name_houseperm,
+
+    analysis_houseperm =
+      "Within Growout Treatment",
+
+    growout_houseperm =
+      "1",
+
+    effect_houseperm =
+      "Treatment",
+
+    permutation_design_houseperm =
+      "Whole House"
+  )
+
+
+  dispersion_objects_houseperm[
+    paste(
+      metric_name_houseperm,
+      "Growout 1 Treatment",
+      sep = " | "
+    )
+  ] <- list(
+    disp_treatment_g1_houseperm
+  )
+
+
+  dispersion_rows_houseperm[
+    length(
+      dispersion_rows_houseperm
+    ) + 1
+  ] <- list(
+    getElement(
+      disp_treatment_g1_houseperm,
+      "summary"
+    )
+  )
+
+
+  dispersion_means_rows_houseperm[
+    length(
+      dispersion_means_rows_houseperm
+    ) + 1
+  ] <- list(
+    getElement(
+      disp_treatment_g1_houseperm,
+      "means"
+    )
+  )
+
+
+  # ============================================================
+  # E. Growout 2 Treatment dispersion
+  #
+  # Whole-House permutations
+  # ============================================================
+
+  dist_g2_houseperm <- subset_distance_houseperm(
+    dist_metric_houseperm,
+    ids_g2_houseperm
+  )
+
+
+  disp_treatment_g2_houseperm <- run_dispersion_houseperm(
+
+    dist_houseperm =
+      dist_g2_houseperm,
+
+    group_houseperm =
+      meta_g2_houseperm$Treatment,
+
+    permutations_houseperm =
+      perm_house_g2_houseperm,
+
+    metric_houseperm =
+      metric_name_houseperm,
+
+    analysis_houseperm =
+      "Within Growout Treatment",
+
+    growout_houseperm =
+      "2",
+
+    effect_houseperm =
+      "Treatment",
+
+    permutation_design_houseperm =
+      "Whole House"
+  )
+
+
+  dispersion_objects_houseperm[
+    paste(
+      metric_name_houseperm,
+      "Growout 2 Treatment",
+      sep = " | "
+    )
+  ] <- list(
+    disp_treatment_g2_houseperm
+  )
+
+
+  dispersion_rows_houseperm[
+    length(
+      dispersion_rows_houseperm
+    ) + 1
+  ] <- list(
+    getElement(
+      disp_treatment_g2_houseperm,
+      "summary"
+    )
+  )
+
+
+  dispersion_means_rows_houseperm[
+    length(
+      dispersion_means_rows_houseperm
+    ) + 1
+  ] <- list(
+    getElement(
+      disp_treatment_g2_houseperm,
+      "means"
+    )
+  )
+}
+
+
+# ==============================================================
+# 27. Combined beta-dispersion summary
+# ==============================================================
+
+dispersion_results_houseperm <- dplyr::bind_rows(
+  dispersion_rows_houseperm
+) %>%
+  dplyr::arrange(
+    Metric,
+    Analysis,
+    Growout
+  )
+
+
+dispersion_means_houseperm <- dplyr::bind_rows(
+  dispersion_means_rows_houseperm
+) %>%
+  dplyr::arrange(
+    Metric,
+    Analysis,
+    Growout,
+    Group
+  )
+
+
+cat(
+  "\n\n============================================================\n",
+  "HOUSE-AWARE BETA-DISPERSION RESULTS\n",
+  "============================================================\n",
+  sep = ""
+)
+
+
+print(
+  dispersion_results_houseperm,
+  n = Inf
+)
+
+
+cat(
+  "\n\n============================================================\n",
+  "MEAN DISTANCE TO GROUP MEDIAN\n",
+  "============================================================\n",
+  sep = ""
+)
+
+
+print(
+  dispersion_means_houseperm,
+  n = Inf
+)
+
+
+# ==============================================================
+# 28. Final combined object
+# ==============================================================
+
+beta_stats_houseperm <- list(
+
+  metadata =
+    meta_houseperm,
+
+  design =
+    design_table_houseperm,
+
+  distances =
+    distances_houseperm,
+
+  permutation_controls =
+    list(
+
+      House_collective =
+        perm_control_house_houseperm,
+
+      House_growout1 =
+        perm_control_house_g1_houseperm,
+
+      House_growout2 =
+        perm_control_house_g2_houseperm,
+
+      Growout =
+        perm_control_growout_houseperm,
+
+      Position =
+        perm_control_position_houseperm
+    ),
+
+  permutation_matrices =
+    list(
+
+      House_collective =
+        perm_house_houseperm,
+
+      House_growout1 =
+        perm_house_g1_houseperm,
+
+      House_growout2 =
+        perm_house_g2_houseperm,
+
+      Growout =
+        perm_growout_houseperm,
+
+      Position =
+        perm_position_houseperm
+    ),
+
+  permanova_fits =
+    permanova_fits_houseperm,
+
+  permanova_results =
+    permanova_results_houseperm,
+
+  dispersion_objects =
+    dispersion_objects_houseperm,
+
+  dispersion_results =
+    dispersion_results_houseperm,
+
+  dispersion_means =
+    dispersion_means_houseperm
+)
+
+
+cat(
+  "\n\n============================================================\n",
+  "HOUSE-AWARE BETA-DIVERSITY ANALYSIS COMPLETE\n",
+  "============================================================\n",
+  sep = ""
+)
+
+```
+
+```{r}
+# ==============================================================
+# PRINT PERMANOVA SUMMARY FOR MANUSCRIPT RESULTS
+# ==============================================================
+
+permanova_summary_houseperm <-
+  permanova_results_houseperm %>%
+  dplyr::select(
+    Metric,
+    Analysis,
+    Growout,
+    Effect,
+    R2,
+    F,
+    P_value
+  ) %>%
+  dplyr::mutate(
+    R2 = round(R2, 4),
+    F = round(F, 3),
+    P_value_print = dplyr::case_when(
+      P_value < 0.001 ~ formatC(
+        P_value,
+        format = "e",
+        digits = 2
+      ),
+      TRUE ~ formatC(
+        P_value,
+        format = "f",
+        digits = 3
+      )
+    )
+  )
+
+
+cat(
+  "\n============================================================\n",
+  "PERMANOVA SUMMARY FOR RESULTS\n",
+  "============================================================\n",
+  sep = ""
+)
+
+
+print(
+  permanova_summary_houseperm,
+  n = Inf,
+  width = Inf
+)
+```
+
+```{r}
+# ==============================================================
+# UPDATED BETA-DIVERSITY HEATMAP
+#
+# Adds properly restricted growout-specific Position tests.
+#
+# Permutation structure:
+#
+# Collective:
+#   Treatment            = whole House permutations
+#   Growout              = Growout blocks within House
+#   Position             = Position within House, with the same
+#                          physical Position retained across Growouts
+#   Treatment:Growout    = whole House permutations
+#
+# Growout-specific:
+#   Treatment            = whole House permutations
+#   Position             = Position permutations within House
+#
+# Uses the existing revised _houseperm PERMANOVA results.
+#
+# Does NOT overwrite existing analysis or heatmap objects.
+# ==============================================================
+
+
+library(dplyr)
+library(tidyr)
+library(vegan)
+library(permute)
+library(ComplexHeatmap)
+library(circlize)
+library(grid)
+
+
+# ==============================================================
+# 1. Confirm required revised-analysis objects are available
+# ==============================================================
+
+stopifnot(
+  exists("nperm_houseperm"),
+  exists("distances_houseperm"),
+  exists("meta_g1_houseperm"),
+  exists("meta_g2_houseperm"),
+  exists("permanova_results_houseperm")
+)
+
+
+# ==============================================================
+# 2. Confirm metadata ordering
+# ==============================================================
+
+stopifnot(
+  !is.null(rownames(meta_g1_houseperm)),
+  !is.null(rownames(meta_g2_houseperm)),
+  all(c("Treatment", "House", "Position") %in% names(meta_g1_houseperm)),
+  all(c("Treatment", "House", "Position") %in% names(meta_g2_houseperm))
+)
+
+
+# ==============================================================
+# 3. Create growout-specific Position permutation matrices
+#
+# Within a single growout, each House contains the five defined
+# Positions A-E once. Position is therefore permuted freely
+# within House.
+# ==============================================================
+
+perm_control_position_g1_houseperm <- permute::how(
+  nperm = nperm_houseperm,
+  blocks = meta_g1_houseperm$House,
+  within = permute::Within(
+    type = "free"
+  ),
+  complete = FALSE
+)
+
+
+perm_position_g1_houseperm <- permute::shuffleSet(
+  n = nrow(meta_g1_houseperm),
+  nset = nperm_houseperm,
+  control = perm_control_position_g1_houseperm
+)
+
+
+perm_control_position_g2_houseperm <- permute::how(
+  nperm = nperm_houseperm,
+  blocks = meta_g2_houseperm$House,
+  within = permute::Within(
+    type = "free"
+  ),
+  complete = FALSE
+)
+
+
+perm_position_g2_houseperm <- permute::shuffleSet(
+  n = nrow(meta_g2_houseperm),
+  nset = nperm_houseperm,
+  control = perm_control_position_g2_houseperm
+)
+
+
+# ==============================================================
+# 4. Helper to subset a distance matrix to one growout
+# ==============================================================
+
+subset_distance_houseperm <- function(
+  distance_object_houseperm,
+  metadata_houseperm
+) {
+
+  distance_matrix_houseperm <- as.matrix(
+    distance_object_houseperm
+  )
+
+  sample_ids_houseperm <- rownames(
+    metadata_houseperm
+  )
+
+
+  if (
+    !all(
+      sample_ids_houseperm %in%
+        rownames(distance_matrix_houseperm)
+    )
+  ) {
+
+    stop(
+      "Not all metadata samples were found in the distance matrix."
+    )
+  }
+
+
+  as.dist(
+    distance_matrix_houseperm[
+      sample_ids_houseperm,
+      sample_ids_houseperm,
+      drop = FALSE
+    ]
+  )
+}
+
+
+# ==============================================================
+# 5. Helper to run growout-specific Position PERMANOVA
+#
+# Formula:
+#   distance ~ Treatment + Position
+#
+# Only the Position row is retained because this permutation
+# design is appropriate for Position inference.
+# ==============================================================
+
+run_position_growout_houseperm <- function(
+  distance_object_houseperm,
+  metadata_houseperm,
+  permutation_matrix_houseperm,
+  metric_houseperm,
+  growout_houseperm
+) {
+
+  distance_growout_houseperm <- subset_distance_houseperm(
+    distance_object_houseperm,
+    metadata_houseperm
+  )
+
+
+  fit_position_growout_houseperm <- vegan::adonis2(
+    distance_growout_houseperm ~ Treatment + Position,
+    data = metadata_houseperm,
+    permutations = permutation_matrix_houseperm,
+    by = "margin"
+  )
+
+
+  fit_table_houseperm <- as.data.frame(
+    fit_position_growout_houseperm
+  )
+
+
+  if (
+    !"Position" %in% rownames(fit_table_houseperm)
+  ) {
+
+    stop(
+      paste(
+        "Position row not found for",
+        metric_houseperm,
+        "Growout",
+        growout_houseperm
+      )
+    )
+  }
+
+
+  data.frame(
+    Metric = metric_houseperm,
+    Analysis = paste0(
+      "Within G",
+      growout_houseperm,
+      " Position"
+    ),
+    Growout = as.character(
+      growout_houseperm
+    ),
+    Effect = "Position",
+    R2 = fit_table_houseperm[
+      "Position",
+      "R2"
+    ],
+    F = fit_table_houseperm[
+      "Position",
+      "F"
+    ],
+    P_value = fit_table_houseperm[
+      "Position",
+      "Pr(>F)"
+    ],
+    stringsAsFactors = FALSE
+  )
+}
+
+
+# ==============================================================
+# 6. Run Position tests for Growout 1
+# ==============================================================
+
+position_results_g1_houseperm <- dplyr::bind_rows(
+
+  run_position_growout_houseperm(
+    distance_object_houseperm = getElement(
+      distances_houseperm,
+      "Bray-Curtis"
+    ),
+    metadata_houseperm = meta_g1_houseperm,
+    permutation_matrix_houseperm = perm_position_g1_houseperm,
+    metric_houseperm = "Bray-Curtis",
+    growout_houseperm = "1"
+  ),
+
+  run_position_growout_houseperm(
+    distance_object_houseperm = getElement(
+      distances_houseperm,
+      "Unweighted UniFrac"
+    ),
+    metadata_houseperm = meta_g1_houseperm,
+    permutation_matrix_houseperm = perm_position_g1_houseperm,
+    metric_houseperm = "Unweighted UniFrac",
+    growout_houseperm = "1"
+  ),
+
+  run_position_growout_houseperm(
+    distance_object_houseperm = getElement(
+      distances_houseperm,
+      "Weighted UniFrac"
+    ),
+    metadata_houseperm = meta_g1_houseperm,
+    permutation_matrix_houseperm = perm_position_g1_houseperm,
+    metric_houseperm = "Weighted UniFrac",
+    growout_houseperm = "1"
+  )
+)
+
+
+# ==============================================================
+# 7. Run Position tests for Growout 2
+# ==============================================================
+
+position_results_g2_houseperm <- dplyr::bind_rows(
+
+  run_position_growout_houseperm(
+    distance_object_houseperm = getElement(
+      distances_houseperm,
+      "Bray-Curtis"
+    ),
+    metadata_houseperm = meta_g2_houseperm,
+    permutation_matrix_houseperm = perm_position_g2_houseperm,
+    metric_houseperm = "Bray-Curtis",
+    growout_houseperm = "2"
+  ),
+
+  run_position_growout_houseperm(
+    distance_object_houseperm = getElement(
+      distances_houseperm,
+      "Unweighted UniFrac"
+    ),
+    metadata_houseperm = meta_g2_houseperm,
+    permutation_matrix_houseperm = perm_position_g2_houseperm,
+    metric_houseperm = "Unweighted UniFrac",
+    growout_houseperm = "2"
+  ),
+
+  run_position_growout_houseperm(
+    distance_object_houseperm = getElement(
+      distances_houseperm,
+      "Weighted UniFrac"
+    ),
+    metadata_houseperm = meta_g2_houseperm,
+    permutation_matrix_houseperm = perm_position_g2_houseperm,
+    metric_houseperm = "Weighted UniFrac",
+    growout_houseperm = "2"
+  )
+)
+
+
+# ==============================================================
+# 8. Combine new growout-specific Position results
+# ==============================================================
+
+position_results_growout_houseperm <- dplyr::bind_rows(
+  position_results_g1_houseperm,
+  position_results_g2_houseperm
+)
+
+
+cat(
+  "\n============================================================\n",
+  "GROWOUT-SPECIFIC POSITION PERMANOVA RESULTS\n",
+  "============================================================\n",
+  sep = ""
+)
+
+
+print(
+  position_results_growout_houseperm
+)
+
+
+# ==============================================================
+# 9. Add these results to the existing revised PERMANOVA summary
+#
+# This creates a NEW object and does not modify
+# permanova_results_houseperm.
+# ==============================================================
+
+permanova_results_heatmap_houseperm <- dplyr::bind_rows(
+
+  permanova_results_houseperm,
+
+  position_results_growout_houseperm
+)
+
+
+# ==============================================================
+# 10. Standardize effect names and heatmap row labels
+# ==============================================================
+
+permanova_heatmap_data_houseperm <-
+  permanova_results_heatmap_houseperm %>%
+  dplyr::mutate(
+
+    Effect_heatmap_houseperm =
+      dplyr::case_when(
+
+        Effect == "Treatment" ~
+          "Treatment",
+
+        Effect == "Growout" ~
+          "Growout",
+
+        Effect == "Position" ~
+          "Position",
+
+        Effect %in% c(
+          "Treatment:Growout",
+          "Growout:Treatment",
+          "Treatment x Growout"
+        ) ~
+          "Treatment:Growout",
+
+        TRUE ~
+          as.character(
+            Effect
+          )
+      ),
+
+    Growout_heatmap_houseperm =
+      dplyr::case_when(
+
+        grepl(
+          "Collective",
+          Analysis,
+          ignore.case = TRUE
+        ) ~
+          "Collective",
+
+        grepl(
+          "Treatment x Growout",
+          Analysis,
+          ignore.case = TRUE
+        ) ~
+          "Collective",
+
+        grepl(
+          "G1",
+          Analysis,
+          ignore.case = TRUE
+        ) ~
+          "1",
+
+        grepl(
+          "Growout 1",
+          Analysis,
+          ignore.case = TRUE
+        ) ~
+          "1",
+
+        grepl(
+          "G2",
+          Analysis,
+          ignore.case = TRUE
+        ) ~
+          "2",
+
+        grepl(
+          "Growout 2",
+          Analysis,
+          ignore.case = TRUE
+        ) ~
+          "2",
+
+        as.character(Growout) %in%
+          c(
+            "1",
+            "2",
+            "Collective"
+          ) ~
+          as.character(
+            Growout
+          ),
+
+        TRUE ~
+          NA_character_
+      ),
+
+    Col_houseperm =
+      paste(
+        Growout_heatmap_houseperm,
+        Metric,
+        sep = " | "
+      )
+  ) %>%
+  dplyr::filter(
+    !is.na(
+      Growout_heatmap_houseperm
+    ),
+    Effect_heatmap_houseperm %in%
+      c(
+        "Treatment",
+        "Growout",
+        "Position",
+        "Treatment:Growout"
+      )
+  )
+
+
+# ==============================================================
+# 11. Define heatmap ordering
+# ==============================================================
+
+term_order_houseperm <- c(
+  "Treatment",
+  "Growout",
+  "Position",
+  "Treatment:Growout"
+)
+
+
+row_order_houseperm <- c(
+
+  "Collective | Bray-Curtis",
+  "Collective | Unweighted UniFrac",
+  "Collective | Weighted UniFrac",
+
+  "1 | Bray-Curtis",
+  "1 | Unweighted UniFrac",
+  "1 | Weighted UniFrac",
+
+  "2 | Bray-Curtis",
+  "2 | Unweighted UniFrac",
+  "2 | Weighted UniFrac"
+)
+
+
+# ==============================================================
+# 12. Build R2 matrix
+# ==============================================================
+
+r2_df_heatmap_houseperm <-
+  permanova_heatmap_data_houseperm %>%
+  dplyr::select(
+    Effect_heatmap_houseperm,
+    Col_houseperm,
+    R2
+  ) %>%
+  dplyr::distinct() %>%
+  tidyr::complete(
+    Effect_heatmap_houseperm =
+      term_order_houseperm,
+    Col_houseperm =
+      row_order_houseperm
+  ) %>%
+  tidyr::pivot_wider(
+    names_from =
+      Col_houseperm,
+    values_from =
+      R2
+  ) %>%
+  dplyr::mutate(
+    Effect_heatmap_houseperm =
+      factor(
+        Effect_heatmap_houseperm,
+        levels =
+          term_order_houseperm
+      )
+  ) %>%
+  dplyr::arrange(
+    Effect_heatmap_houseperm
+  )
+
+
+rnames_r2_heatmap_houseperm <- as.character(
+  r2_df_heatmap_houseperm$Effect_heatmap_houseperm
+)
+
+
+r2_mat_heatmap_houseperm <- as.matrix(
+  r2_df_heatmap_houseperm[
+    ,
+    row_order_houseperm,
+    drop = FALSE
+  ]
+)
+
+
+rownames(
+  r2_mat_heatmap_houseperm
+) <- rnames_r2_heatmap_houseperm
+
+
+# ==============================================================
+# 13. Build p-value matrix
+# ==============================================================
+
+p_df_heatmap_houseperm <-
+  permanova_heatmap_data_houseperm %>%
+  dplyr::select(
+    Effect_heatmap_houseperm,
+    Col_houseperm,
+    P_value
+  ) %>%
+  dplyr::distinct() %>%
+  tidyr::complete(
+    Effect_heatmap_houseperm =
+      term_order_houseperm,
+    Col_houseperm =
+      row_order_houseperm
+  ) %>%
+  tidyr::pivot_wider(
+    names_from =
+      Col_houseperm,
+    values_from =
+      P_value
+  ) %>%
+  dplyr::mutate(
+    Effect_heatmap_houseperm =
+      factor(
+        Effect_heatmap_houseperm,
+        levels =
+          term_order_houseperm
+      )
+  ) %>%
+  dplyr::arrange(
+    Effect_heatmap_houseperm
+  )
+
+
+rnames_p_heatmap_houseperm <- as.character(
+  p_df_heatmap_houseperm$Effect_heatmap_houseperm
+)
+
+
+p_mat_heatmap_houseperm <- as.matrix(
+  p_df_heatmap_houseperm[
+    ,
+    row_order_houseperm,
+    drop = FALSE
+  ]
+)
+
+
+rownames(
+  p_mat_heatmap_houseperm
+) <- rnames_p_heatmap_houseperm
+
+
+# ==============================================================
+# 14. Confirm matrices align
+# ==============================================================
+
+stopifnot(
+  identical(
+    rownames(
+      r2_mat_heatmap_houseperm
+    ),
+    rownames(
+      p_mat_heatmap_houseperm
+    )
+  ),
+  identical(
+    colnames(
+      r2_mat_heatmap_houseperm
+    ),
+    colnames(
+      p_mat_heatmap_houseperm
+    )
+  )
+)
+
+
+# ==============================================================
+# 15. Print values used in the heatmap
+# ==============================================================
+
+cat(
+  "\n============================================================\n",
+  "HEATMAP R2 MATRIX\n",
+  "============================================================\n",
+  sep = ""
+)
+
+
+print(
+  round(
+    r2_mat_heatmap_houseperm,
+    4
+  )
+)
+
+
+cat(
+  "\n============================================================\n",
+  "HEATMAP P-VALUE MATRIX\n",
+  "============================================================\n",
+  sep = ""
+)
+
+
+print(
+  p_mat_heatmap_houseperm
+)
+
+
+# ==============================================================
+# 16. Transpose
+#
+# Rows:
+#   Growout | Metric
+#
+# Columns:
+#   Treatment
+#   Growout
+#   Position
+#   Treatment:Growout
+# ==============================================================
+
+r2_t_heatmap_houseperm <- t(
+  r2_mat_heatmap_houseperm
+)
+
+
+p_t_heatmap_houseperm <- t(
+  p_mat_heatmap_houseperm
+)
+
+
+# ==============================================================
+# 17. Row annotations
+# ==============================================================
+
+parse_row_heatmap_houseperm <- function(
+  lbl_houseperm
+) {
+
+  parts_houseperm <- getElement(
+    strsplit(
+      lbl_houseperm,
+      "\\s*\\|\\s*"
+    ),
+    1
+  )
+
+
+  if (
+    length(
+      parts_houseperm
+    ) != 2
+  ) {
+
+    parts_houseperm <- c(
+      lbl_houseperm,
+      ""
+    )
+  }
+
+
+  data.frame(
+
+    Growout =
+      parts_houseperm[1],
+
+    Metric =
+      parts_houseperm[2],
+
+    row.names =
+      lbl_houseperm,
+
+    check.rows =
+      FALSE
+  )
+}
+
+
+row_meta_heatmap_houseperm <- do.call(
+  rbind,
+  lapply(
+    rownames(
+      r2_t_heatmap_houseperm
+    ),
+    parse_row_heatmap_houseperm
+  )
+)
+
+
+# ==============================================================
+# 18. Annotation colors
+#
+# Same aesthetics as the existing heatmap.
+# ==============================================================
+
+anno_cols_heatmap_houseperm <- list(
+
+  Growout = c(
+    "1" = "#dbe9ff",
+    "2" = "#ffe8d5",
+    "Collective" = "#000004"
+  ),
+
+  Metric = c(
+    "Bray-Curtis" = "#fcffa4",
+    "Unweighted UniFrac" = "#bc3754",
+    "Weighted UniFrac" = "#440154"
+  )
+)
+
+
+row_anno_heatmap_houseperm <-
+  ComplexHeatmap::rowAnnotation(
+
+    df =
+      row_meta_heatmap_houseperm,
+
+    col =
+      anno_cols_heatmap_houseperm,
+
+    show_annotation_name =
+      FALSE,
+
+    annotation_legend_param =
+      list(
+        border = TRUE
+      ),
+
+    gp =
+      grid::gpar(
+        col = "black"
+      ),
+
+    simple_anno_size =
+      grid::unit(
+        0.25,
+        "cm"
+      )
+  )
+
+
+# ==============================================================
+# 19. R2 color scale
+#
+# Same cornsilk -> pink4 palette.
+# ==============================================================
+
+r2_max_obs_heatmap_houseperm <- suppressWarnings(
+  max(
+    r2_t_heatmap_houseperm,
+    na.rm = TRUE
+  )
+)
+
+
+r2_upper_heatmap_houseperm <- min(
+  0.5,
+  ifelse(
+    is.finite(
+      r2_max_obs_heatmap_houseperm
+    ),
+    max(
+      0.3,
+      r2_max_obs_heatmap_houseperm
+    ),
+    0.5
+  )
+)
+
+
+pal_r2_heatmap_houseperm <- circlize::colorRamp2(
+
+  c(
+    0,
+    r2_upper_heatmap_houseperm
+  ),
+
+  c(
+    "cornsilk",
+    "pink4"
+  )
+)
+
+
+# ==============================================================
+# 20. Significance asterisks
+# ==============================================================
+
+stars_heatmap_houseperm <- matrix(
+
+  "",
+
+  nrow =
+    nrow(
+      p_t_heatmap_houseperm
+    ),
+
+  ncol =
+    ncol(
+      p_t_heatmap_houseperm
+    ),
+
+  dimnames =
+    dimnames(
+      p_t_heatmap_houseperm
+    )
+)
+
+
+stars_heatmap_houseperm[
+  p_t_heatmap_houseperm < 0.05 &
+    !is.na(
+      p_t_heatmap_houseperm
+    )
+] <- "*"
+
+
+stars_heatmap_houseperm[
+  p_t_heatmap_houseperm < 0.01 &
+    !is.na(
+      p_t_heatmap_houseperm
+    )
+] <- "**"
+
+
+stars_heatmap_houseperm[
+  p_t_heatmap_houseperm < 0.001 &
+    !is.na(
+      p_t_heatmap_houseperm
+    )
+] <- "***"
+
+
+# ==============================================================
+# 21. R2 legend
+# ==============================================================
+
+legend_breaks_heatmap_houseperm <- seq(
+  0,
+  r2_upper_heatmap_houseperm,
+  length.out = 6
+)
+
+
+lgd_r2_heatmap_houseperm <- list(
+
+  title =
+    expression(
+      R^2
+    ),
+
+  title_gp =
+    grid::gpar(
+      fontsize = 12,
+      fontface = "bold"
+    ),
+
+  labels_gp =
+    grid::gpar(
+      fontsize = 10
+    ),
+
+  border =
+    "black",
+
+  lwd =
+    0.5,
+
+  direction =
+    "vertical",
+
+  title_position =
+    "topcenter",
+
+  at =
+    legend_breaks_heatmap_houseperm,
+
+  labels =
+    format(
+      legend_breaks_heatmap_houseperm,
+      digits = 2
+    ),
+
+  legend_width =
+    grid::unit(
+      3,
+      "cm"
+    ),
+
+  legend_height =
+    grid::unit(
+      3,
+      "cm"
+    ),
+
+  x =
+    grid::unit(
+      0.5,
+      "cm"
+    ),
+
+  y =
+    grid::unit(
+      0.5,
+      "cm"
+    ),
+
+  legend_gp =
+    grid::gpar(
+      col = "black",
+      lwd = 1
+    )
+)
+
+
+# ==============================================================
+# 22. Heatmap
+# ==============================================================
+
+ht_r2_heatmap_houseperm <- ComplexHeatmap::Heatmap(
+
+  r2_t_heatmap_houseperm,
+
+  name =
+    "R2",
+
+  col =
+    pal_r2_heatmap_houseperm,
+
+  na_col =
+    "gray",
+
+  left_annotation =
+    row_anno_heatmap_houseperm,
+
+  cluster_rows =
+    TRUE,
+
+  cluster_columns =
+    TRUE,
+
+  show_row_names =
+    FALSE,
+
+  show_column_names =
+    TRUE,
+
+  column_names_gp =
+    grid::gpar(
+      fontsize = 9,
+      col = "black"
+    ),
+
+  column_names_rot =
+    45,
+
+  rect_gp =
+    grid::gpar(
+      col = "black",
+      lwd = 2
+    ),
+
+  border_gp =
+    grid::gpar(
+      col = "black",
+      lwd = 2
+    ),
+
+  heatmap_legend_param =
+    lgd_r2_heatmap_houseperm,
+
+  cell_fun = function(
+    j,
+    i,
+    x,
+    y,
+    width,
+    height,
+    fill
+  ) {
+
+    lab_houseperm <- stars_heatmap_houseperm[
+      i,
+      j
+    ]
+
+
+    if (
+      !is.na(
+        lab_houseperm
+      ) &&
+      nzchar(
+        lab_houseperm
+      )
+    ) {
+
+      grid::grid.text(
+
+        lab_houseperm,
+
+        x =
+          x,
+
+        y =
+          y,
+
+        gp =
+          grid::gpar(
+            col = "black",
+            fontsize = 16,
+            fontface = "bold"
+          )
+      )
+    }
+  }
+)
+
+
+# ==============================================================
+# 23. Export
+# ==============================================================
+
+png(
+
+  "beta.heat.2.houseperm.with_position.png",
+
+  width =
+    3.80,
+
+  height =
+    5,
+
+  units =
+    "in",
+
+  res =
+    900,
+
+  bg =
+    "transparent"
+)
+
+
+ComplexHeatmap::draw(
+
+  ht_r2_heatmap_houseperm,
+
+  heatmap_legend_side =
+    "right",
+
+  annotation_legend_side =
+    "right",
+
+  padding =
+    grid::unit(
+      c(
+        5,
+        5,
+        5,
+        5
+      ),
+      "mm"
+    )
+)
+
+
+dev.off()
+
+```
+
